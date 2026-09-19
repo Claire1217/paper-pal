@@ -22,16 +22,23 @@
 </div>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
-  <img src="docs/images/hero-light.png" alt="Paper Pal 界面。左：论文大纲与审阅进度；中：以正文形式呈现的稿件，其中一处修改提议以红绿 diff 内嵌显示；右：提出该修改的评论卡片，带 Accept 和 Reject 按钮。">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-dark.svg">
+  <img src="docs/images/flow-light.svg" alt="Paper Pal 动画演示：在稿件里选中一句话并写下评论；修改提议以红绿逐词 diff 的形式出现在正文和评论卡片里；点击 Accept 后，句子被改写，文件被保存，该章节的审阅进度随之上升。">
 </picture>
 
-<p align="center"><sub>截图中的论文是虚构的，随仓库附带于 <a href="examples/sample-paper">examples/sample-paper</a>，运行 <code>npm run demo</code> 即可打开。</sub></p>
+<p align="center"><sub>动画是对审阅流程的示意，下方的截图才是应用本身。其中的论文都是虚构的，随仓库附带于 <a href="examples/sample-paper">examples/sample-paper</a>，运行 <code>npm run demo</code> 即可打开。</sub></p>
 
 
 ## 这是什么
 
 Paper Pal 在浏览器里打开你的 LaTeX 项目，把源码渲染成可读的正文：公式、引用、交叉引用都正常显示。你选中一段文字，说出哪里不对；你已经在用的 AI 给出改写，并以 diff 的形式与原文对照。对 `.tex` 文件的每一次写入，都来自你的一次点击。
+
+<p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
+  <img src="docs/images/hero-light.png" alt="Paper Pal 界面。左：论文大纲与审阅进度；中：以正文形式呈现的稿件，其中一处修改提议以红绿 diff 内嵌显示；右：提出该修改的评论卡片，带 Accept 和 Reject 按钮。">
+</picture>
+</p>
 
 <table>
 <tr>

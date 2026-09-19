@@ -66,6 +66,7 @@ npm run dev            # node --watch server.mjs (needs a configured project)
 npm run setup -- <paper-dir> [--json]   # writes <paper>/.paper-pal.json, never prompts
 npm run doctor -- [--json] [--ping]     # environment and provider checks
 npm run screenshots    # regenerates docs/images/*.png (see below)
+npm run animation      # regenerates docs/images/flow-*.svg (see below)
 ```
 
 ## Code map
@@ -81,7 +82,7 @@ npm run screenshots    # regenerates docs/images/*.png (see below)
 | `names.mjs` | Every on-disk and environment name, plus the pre-rename fallbacks. |
 | `env.mjs` | `.env` parser and loader (app folder only). |
 | `schemas/` | JSON Schemas of the four agent outputs. |
-| `scripts/` | `setup`, `doctor`, `demo`, `check`, `reanchor-confirmations`, `screenshots`. |
+| `scripts/` | `setup`, `doctor`, `demo`, `check`, `reanchor-confirmations`, `screenshots`, `readme-animation`. |
 | `bin/paper-pal.mjs` | `paper-pal <setup\|doctor\|start\|demo>` dispatcher. |
 | `examples/sample-paper/` | Fictional manuscript used by the demo, the tests and the screenshots. |
 | `tests/` | `*.test.mjs` suites, `helpers.mjs`, `portable.mjs`, `run.mjs`, `fixtures/fake-agent.mjs`. |
@@ -149,6 +150,14 @@ npm run screenshots        # flags: --only <names> --theme light|dark|both --no-
 
 Run it after a visible UI change and commit the images with the change. Never take screenshots
 of a real manuscript.
+
+The animated picture at the top of the READMEs is separate: `npm run animation` runs
+`scripts/readme-animation.mjs` and rewrites `docs/images/flow-light.svg` and `flow-dark.svg`. It is
+a drawing of the review loop (select, comment, diff, accept), not a recording: one SVG per theme,
+animated with CSS keyframes only, because that is what GitHub plays inside `<img>`. The script lays
+the text out itself, measures it with the app's fonts (Playwright, as above) and embeds those
+fonts. Its colours are copies of the tokens in `public/styles.css` and its passage is the one in
+the hero screenshot; change them together.
 
 ## PR checklist
 

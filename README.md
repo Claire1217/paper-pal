@@ -22,16 +22,23 @@ and nothing is written to your `.tex` files until you click **Accept**.
 </div>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
-  <img src="docs/images/hero-light.png" alt="Paper Pal. Left: the paper's outline with review progress. Middle: the manuscript shown as prose, with a proposed edit inline as a red and green diff. Right: the comment that asked for it, with Accept and Reject buttons.">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-dark.svg">
+  <img src="docs/images/flow-light.svg" alt="Paper Pal, animated. A sentence is selected in the manuscript and a comment is typed. The proposal arrives as a red and green word diff, inline and in the comment card. Accept is clicked: the sentence is rewritten, the file is saved, and the section's review progress goes up.">
 </picture>
 
-<p align="center"><sub>The manuscript in the screenshots is fictional. It ships in <a href="examples/sample-paper">examples/sample-paper</a>, and <code>npm run demo</code> opens it.</sub></p>
+<p align="center"><sub>The animation is a drawing of the review loop; the screenshots below are the app itself. The manuscript in all of them is fictional. It ships in <a href="examples/sample-paper">examples/sample-paper</a>, and <code>npm run demo</code> opens it.</sub></p>
 
 
 ## What it is
 
 Paper Pal opens your LaTeX project in the browser and shows the source as readable prose, with math, citations and cross-references rendered. You select a passage and say what is wrong with it; the AI you already use answers with a rewrite, shown as a diff against your words. Every write to a `.tex` file is a click of yours.
+
+<p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
+  <img src="docs/images/hero-light.png" alt="Paper Pal. Left: the paper's outline with review progress. Middle: the manuscript shown as prose, with a proposed edit inline as a red and green diff. Right: the comment that asked for it, with Accept and Reject buttons.">
+</picture>
+</p>
 
 <table>
 <tr>

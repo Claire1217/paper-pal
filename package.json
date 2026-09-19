@@ -67,6 +67,7 @@
     "demo": "node scripts/demo.mjs",
     "check": "node scripts/check.mjs",
     "screenshots": "node scripts/screenshots.mjs",
+    "animation": "node scripts/readme-animation.mjs",
     "test": "npm run check && npm run test:portable && npm run test:suite",
     "test:portable": "node tests/portable.mjs",
     "test:suite": "node tests/run.mjs"
