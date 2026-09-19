@@ -43,6 +43,6 @@
     "test:suite": "node tests/run.mjs"
   },
   "dependencies": {
-    "katex": "^0.18.1"
+    "katex": "^0.18.7"
   }
 }
