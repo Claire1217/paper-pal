@@ -30,7 +30,7 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - A proposal that changes LaTeX the prose view does not show (`\label`,
   `\vspace`, `\index`, `\nocite`, comments, ...) carries a warning on its
   card, with a "Show source" toggle for the raw before/after source.
-- New brand mark: two nested letters P, in the logo, the favicon, the top bar
+- New brand mark: two nested letters P on a transparent ground (no tile), in the logo, the favicon, the top bar
   and the social preview.
 - Every README screenshot has a dark variant; `npm run screenshots` takes every
   scene in both themes.

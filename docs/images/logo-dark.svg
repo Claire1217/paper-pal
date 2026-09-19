@@ -4,7 +4,7 @@
        stroke, on a transparent ground. logo.svg is for light backgrounds and
        logo-dark.svg for dark ones; the favicon and the top-bar mark
        (public/index.html) use the same two paths on a 32-unit grid. -->
-  <g transform="translate(-61.5 -62) scale(0.2)" fill="none" stroke="#151515" stroke-width="72" stroke-linecap="round" stroke-linejoin="round">
+  <g transform="translate(-61.5 -62) scale(0.2)" fill="none" stroke="#f2f2f2" stroke-width="72" stroke-linecap="round" stroke-linejoin="round">
     <path d="M386 885V575A194 200 0 0 1 580 375H685A185 185 0 0 1 685 745H638"/>
     <path d="M516 885V577A77 77 0 0 1 593 500H680A58.5 58.5 0 0 1 680 617H632"/>
   </g>

@@ -138,7 +138,7 @@ as `<name>-light.png` and `<name>-dark.png` (the READMEs pair them in `<picture>
 `social-preview.png` from `docs/images/src/social-preview.html`. It works on
 a temporary copy of the sample paper, calls no model (agent-dependent state is injected in the
 browser), and cleans up after itself. The brand mark is hand-written SVG in two drawings:
-`docs/images/logo.svg`, and a simplified 32-unit version for the favicon and `.brand-mark` in
+`docs/images/logo.svg` (with `logo-dark.svg` for dark backgrounds), and a 32-unit version for the favicon and `.brand-mark` in
 `public/index.html`. Change them together, then regenerate the images. Playwright is deliberately
 not a dependency; install it for one run:
 

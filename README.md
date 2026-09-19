@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="docs/images/logo.svg" width="64" alt="Paper Pal logo">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
+  <img src="docs/images/logo.svg" width="72" alt="Paper Pal logo">
+</picture>
 
 # Paper Pal
 

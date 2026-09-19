@@ -640,7 +640,7 @@ button:disabled { cursor: default; }
   padding: 0 var(--sp-4);
   border-right: 1px solid var(--line);
 }
-.brand-mark { width: 28px; height: 28px; flex: 0 0 auto; display: block; border-radius: var(--r-md); box-shadow: var(--shadow-sm); }
+.brand-mark { width: 28px; height: 28px; flex: 0 0 auto; display: block; color: var(--ink, currentColor); }
 .brand-copy { min-width: 0; display: grid; gap: 1px; line-height: 1.15; }
 .brand-copy strong { font-size: 15px; font-weight: 650; letter-spacing: -.015em; }
 .brand-copy small { overflow: hidden; color: var(--ink-quiet); font-size: var(--fs-2xs); text-overflow: ellipsis; white-space: nowrap; }
