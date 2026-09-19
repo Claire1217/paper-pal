@@ -46,6 +46,16 @@ jobs:
       # The suite needs no LaTeX, no agent CLI, no API key and no network:
       # it uses a fake agent, a fake LaTeX command and local mock API servers.
       - name: Test
-        run: npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test.log
         env:
           PAPER_PAL_ENV_FILE: none
+
+      # Surface the failing tests as annotations, so a failure can be read
+      # from the run summary without opening the raw log.
+      - name: Summarise failures
+        if: failure()
+        shell: bash
+        run: node scripts/ci-failures.mjs test.log
