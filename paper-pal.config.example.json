@@ -1,0 +1,85 @@
+{
+  "title": "My Paper",
+  "projectLabel": "Local LaTeX project",
+  "sourceRoot": ".",
+  "defaultDocument": "main.tex",
+  "pdf": "main.pdf",
+  "latex": {
+    "enabled": true,
+    "cwd": ".",
+    "command": "latexmk",
+    "args": ["-pdf", "-interaction=nonstopmode", "-halt-on-error", "main.tex"]
+  },
+  "agent": {
+    "enabled": true,
+    "provider": "codex",
+    "allowOverride": true,
+    "autoProcessComments": true,
+    "promptMode": "minimal",
+    "reasoningEffort": "low",
+    "timeoutMs": 90000,
+    "projectReasoningEffort": "medium",
+    "projectTimeoutMs": 180000,
+    "chatReasoningEffort": "medium",
+    "chatTimeoutMs": 300000,
+    "chatConcurrency": 1,
+    "reviewLanguage": "en",
+    "contextBudgetChars": 120000,
+    "entryPoints": ["main.tex"],
+    "guidanceFiles": ["AGENTS.md", "CLAUDE.md"],
+    "terminologyFiles": []
+  },
+  "codex": {
+    "command": "codex",
+    "model": "",
+    "chatModel": "",
+    "models": []
+  },
+  "claude": {
+    "command": "claude",
+    "model": "",
+    "chatModel": "",
+    "models": [],
+    "permissionMode": "",
+    "allowedTools": []
+  },
+  "openai": {
+    "model": "",
+    "chatModel": "",
+    "models": []
+  },
+  "anthropic": {
+    "model": "",
+    "chatModel": "",
+    "models": [],
+    "maxTokens": 8192
+  },
+  "openrouter": {
+    "model": "",
+    "chatModel": "",
+    "models": []
+  },
+  "deepseek": {
+    "model": "",
+    "chatModel": "",
+    "models": []
+  },
+  "ollama": {
+    "model": "",
+    "chatModel": "",
+    "models": [],
+    "baseUrl": "http://127.0.0.1:11434/v1"
+  },
+  "custom": {
+    "model": "",
+    "chatModel": "",
+    "models": [],
+    "protocol": "openai",
+    "apiKeyEnv": "PAPER_PAL_API_KEY"
+  },
+  "ui": {
+    "initialDocument": "main.tex",
+    "hiddenDocuments": []
+  },
+  "approvedDocuments": []
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Two sentences on what this section is doing well and where it is weakest, written to the author."
+    },
+    "findings": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 12,
+      "description": "One entry per place worth changing, strongest first. Return [] when the section needs nothing.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["selectedText", "level", "principle", "issue", "suggestion"],
+        "properties": {
+          "selectedText": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact, uniquely occurring text from the source that this finding is about, copied character for character including LaTeX markup. Anchor the smallest span that contains the problem."
+          },
+          "level": {
+            "type": "string",
+            "enum": ["argument", "paragraph", "sentence", "wording"],
+            "description": "argument: what the section claims or the order it claims it in. paragraph: what a paragraph is for and how it opens or closes. sentence: structure inside one sentence. wording: a term or phrase."
+          },
+          "principle": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The reading principle at stake, in plain words. For example: the new information is not in the stress position; the paragraph opens on something the reader has no context for; the action is buried in a noun."
+          },
+          "issue": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What a reader loses here, stated concretely. Not a restatement of the principle."
+          },
+          "suggestion": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What to do about it, written as an instruction the author could hand back as a comment."
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+node_modules/
+paper-pal.local.json
+review.local.json
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+*.pid
+
+# LaTeX build products
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.out
+*.synctex.gz
+examples/**/*.pdf
+
+# Local review state created inside a manuscript project
+.paper-pal/
+.draft-review/

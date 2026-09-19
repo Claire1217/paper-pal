@@ -1,0 +1,60 @@
+% ICML-style layout (NeurIPS style files behave similarly). Fictional content.
+\documentclass{article}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
+\usepackage[accepted]{icml2031}
+\icmltitlerunning{Counting Sheep Without Waking Them}
+\begin{document}
+\twocolumn[
+\icmltitle{Counting Sheep Without Waking Them}
+\icmlsetsymbol{equal}{*}
+\begin{icmlauthorlist}
+\icmlauthor{M\'aire N\'i Fhaol\'ain}{equal,nowhere}
+\icmlauthor{J\"org \O{}stergaard}{equal,sensing}
+\end{icmlauthorlist}
+\icmlaffiliation{nowhere}{University of Nowhere, Ballynowhere, Ireland}
+\icmlaffiliation{sensing}{Institute of Imaginary Sensing, Nirgendwo, Denmark}
+\icmlcorrespondingauthor{M\'aire N\'i Fhaol\'ain}{maire@example.org}
+\icmlkeywords{Thermal Imaging, Census}
+\vskip 0.3in
+]
+\printAffiliationsAndNotice{\icmlEqualContribution}
+\begin{abstract}
+A one-paragraph abstract about counting sleeping sheep with a learned blob splitter.
+\end{abstract}
+\section{Introduction}
+\label{submission}
+We train a small network to split huddles. Results are in \cref{tab:icml}.
+\begin{table}[t]
+\caption{Accuracy by farm.}
+\label{tab:icml}
+\vskip 0.15in
+\begin{center}
+\begin{small}
+\begin{sc}
+\begin{tabular}{lcr}
+\toprule
+Farm & Error & Nights \\
+\midrule
+Dunmore & 1.2$\pm$ 0.2 & 14 \\
+Sk\'ali & 2.0$\pm$ 0.3 & 15 \\
+\bottomrule
+\end{tabular}
+\end{sc}
+\end{small}
+\end{center}
+\vskip -0.1in
+\end{table}
+\section*{Impact Statement}
+This paper presents work whose goal is to let sheep sleep.
+\bibliography{refs}
+\bibliographystyle{icml2031}
+\newpage
+\appendix
+\onecolumn
+\section{You \emph{can} have an appendix here.}
+Appendix text.
+\end{document}

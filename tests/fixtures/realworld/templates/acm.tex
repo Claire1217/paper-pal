@@ -1,0 +1,80 @@
+% acmart layout. Fictional content.
+\documentclass[sigconf,review,anonymous]{acmart}
+\AtBeginDocument{\providecommand\BibTeX{{Bib\TeX}}}
+\setcopyright{acmlicensed}
+\copyrightyear{2031}
+\acmYear{2031}
+\acmDOI{10.0000/0000000.0000000}
+\acmConference[FLOCK '31]{Fictional Conference on Livestock Computing}{June 03--05, 2031}{Ballynowhere, IE}
+\acmISBN{978-0-0000-0000-0/31/06}
+
+\begin{document}
+
+\title{Counting Sheep Without Waking Them}
+\subtitle{A Thermal Drone Census}
+
+\author{M\'aire N\'i Fhaol\'ain}
+\email{maire@example.org}
+\orcid{0000-0000-0000-0000}
+\affiliation{%
+  \institution{University of Nowhere}
+  \city{Ballynowhere}
+  \country{Ireland}}
+
+\author{Fran\c{c}ois Le Berger}
+\affiliation{%
+  \institution{Institut Imaginaire}
+  \city{Nullepart}
+  \country{France}}
+\email{francois@example.org}
+
+\renewcommand{\shortauthors}{N\'i Fhaol\'ain and Le Berger}
+
+\begin{abstract}
+  We count sleeping sheep with a thermal drone. In acmart the abstract comes before \verb|\maketitle|.
+\end{abstract}
+
+\begin{CCSXML}
+<ccs2012>
+ <concept>
+  <concept_id>10010520.10010553.10010562</concept_id>
+  <concept_desc>Computer systems organization~Embedded systems</concept_desc>
+  <concept_significance>500</concept_significance>
+ </concept>
+</ccs2012>
+\end{CCSXML}
+
+\ccsdesc[500]{Computer systems organization~Embedded systems}
+\ccsdesc[300]{Applied computing~Agriculture}
+
+\keywords{thermal imaging, livestock census, drones}
+
+\begin{teaserfigure}
+  \includegraphics[width=\textwidth]{sampleteaser}
+  \caption{A sleeping flock from forty metres.}
+  \Description{Warm blobs on a dark hillside.}
+  \label{fig:teaser}
+\end{teaserfigure}
+
+\received{20 February 2031}
+\received[revised]{12 March 2031}
+\received[accepted]{5 June 2031}
+
+\maketitle
+
+\section{Introduction}
+ACM's consolidated article template uses \texttt{acmart}. Counting by eye is unreliable~\cite{brannigan2017dusk}.
+
+\begin{acks}
+To the sheep, for sleeping through it.
+\end{acks}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{refs}
+
+\appendix
+\section{Research Methods}
+Appendix text.
+
+\end{document}
+\endinput

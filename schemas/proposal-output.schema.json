@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replacementText", "summary", "relatedChanges"],
+  "properties": {
+    "replacementText": {
+      "type": "string",
+      "description": "Exact replacement passage, preserving required LaTeX and without extra commentary."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Concise description of the proposed change."
+    },
+    "relatedChanges": {
+      "type": "array",
+      "maxItems": 3,
+      "description": "Optional synchronized manuscript changes in other .tex files. Use an empty array when the selected passage is the only required change.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "selectedText", "replacementText", "summary", "reason", "required"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Repository-relative path under the configured manuscript source root, ending in .tex."
+          },
+          "selectedText": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact, uniquely occurring source text to replace in the related file."
+          },
+          "replacementText": {
+            "type": "string",
+            "description": "Exact replacement for selectedText in the related file."
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why this related change is needed for manuscript consistency."
+          },
+          "required": {
+            "type": "boolean",
+            "description": "True when applying the primary change without this change would leave the manuscript inconsistent."
+          }
+        }
+      }
+    }
+  }
+}

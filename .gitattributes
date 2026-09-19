@@ -1,0 +1,18 @@
+# Normalise line endings to LF in the repository and in every checkout.
+# The parser tests compare exact source offsets, so CRLF checkouts would break them.
+* text=auto eol=lf
+
+*.mjs   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.tex   text eol=lf
+*.bib   text eol=lf
+*.cff   text eol=lf
+
+public/fonts/*.woff2  binary
+docs/images/*.png     binary
+*.pdf                 binary

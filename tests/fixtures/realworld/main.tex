@@ -1,0 +1,72 @@
+% Paper Pal torture-test manuscript. Everything here is fictional: the study,
+% the data, the people and every reference. It compiles with pdflatex.
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{booktabs,multirow}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{tikz}
+\usepackage{comment}
+\usepackage{import}
+\usepackage{subfiles}
+\usepackage[numbers]{natbib}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\IfFileExists{CJKutf8.sty}{\usepackage{CJKutf8}}{}
+
+\input{macros}
+% Defined in a way Paper Pal cannot read, to stand in for a private style file.
+\expandafter\def\csname projectname\endcsname{Shepherd's Friend}
+\expandafter\newcommand\csname fancybox\endcsname[2]{\fbox{#1} #2}
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{flockrule}{Flock Rule}
+\theoremstyle{remark}
+\newtheorem*{remark}{Remark}
+
+\title{Counting Sheep Without Waking Them:\\ Thermal Drones for Overnight Flock Census on Upland Pastures}
+\author{M\'aire N\'i Fhaol\'ain\thanks{Corresponding author. Supported by the fictional Upland Futures grant UF-0042.} \and J\"org \O{}stergaard \and Fran\c{c}ois Le~Berger}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Farmers on unfenced upland pastures count their flocks by hand, at dusk, and usually get it wrong. We describe \sys, a census pipeline that flies a small thermal drone over a sleeping flock and counts warm bodies without waking them. Across $41$ nights on three farms, \sys{} agreed with a walked ground count to within \SI{1.8}{\percent}, against \SI{7.4}{\percent} for the farmers' own dusk counts.
+
+A second abstract paragraph explains that the disturbance score stayed below the waking threshold $\wake$ on every night but one, and that the whole pipeline runs on a laptop in the farmyard.
+\end{abstract}
+
+\keywords{thermal imaging, livestock census, unmanned aerial vehicles, point-process models}
+
+\input{sections/introduction}
+\input{sections/method.tex}
+\include{sections/results}
+% \input{sections/abandoned_draft}
+\subfile{chapters/fieldnotes}
+\input{sections/edgecases}
+\IfFileExists{CJKutf8.sty}{\input{sections/cjk}}{}
+
+\section*{Acknowledgements}
+We thank the three farming families, who asked not to be named, and the sheep, who were not asked.
+
+\appendix
+\subimport{appendix/}{proofs}
+\import{appendix/}{protocol}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}
+Notes after the end of the document are ignored by LaTeX and must stay hidden.

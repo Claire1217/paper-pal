@@ -1,0 +1,50 @@
+name: Feature request
+description: Suggest an improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not include unpublished manuscript text or API keys.** Describe your writing situation in general terms.
+        Paper Pal is deliberately small: local, one author, review-first, no build step, one runtime dependency. Requests that fit those limits are the easiest to accept.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like to happen
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds you tried
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Reading and editing view
+        - Comments, proposals and diffs
+        - LaTeX parsing
+        - AI backends
+        - Setup, doctor and configuration
+        - PDF compilation
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Fit
+      options:
+        - label: The source still changes only on an explicit author action, and nothing here needs the server to be reachable from other machines.
+          required: false

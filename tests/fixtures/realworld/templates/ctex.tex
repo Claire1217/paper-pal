@@ -1,0 +1,25 @@
+% ctex / xeCJK layout, compiled with XeLaTeX. Fictional content.
+\documentclass[UTF8,a4paper]{ctexart}
+\usepackage{xeCJK}
+\setCJKmainfont{Noto Serif CJK SC}
+\usepackage{amsmath}
+\newcommand{\sys}{\textsc{NightCount}}
+\title{夜间热成像无人机羊群清点方法}
+\author{倪 梅\thanks{通讯作者} \and 奥斯特 约格}
+\date{\today}
+\begin{document}
+\maketitle
+\begin{abstract}
+高地牧场的羊群清点长期依赖人工，误差较大。本文提出 \sys{} 系统，在不惊醒羊群的前提下完成夜间清点。
+\end{abstract}
+\section{引言}
+每年秋季，牧民需要将散放在高地的羊群赶回并清点数量。人工清点的误差约为 $5\%$ 至 $10\%$，且随羊群规模增大而上升。
+\subsection{主要贡献}
+\begin{enumerate}
+  \item 提出一种低扰动飞行方案；
+  \item 给出羊群计数模型 $\hat{N} = \sum_b s(b)$；
+  \item 在三个农场进行了实地验证。
+\end{enumerate}
+\section{结论}
+实验表明，\sys{} 的清点误差低于 \textbf{百分之二}，且不会惊醒羊群。
+\end{document}

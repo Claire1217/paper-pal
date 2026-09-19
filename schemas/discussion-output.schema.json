@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answer", "recommendation", "claimRisk", "options"],
+  "properties": {
+    "answer": {
+      "type": "string",
+      "description": "Direct answer to the author's question, grounded in the supplied paper and repository context."
+    },
+    "recommendation": {
+      "type": "string",
+      "description": "The recommended writing direction, without silently editing the manuscript."
+    },
+    "claimRisk": {
+      "type": "string",
+      "description": "Concise claim-scope or evidence risk assessment."
+    },
+    "options": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "wording"],
+        "properties": {
+          "label": { "type": "string" },
+          "wording": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use Paper Pal in work that leads to a publication, please cite it as below."
+type: software
+title: "Paper Pal"
+abstract: "A local-first, review-first AI writing workspace for LaTeX manuscripts. The author comments on a passage, an AI backend proposes a rewrite, and the source changes only when the author accepts the diff."
+authors:
+  - name: "claire1217"
+    alias: "claire1217"
+    website: "https://github.com/claire1217"
+version: "0.1.0"
+date-released: "2026-09-20"
+license: MIT
+repository-code: "https://github.com/claire1217/paper-pal"
+url: "https://github.com/claire1217/paper-pal"
+keywords:
+  - LaTeX
+  - academic writing
+  - manuscript review
+  - large language models
+  - local-first software

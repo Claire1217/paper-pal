@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "targets"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One sentence naming what the author asked for and how many other locations it reaches."
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 8,
+      "description": "Every other manuscript location the author's comment reaches. Return [] when the commented passage is the only affected location.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "selectedText", "comment", "reason"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Repository-relative path of a .tex file under the configured manuscript source root."
+          },
+          "selectedText": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact, uniquely occurring source text at the affected location. Anchor the smallest span that fully contains what must change."
+          },
+          "comment": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The review comment to place at this location, written as an instruction to the author, in the author's own terms."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why the author's original comment reaches this location."
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "name": "paper-pal",
+  "version": "0.1.0",
+  "description": "A local, review-first AI writing workspace for LaTeX manuscripts.",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://github.com/claire1217/paper-pal#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/claire1217/paper-pal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/claire1217/paper-pal/issues"
+  },
+  "keywords": [
+    "latex",
+    "academic-writing",
+    "manuscript",
+    "review",
+    "ai",
+    "llm",
+    "codex",
+    "claude",
+    "local-first",
+    "writing-assistant"
+  ],
+  "bin": {
+    "paper-pal": "bin/paper-pal.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "demo": "node scripts/demo.mjs",
+    "check": "node scripts/check.mjs",
+    "screenshots": "node scripts/screenshots.mjs",
+    "test": "npm run check && npm run test:portable && npm run test:suite",
+    "test:portable": "node tests/portable.mjs",
+    "test:suite": "node tests/run.mjs"
+  },
+  "dependencies": {
+    "katex": "^0.18.1"
+  }
+}

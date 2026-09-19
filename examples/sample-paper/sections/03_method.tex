@@ -1,0 +1,19 @@
+\section{Method}
+\label{sec:method}
+
+\subsection{Sites and recordings}
+
+We selected 48 sites in a mid-sized European city from a grid of 400 candidates, choosing them so that night-time illuminance and dawn noise level were nearly uncorrelated across the sample ($r = 0.08$). Each site held at least one territorial male blackbird throughout the study. An autonomous recorder captured audio from two hours before civil dawn until one hour after, on every rain-free morning from March to June in three consecutive years.
+
+Song onset was defined as the first of three blackbird song phrases occurring within one minute. Two annotators labelled a random 10\% of the recordings independently and agreed to within one minute on 94\% of them.
+
+\subsection{Model}
+
+Let $y_{ij}$ be song onset at site $i$ on morning $j$, measured in minutes relative to civil dawn. We fit the mixed model
+\begin{equation}
+  y_{ij} = \beta_0 + \beta_L \log_{10} L_i + \beta_N N_{ij} + \beta_T T_{ij} + \beta_D D_j + u_i + \varepsilon_{ij},
+  \label{eq:model}
+\end{equation}
+where $L_i$ is mean night-time illuminance in lux, $N_{ij}$ is the noise level in the hour before dawn, $T_{ij}$ is air temperature, $D_j$ is day of year, and $u_i \sim \mathcal{N}(0, \sigma_u^2)$ is a site intercept. The coefficient of interest is $\beta_L$: the change in onset, in minutes, for a tenfold increase in light.
+
+To test for saturation we replace the linear light term with a piecewise-linear term that has a single breakpoint $\tau$, estimated by profile likelihood.

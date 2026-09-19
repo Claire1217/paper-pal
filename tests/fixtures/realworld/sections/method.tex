@@ -1,0 +1,121 @@
+\section{Method}\label{sec:method}
+
+\subsection{Thermal model}
+Let $\vec{x} \in \R^2$ be a ground position and \(\heat(\vec{x})\) the measured surface temperature. A sheep appears as a warm blob; we write $\pair{u}{v}$ for a pixel and $\norm{\vec{x} - \vec{y}}$ for ground distance. The background is modelled as
+\[
+  \heat_0(\vec{x}) = a + \inner{\vec{b}}{\vec{x}}, \qquad a \in \R,\ \vec{b} \in \R^2 ,
+\]
+which is enough on the short flights we use. An unnumbered display also appears in dollars: $$ r = \unit[px]{12} $$ and the text continues after it.
+
+\begin{equation}
+  \lambda(\vec{x}) = \sum_{i=1}^{N} k\bigl(\norm{\vec{x} - \vec{s}_i}\bigr)
+  \label{eq:intensity}
+\end{equation}
+where $k$ is a smooth kernel. The count estimate is
+\begin{equation*}
+  \hat{N} = \argmin_{N \ge 0} \; \E\left[ \bigl( \census(\heat) - N \bigr)^2 \right] .
+\end{equation*}
+
+\begin{align}
+  L(\theta) &= \sum_{t=1}^{T} \log p(\heat_t \mid \theta) \label{eq:lik} \\
+            &= -\frac{1}{2\sigma^2} \sum_{t=1}^{T} \norm{\heat_t - \mu_\theta}^2 + C , \nonumber \\
+  \hat\theta &= \argmin_\theta \, -L(\theta) . \tag{MLE}
+\end{align}
+
+\begin{align*}
+  a &= b + c \\
+  d &= e
+\end{align*}
+
+\begin{gather}
+  x^2 + y^2 = r^2 \\
+  e^{i\pi} + 1 = 0
+\end{gather}
+
+\begin{multline}
+  f(a, b, c) = a^3 + b^3 + c^3 - 3abc \\
+  = (a + b + c)(a^2 + b^2 + c^2 - ab - bc - ca)
+\end{multline}
+
+\begin{equation}
+\begin{split}
+  S &= \sum_{i} w_i \\
+    &= 1
+\end{split}
+\end{equation}
+
+\begin{subequations}\label{eq:pair}
+\begin{equation}
+  \dot{p} = -\alpha p + \beta q
+\end{equation}
+\begin{equation}
+  \dot{q} = \alpha p - \beta q
+\end{equation}
+\end{subequations}
+
+The disturbance indicator is piecewise,
+\begin{equation}
+  D_t = \begin{cases}
+    1 & \text{if more than 5\% of animals stand at time } t, \\
+    0 & \text{otherwise,}
+  \end{cases}
+  \qquad
+  M = \begin{pmatrix} 1 & 0 \\ 0 & \gamma \end{pmatrix},
+  \quad
+  B = \begin{bmatrix} a & b \\ c & d \end{bmatrix} .
+\end{equation}
+
+\begin{eqnarray}
+  y &=& m x + c \\
+  z &=& y^2
+\end{eqnarray}
+
+An equation that KaTeX cannot typeset must degrade gracefully:
+\begin{equation}
+  \sideset{_a^b}{'}{\sum}_{i \in \mathcal{H}} w_i \heat_i
+\end{equation}
+
+\subsection{Guarantees}
+
+\begin{definition}[Huddle]\label{def:huddle}
+A \term{huddle} is a maximal set of animals whose thermal outlines are connected at the threshold $\wake$.
+\end{definition}
+
+\begin{theorem}[Consistency]
+\label{thm:consistency}
+Suppose the kernel $k$ is bounded and the flight height is fixed. Then $\hat{N} \to N$ in probability as the number of passes grows.
+\end{theorem}
+
+\begin{lemma}
+Huddles of size at most three are separable.
+\end{lemma}
+
+\begin{proof}
+By \cref{def:huddle}, a huddle of size $m \le 3$ has at most $m$ local maxima of $\lambda$ in \eqref{eq:intensity}. Counting maxima gives
+\[
+  \census(\heat) = m ,
+\]
+which proves the claim.
+\end{proof}
+
+\begin{proposition}
+The disturbance score is monotone in flight height.
+\end{proposition}
+
+\begin{remark}
+The converse of \cref{thm:consistency} is false; see \cref{app:proofs}.
+\end{remark}
+
+\begin{flockrule}
+Never fly upwind of a sleeping flock.
+\end{flockrule}
+
+\begin{quote}
+``You can fool a ewe once.'' --- a shepherd at Dunmore, on the first night of flights.
+\end{quote}
+
+\begin{quotation}
+A longer quotation runs to several sentences. It is set as its own paragraph and is editable like any other prose.
+
+It even has a second paragraph.
+\end{quotation}

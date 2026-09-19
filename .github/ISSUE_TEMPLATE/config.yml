@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/claire1217/paper-pal/security/advisories/new
+    about: Do not open a public issue for a vulnerability. Use GitHub's private report form.
+  - name: Documentation
+    url: https://github.com/claire1217/paper-pal#readme
+    about: Setup, configuration, backends and LaTeX conventions.

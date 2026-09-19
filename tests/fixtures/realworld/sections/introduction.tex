@@ -1,0 +1,31 @@
+\section{Introduction}
+\label{sec:intro}
+
+Every autumn, hill farmers gather their flocks from open moorland and count them. The count matters: subsidy claims, insurance and veterinary planning all depend on it\footnote{In the fictional jurisdiction we study, a miscount of more than 3\% voids the claim.}. Yet the count is made by eye, at dusk, on animals that \emph{move}. Earlier surveys report errors of 5--10\%~\citep{brannigan2017dusk}, and \citet{oyelaran2019flock} found that errors grow with flock size. A good overview is given by \textcite[ch.~2]{halloran2021pastoral}; see also the project page at \url{https://example.org/night_count?farm=3&run=7%20b#top} and the \href{https://example.org/data}{public data set}.
+
+\noindent We ask a simple question: can a drone count a \textbf{sleeping} flock without waking it? Sheep are \textit{very} good at noticing things that fly. The \texttt{alarm\_call} of a single ewe can move four hundred animals in under a minute, which one shepherd described as ``like watching a rug being pulled'' --- and which ruins the count. We therefore treat disturbance as a first-class outcome, not an afterthought; \textsc{NightCount} is designed around it. Prior drone work flew by day~\citep[see][p.~14]{vasquez2020aerial}, used visible light \parencite{vasquez2020aerial,brannigan2017dusk}, or ignored disturbance entirely~\autocite{tamm2018thermal}.\footcite{tamm2018thermal} As \citeauthor{tamm2018thermal} put it in \citeyear{tamm2018thermal}, ``the sheep were not consulted''.
+
+Our contributions are as follows.
+\begin{itemize}
+  \item A flight protocol (\Cref{sec:method}) that keeps the disturbance score below the waking threshold $\wake$ on \SI{98}{\percent} of nights.
+  \item A counting model that separates huddled animals, with a guarantee (\cref{thm:consistency}) and an algorithm (\autoref{alg:count}).
+  \item A field study on three farms:
+  \begin{enumerate}
+    \item Dunmore (lowland fringe, $n = 212$ ewes);
+    \item Sk\'ali (exposed plateau, $n = 388$);
+    \item Pe\~na Alta (steep, terraced, $n = 97$).
+  \end{enumerate}
+  \item Open data and code; see page~\pageref{sec:results} and \S\ref{sec:results}.
+\end{itemize}
+The rest of the paper is organised in the usual way. \todo{Tighten this paragraph once the results section is final.} \hl{Reviewer 2 asked for a limitations section.} \reviewer{JO}{I think this belongs in the discussion.}
+
+\begin{description}
+  \item[Census] A count of every animal in a flock at one moment.
+  \item[Disturbance score] The fraction of animals that stand up during a flight.
+\end{description}
+
+\subsection{A note on terminology}
+We say \term{huddle} for a group of animals whose thermal outlines touch, and \term{singleton} otherwise. Caf\'e-style spellings such as na\"ive, fa\c{c}ade, \AA{}ngstr\"om, stra{\ss}e, {\o}re, and \L{}\'od\'z appear on purpose. Prices are in \$ and \texteuro{}-free; the R\&D budget was under \#3 of the plan\_v2 list\ldots{} and so on\dots
+
+\paragraph{Scope.} We count sheep. Goats are future work.
+\subparagraph{A finer point.} Lambs under six weeks are counted with their mothers.

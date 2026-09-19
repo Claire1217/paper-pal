@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Paper Pal</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232d6653'/%3E%3Cpath d='M19.6 7.4l5 5L13 24l-6 1 1-6z' fill='%23fff'/%3E%3Cpath d='M17.2 9.8l5 5' stroke='%232d6653' stroke-width='1.6'/%3E%3Cpath d='M17 24.2l2.6 2.4 5.4-5.8' fill='none' stroke='%23a8d5c2' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <script>
+      // Resolve the theme before first paint so there is no flash. The choice
+      // is "light", "dark" or "system" (the default, which follows the OS).
+      (function () {
+        var choice = "system";
+        try { choice = localStorage.getItem("paper-pal.theme") || "system"; } catch (error) { /* no storage */ }
+        if (choice !== "light" && choice !== "dark") choice = "system";
+        var dark = choice === "dark" || (choice === "system" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+        document.documentElement.dataset.themeChoice = choice;
+      })();
+    </script>
+    <script>
+      // Opened straight from disk, the page cannot reach its server. Send the
+      // browser to the default address; this only ever navigates to localhost.
+      if (window.location.protocol === "file:") {
+        window.location.replace("http://127.0.0.1:4317/");
+      }
+    </script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand" aria-label="Paper Pal">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+            <rect width="32" height="32" rx="8" fill="#2d6653" />
+            <path d="M19.6 7.4l5 5L13 24l-6 1 1-6z" fill="#fff" />
+            <path d="M17.2 9.8l5 5" stroke="#2d6653" stroke-width="1.6" />
+            <path d="M17 24.2l2.6 2.4 5.4-5.8" fill="none" stroke="#a8d5c2" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span class="brand-copy">
+            <strong>Paper Pal</strong>
+            <small>Review-first writing, locally</small>
+          </span>
+        </div>
+
+        <div class="paper-identity">
+          <strong id="product-title">Paper Pal</strong>
+          <span class="identity-divider" aria-hidden="true"></span>
+          <label class="source-picker select-field" title="Switch source file">
+            <span aria-hidden="true"></span>
+            <select id="document-select" aria-label="Choose a LaTeX source"></select>
+          </label>
+          <div id="agent-picker" class="agent-picker" title="Which AI agent answers comments and project chat" hidden>
+            <span id="agent-picker-label" class="field-label">Agent</span>
+            <!-- The select stays the source of truth; the button and menu are its face,
+                 because a native option cannot show why an agent is unavailable. -->
+            <select id="agent-provider" class="visually-hidden" tabindex="-1" aria-hidden="true"></select>
+            <button id="agent-provider-button" class="select-button" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="agent-provider-menu" aria-labelledby="agent-picker-label agent-provider-current">
+              <span id="agent-provider-current">Agent</span>
+            </button>
+            <div id="agent-provider-menu" class="menu" role="listbox" aria-labelledby="agent-picker-label" hidden></div>
+          </div>
+          <label id="agent-model-picker" class="agent-picker" title="Which model this agent uses for comments" hidden>
+            <span class="field-label">Model</span>
+            <span class="select-field"><select id="agent-model" aria-label="Which model the agent uses"></select></span>
+          </label>
+        </div>
+
+        <div class="top-actions">
+          <button id="undo-button" class="button button-ghost" type="button" disabled title="Nothing to undo">Undo</button>
+          <button id="reload-button" class="button button-ghost" type="button" aria-label="Reload source from disk" title="Re-read this file from disk. Pending edits are saved first, so nothing you typed is lost.">Reload</button>
+          <button id="save-button" class="button button-status is-saved" type="button" title="Save this file now. Edits also save automatically.">Saved</button>
+          <span class="top-actions-divider" aria-hidden="true"></span>
+          <button id="compile-button" class="button button-ghost" type="button" title="Rebuild the PDF with latexmk">Compile</button>
+          <button id="preview-button" class="button button-ghost" type="button" aria-pressed="false" title="Show or hide the compiled PDF">Preview</button>
+          <div id="theme-picker" class="theme-picker">
+            <button id="theme-toggle" class="icon-button theme-toggle" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="theme-menu" aria-label="Theme: system" title="Theme: system">Theme</button>
+            <div id="theme-menu" class="menu theme-menu" role="menu" aria-label="Theme" hidden>
+              <button class="menu-item" type="button" role="menuitemradio" aria-checked="true" data-theme-value="system"><span class="menu-item-label">System</span><span class="menu-item-meta" data-theme-system-now></span></button>
+              <button class="menu-item" type="button" role="menuitemradio" aria-checked="false" data-theme-value="light"><span class="menu-item-label">Light</span></button>
+              <button class="menu-item" type="button" role="menuitemradio" aria-checked="false" data-theme-value="dark"><span class="menu-item-label">Dark</span></button>
+            </div>
+          </div>
+          <span id="connection-status" class="connection-status is-connecting" role="status" aria-label="Connecting to the local server" title="Connecting to the local Paper Pal server">Connecting…</span>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="outline-rail" aria-label="Document outline">
+          <div id="outline-pane-resizer" class="outline-pane-resizer" role="separator" aria-label="Resize document outline" aria-orientation="vertical" aria-valuemin="170" aria-valuemax="420" aria-valuenow="246" tabindex="0" title="Drag to resize · Double-click to reset">
+            <span aria-hidden="true"></span>
+          </div>
+          <section class="outline-summary">
+            <div class="outline-summary-head">
+              <p class="eyebrow">Paper review</p>
+              <button id="outline-mode-toggle" class="outline-mode-toggle" type="button" hidden>Proposed outline</button>
+            </div>
+            <div class="review-total">
+              <strong id="progress-value">0%</strong>
+              <span id="outline-count">Opening outline…</span>
+            </div>
+            <div class="progress-track" aria-hidden="true"><i id="progress-ring" style="--progress: 0"></i></div>
+          </section>
+
+          <nav id="outline-list" class="outline-list" aria-label="Sections">
+            <p class="empty-state">Opening outline…</p>
+          </nav>
+
+          <footer class="outline-footer">
+            <div class="legend" aria-label="How to read the manuscript">
+              <span><em class="legend-confirmed" aria-hidden="true">Aa</em>Confirmed by you</span>
+              <span><em class="legend-draft" aria-hidden="true">Aa</em>Draft, not yet reviewed</span>
+              <span><em class="legend-comment" aria-hidden="true"></em>Has a comment</span>
+            </div>
+            <div class="source-status">
+              <span id="compiled-source-status">main.tex</span>
+              <span id="project-label">Local LaTeX project</span>
+            </div>
+          </footer>
+        </aside>
+
+        <section class="editor-pane" aria-label="Editable document">
+          <header class="editor-header">
+            <div class="writing-title">
+              <h1 id="document-title">Loading document…</h1>
+              <p id="document-meta" class="document-meta"></p>
+            </div>
+            <nav class="workspace-mode-toggle" aria-label="Writing workspace">
+              <button id="show-text-workspace" class="is-active" type="button" aria-pressed="true">Text</button>
+              <button id="show-structure-workspace" type="button" aria-pressed="false">Structure</button>
+            </nav>
+            <div class="section-state" aria-label="Current source review progress">
+              <span>Source reviewed</span>
+              <i><b id="section-progress-fill"></b></i>
+              <strong id="section-progress-value">0%</strong>
+            </div>
+            <div class="section-review-actions" role="group" aria-label="Review actions">
+              <button id="review-section" class="button button-ghost button-small" type="button" title="Ask the agent to read the whole open file and list what to change. Nothing is rewritten.">Review file</button>
+              <button id="toggle-section-review" class="button button-ghost button-small" type="button" hidden>Confirm section</button>
+            </div>
+            <details id="reference-manager" class="reference-manager">
+              <summary><span id="reference-summary">References</span></summary>
+              <div class="reference-popover">
+                <label>
+                  <span>Find citation or label</span>
+                  <input id="reference-search" type="search" placeholder="Author, title, cite key…" autocomplete="off" />
+                </label>
+                <div id="reference-list" class="reference-list"></div>
+              </div>
+            </details>
+          </header>
+
+          <div id="external-change" class="change-banner" hidden>
+            <span id="external-change-message">The source changed outside this editor.</span>
+            <span class="change-banner-actions">
+              <button id="external-keep" type="button" hidden>Keep my edit</button>
+              <button id="external-reload" type="button">Use disk version</button>
+            </span>
+          </div>
+
+
+          <section id="structure-workspace" class="structure-workspace" aria-label="Paper structure workspace" hidden>
+            <header class="structure-workspace-header">
+              <div>
+                <p class="eyebrow">Argument structure</p>
+                <h2>Restructure the paper before rewriting prose</h2>
+                <p>Select one or more logical sections. Section boundaries follow the compiled paper, even when they cross LaTeX files.</p>
+              </div>
+              <span id="structure-scope-count" class="structure-scope-count">0 selected</span>
+            </header>
+            <div class="structure-columns">
+              <section class="structure-column" aria-labelledby="current-structure-title">
+                <header>
+                  <div>
+                    <p class="eyebrow">Current</p>
+                    <h3 id="current-structure-title">Current structure</h3>
+                  </div>
+                  <button id="select-main-sections" class="text-button" type="button">Select main paper</button>
+                </header>
+                <div id="current-structure-tree" class="structure-tree">
+                  <p class="empty-state">Loading the paper structure…</p>
+                </div>
+              </section>
+              <section class="structure-column proposed-structure-column" aria-labelledby="proposed-structure-title">
+                <header>
+                  <div>
+                    <p class="eyebrow">Proposed</p>
+                    <h3 id="proposed-structure-title">Proposed structure</h3>
+                  </div>
+                  <div class="structure-plan-actions">
+                    <span id="structure-proposal-status">No proposal yet</span>
+                    <button id="confirm-structure" class="button button-dark button-small" type="button" disabled>Approve structure plan</button>
+                    <button id="revert-structure" class="button button-ghost button-small" type="button" hidden>Discard approved plan</button>
+                  </div>
+                </header>
+                <div id="proposed-structure-tree" class="structure-tree proposed-structure-tree">
+                  <div class="structure-empty">
+                    <strong>Select a scope and ask the agent.</strong>
+                    <p>The proposed tree will appear here; no LaTeX is changed.</p>
+                  </div>
+                </div>
+              </section>
+            </div>
+            <footer class="structure-composer">
+              <label for="structure-instruction">What feels structurally wrong?</label>
+              <textarea id="structure-instruction" rows="3" placeholder="For example: Method and Experiments overlap; identify duplicated roles, missing transitions, and a better order."></textarea>
+              <div class="structure-composer-actions">
+                <span id="structure-status">Choose at least one section.</span>
+                <div>
+                  <button id="discuss-structure" class="button button-ghost" type="button">Discuss in Chat</button>
+                  <button id="generate-structure" class="button button-dark" type="button">Generate proposed tree</button>
+                </div>
+              </div>
+            </footer>
+          </section>
+
+          <article id="editor" class="editor">
+            <div class="loading-card">Opening the LaTeX source…</div>
+          </article>
+        </section>
+
+        <aside class="comments-pane" aria-label="Review sidebar">
+          <div id="review-pane-resizer" class="review-pane-resizer" role="separator" aria-label="Resize review sidebar" aria-orientation="vertical" aria-valuemin="260" aria-valuemax="720" aria-valuenow="340" tabindex="0" title="Drag to resize · Double-click to reset">
+            <span aria-hidden="true"></span>
+          </div>
+          <header class="comments-header">
+            <nav class="side-pane-tabs" role="tablist" aria-label="Review sidebar">
+              <button id="show-comments-pane" class="side-pane-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="comments-view">
+                <span>Comments</span>
+                <span id="request-count" class="count-badge is-zero">0</span>
+              </button>
+              <button id="open-codex-chat" class="side-pane-tab" type="button" role="tab" aria-selected="false" aria-controls="codex-chat">
+                <span>Chat</span>
+                <i aria-hidden="true"></i>
+              </button>
+            </nav>
+          </header>
+
+          <section id="codex-chat" class="codex-chat" role="tabpanel" aria-labelledby="open-codex-chat" hidden>
+            <header class="codex-chat-header">
+              <div>
+                <p class="eyebrow">Project chat</p>
+                <strong>Project agent</strong>
+                <span id="codex-chat-model" class="codex-chat-model"></span>
+              </div>
+              <div class="codex-chat-header-actions">
+                <button id="toggle-chat-list" class="text-button" type="button" aria-expanded="false" aria-controls="codex-chat-list">Chats <span id="chat-list-count">1</span></button>
+                <button id="new-codex-chat" class="text-button" type="button">New chat</button>
+                <button id="close-codex-chat" class="icon-button" type="button" aria-label="Return to comments" title="Return to comments">×</button>
+              </div>
+            </header>
+            <aside id="codex-chat-list" class="codex-chat-list" aria-label="Chat history" hidden>
+              <div class="codex-chat-list-heading">
+                <strong>Chats</strong>
+                <span>Each chat keeps its own history and selected text.</span>
+              </div>
+              <div id="codex-chat-sessions" class="codex-chat-sessions"></div>
+            </aside>
+            <div class="codex-chat-context">
+              <span>Full manuscript + project</span>
+              <span id="codex-chat-document">Current document</span>
+            </div>
+            <div id="codex-chat-messages" class="codex-chat-messages" aria-live="polite">
+              <div class="codex-chat-empty">
+                <strong>Ask about the paper, code, or experiments.</strong>
+                <p>The agent can inspect the whole project. Inline comments remain the place for reviewable manuscript edits.</p>
+              </div>
+            </div>
+            <footer class="codex-chat-composer">
+              <textarea id="codex-chat-input" rows="3" aria-label="Message the agent" placeholder="Message the agent about this project…"></textarea>
+              <div class="codex-chat-composer-actions">
+                <span id="codex-chat-status">Ready</span>
+                <div>
+                  <button id="stop-codex-chat" class="button button-ghost" type="button" hidden>Stop</button>
+                  <button id="send-codex-chat" class="button button-dark" type="button">Send</button>
+                </div>
+              </div>
+            </footer>
+          </section>
+
+          <section id="paper-preview" class="paper-preview" role="dialog" aria-modal="false" aria-label="Paper preview" hidden>
+            <button id="paper-preview-size-toggle" class="paper-preview-edge-toggle" type="button" aria-pressed="false" aria-label="Expand the paper over the draft" title="Expand paper reader">‹</button>
+            <header class="paper-preview-header">
+              <div>
+                <p id="paper-preview-eyebrow" class="eyebrow">Reference</p>
+                <strong id="paper-preview-title">Paper preview</strong>
+              </div>
+              <button id="close-paper-preview" class="icon-button" type="button" aria-label="Close paper preview">×</button>
+            </header>
+            <nav id="paper-switcher" class="paper-switcher" aria-label="Cited papers"></nav>
+            <div id="paper-preview-content" class="paper-preview-content"></div>
+          </section>
+
+          <section id="comments-view" class="comments-view" role="tabpanel" aria-labelledby="show-comments-pane">
+            <div id="agent-notice" class="agent-notice" role="status" hidden>
+              <strong id="agent-notice-title"></strong>
+              <span id="agent-notice-detail"></span>
+            </div>
+            <div id="comments-track" class="comments-track">
+              <section id="comment-composer" class="comment-composer" aria-label="Rewrite comment" hidden>
+                <div class="composer-header">
+                  <span class="request-status composer-status">New comment</span>
+                  <button id="close-comment" class="icon-button" type="button" aria-label="Close comment">×</button>
+                </div>
+                <blockquote id="selected-quote"></blockquote>
+                <textarea id="comment-input" rows="3" aria-label="Comment or question" placeholder="Say what should change, or ask a question…"></textarea>
+                <p id="scope-hint" class="scope-hint" hidden></p>
+                <details class="composer-options">
+                  <summary>Options <span>Selected text · paper context</span></summary>
+                  <div class="composer-option-grid">
+                    <label>
+                      <span>Change</span>
+                      <select id="rewrite-scope" aria-label="Rewrite scope">
+                        <option value="selection">Selected text</option>
+                        <option value="paragraph">Whole paragraph</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Context</span>
+                      <select id="context-mode" aria-label="Context given to the agent">
+                        <option value="smart">Paper + code when needed</option>
+                        <option value="local">Current paragraph only</option>
+                        <option value="project">Full project review</option>
+                      </select>
+                    </label>
+                  </div>
+                </details>
+                <div class="composer-actions">
+                  <button id="cancel-comment" class="text-button" type="button">Cancel</button>
+                  <button id="ask-comment-in-chat" class="button button-ghost" type="button" title="Send this selection and question to Project Chat">Ask in Chat</button>
+                  <button id="find-linked" class="button button-ghost" type="button" title="Leave this comment, then place a linked comment at every other location it reaches. Nothing is rewritten.">Find linked</button>
+                  <button id="submit-comment" class="button button-dark" type="button">Comment</button>
+                </div>
+              </section>
+
+              <section id="review-panel" class="review-panel" aria-label="File review findings" tabindex="-1" hidden>
+                <header class="review-panel-head">
+                  <strong>File review</strong>
+                  <button id="review-panel-close" class="icon-button" type="button" aria-label="Close review">×</button>
+                </header>
+                <p id="review-summary" class="review-summary"></p>
+                <div id="review-findings" class="review-findings"></div>
+              </section>
+
+              <div id="request-list" class="request-list">
+                <div class="comments-empty">
+                  <strong>No comments here</strong>
+                  <span>Opening the manuscript…</span>
+                </div>
+              </div>
+            </div>
+
+            <details id="other-comments" class="other-comments" hidden>
+              <summary>Comments in other files <span id="other-request-count" class="count-badge">0</span></summary>
+              <div id="other-request-list" class="other-request-list"></div>
+            </details>
+
+            <footer class="comments-footer">
+              <span id="compile-status" class="compile-status">PDF ready</span>
+              <div class="git-card">
+                <span id="git-indicator" class="git-indicator">Checking Git…</span>
+                <button id="refresh-git" type="button" class="text-button" aria-label="Refresh Git status">Refresh</button>
+              </div>
+            </footer>
+
+            <details id="compile-details" class="compile-details" hidden>
+              <summary>Compilation details</summary>
+              <pre id="compile-log"></pre>
+            </details>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <div id="selection-toolbar" class="selection-toolbar" role="toolbar" aria-label="Selected text actions" hidden>
+      <button id="confirm-selection" type="button"><span aria-hidden="true">✓</span> Confirm</button>
+      <button id="comment-selection" class="comment-action" type="button"><span aria-hidden="true">＋</span> Comment</button>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
+    <script src="/vendor/katex/katex.min.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
