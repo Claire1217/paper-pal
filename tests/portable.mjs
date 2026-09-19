@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_NAME, TEMP_PREFIX } from "../names.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const fixtureRoot = await fs.mkdtemp(path.join(tmpdir(), `${TEMP_PREFIX}portable-`));
+const fixtureRoot = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), `${TEMP_PREFIX}portable-`)));
 let baseUrl = null;
 const mainPath = path.join(fixtureRoot, "main.tex");
 let server;

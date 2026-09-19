@@ -31,7 +31,9 @@ export const testEnvironment = {
 const cleanups = [];
 
 export async function makeTempDir(prefix = `${TEMP_PREFIX}test-`) {
-  const directory = await fs.mkdtemp(path.join(tmpdir(), prefix));
+  // realpath: on macOS the temp folder sits behind a symlink (/var -> /private/var),
+  // and tools that report their working directory give the resolved path.
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), prefix)));
   cleanups.push(() => fs.rm(directory, { recursive: true, force: true }));
   return directory;
 }
@@ -84,7 +86,13 @@ export async function makeProject({ files = null, from = null, directoryName = "
     const agentPath = path.join(root, "fake-agent.mjs");
     await fs.copyFile(fakeAgentSource, agentPath);
     await fs.chmod(agentPath, 0o755);
-    merged.codex = { ...(merged.codex || {}), command: agentPath };
+    // Windows cannot execute a .mjs file directly; give it a .cmd shim.
+    let command = agentPath;
+    if (process.platform === "win32") {
+      command = path.join(root, "fake-agent.cmd");
+      await fs.writeFile(command, `@echo off\r\n"${process.execPath}" "${agentPath}" %*\r\n`, "utf8");
+    }
+    merged.codex = { ...(merged.codex || {}), command };
     merged.agent.provider = "codex";
   } else if (!config.agent || config.agent.enabled === undefined) {
     merged.agent.enabled = false;
