@@ -4,6 +4,7 @@ import { existsSync, promises as fs, realpathSync, watch } from "node:fs";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { buildRelatedCommentContext } from "./agent-context.mjs";
 import {
@@ -3507,6 +3508,15 @@ function execFilePromise(command, args, options = {}) {
 const useProcessGroups = process.platform !== "win32";
 
 function signalChild(child, signal) {
+  // Windows has no process groups to signal, and CLI agents installed through
+  // npm run behind a .cmd shim: killing cmd.exe alone leaves the agent running.
+  if (process.platform === "win32" && child.pid) {
+    try {
+      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).on("error", () => {});
+    } catch {
+      // Fall through to the plain kill below.
+    }
+  }
   if (useProcessGroups && child.paperPalGroup && child.pid) {
     try {
       process.kill(-child.pid, signal);
@@ -7585,7 +7595,14 @@ async function serveAssetPreview(relativePath, response) {
 
 async function serveKatex(requestPath, response) {
   const requested = requestPath.replace(/^\/vendor\/katex\//, "");
-  const root = path.join(appRoot, "node_modules/katex/dist");
+  // Resolve like Node does: in a packaged install npm hoists katex next to
+  // Paper Pal instead of into its own node_modules.
+  let root = path.join(appRoot, "node_modules/katex/dist");
+  try {
+    root = path.join(path.dirname(createRequire(import.meta.url).resolve("katex/package.json")), "dist");
+  } catch {
+    // Keep the conventional location; the request then answers 404.
+  }
   const absolute = path.resolve(root, requested);
   const extension = path.extname(absolute).toLowerCase();
   if (absolute === root || !isInside(root, absolute) || !new Set([".js", ".css", ".woff", ".woff2", ".ttf"]).has(extension)) {
@@ -8018,6 +8035,7 @@ server.listen(port, host, () => {
     `  Project:  ${config.title} (${config.defaultDocument})`,
     `  Folder:   ${repoRoot}`,
     `  Agent:    ${providerState.label} - ${providerState.available ? "ready" : `not ready. ${providerState.reason}`}`,
+    ...(providerState.warning ? [`  WARNING:  ${providerState.warning}`] : []),
     `  PDF:      ${config.latex?.enabled === false ? "compilation disabled" : latexAvailable() ? `${config.latex.command} found` : `${config.latex.command} not found on PATH`}`,
     "  Press Ctrl+C to stop.",
   ].join("\n"));

@@ -66,7 +66,21 @@ command -v latexmk || echo "latexmk not found (optional)"
 ## Step 2. Clone and install
 
 Clone into the user's home folder or a tools folder. **Do not clone inside the
-paper's repository.**
+paper's repository.** First see whether the folder is free:
+
+```sh
+[ -e ~/paper-pal ] && git -C ~/paper-pal remote get-url origin
+```
+
+- No output: the folder does not exist. Clone.
+- A URL that ends in `claire1217/paper-pal` or `claire1217/paper-pal.git`
+  (any letter case, `https://` or `git@`): an earlier clone of this
+  repository. Do not clone again and do not delete it. Update it with
+  `git -C ~/paper-pal pull --ff-only && npm --prefix ~/paper-pal install`,
+  then continue with Step 3.
+- Any other URL, or `fatal: not a git repository`: the folder belongs to
+  something else. Leave it alone and ask the user for another folder. Use that
+  folder wherever this guide says `~/paper-pal`.
 
 ```sh
 git clone https://github.com/claire1217/paper-pal.git ~/paper-pal
@@ -76,9 +90,11 @@ npm install
 
 - Expected: `npm install` exits 0 and `node_modules/katex` exists. `katex` is
   the only runtime dependency, so this takes a few seconds.
-- `~/paper-pal` already exists: do not delete it. Run
-  `git -C ~/paper-pal pull --ff-only && npm --prefix ~/paper-pal install`
-  instead, or ask the user for another folder.
+- `git clone` fails with `destination path ... already exists`: you skipped
+  the check above. Run it now.
+- The clone stays clean: everything you create in it later (`.env`,
+  `paper-pal.log`, `paper-pal.<port>.pid`, `paper-pal.local.json`) is
+  git-ignored, so `git pull` keeps working.
 - Run every later command from the app folder (`cd ~/paper-pal`).
 
 ## Step 3. API key (API providers only)
@@ -109,7 +125,8 @@ Rules for you:
   start if it finds a field named `apiKey`, `key`, `token`, `secret` or similar
   there.
 - `.env` is git-ignored in the app folder. Do not force-add it.
-- To check that the key is in place without reading it, use Step 5.
+- To check that the key is in place without reading it, use the `env-file`
+  check of Step 5.
 
 ## Step 4. Configure the paper
 
@@ -162,6 +179,11 @@ Expected result, exit code 0 (shortened):
 }
 ```
 
+`next` holds the two commands that follow. With `--no-remember` they carry the
+`--repo` form, for example `npm run doctor -- --repo /absolute/path/to/paper`
+(the path is quoted when it contains a space). Add `--silent` and `--json` as
+shown in Step 5.
+
 Read `providerStatus.available`. When it is `false`, `providerStatus.reason`
 says what is missing (see Troubleshooting). Setup still exits 0 in that case:
 the app opens, but AI actions will not work until the reason is fixed. Show
@@ -210,6 +232,35 @@ Check ids, in order: `node`, `katex`, `env-file`, `config`, `main-document`,
 `latex`, then `provider:<id>` for each of the eight backends. Only the default
 backend is required (`severity: "error"`).
 
+Three provider entries from one real run. The default backend is ready, an
+optional one is ready, an optional one is not set up. Only the first could
+ever fail the run:
+
+```json
+{ "id": "provider:claude", "ok": true, "severity": "error", "detail": "Claude (default): 2.1.278 (Claude Code)", "fix": null },
+{ "id": "provider:openai", "ok": true, "severity": "info", "detail": "OpenAI API: ready (model <model-id>)", "fix": null },
+{ "id": "provider:deepseek", "ok": false, "severity": "info", "detail": "DeepSeek API: not set up (optional). Set DEEPSEEK_API_KEY in .env.", "fix": "Set DEEPSEEK_API_KEY in .env." }
+```
+
+For a CLI backend the detail is the first line that `<command> --version`
+prints. That is the only way doctor runs the backend binary: no prompt is
+sent and no model is called (without `--ping`, see below).
+
+The `env-file` check is always `ok: true`. Read its `detail`:
+
+- `no .env file (only needed for API providers; copy .env.example to .env)`
+- `.env found (0 variable(s) loaded)`: the file exists but every variable in
+  it is empty. This is a fresh copy of `.env.example`: the user has not saved
+  a key yet.
+- `.env found (1 variable(s) loaded)`: one variable has a value. Only
+  non-empty variables are counted, so this is how you confirm that the user
+  saved the key **without opening `.env`**. A variable that is already set in
+  the shell is reported separately (`, 1 already set in the shell`) and the
+  shell value wins.
+
+Then look at `provider:<id>` of the chosen provider: `ok: true` means the key
+variable and the model are both in place.
+
 Typical failures:
 
 | Check | Fix |
@@ -241,15 +292,29 @@ cd ~/paper-pal && npm start -- --open
 ```
 
 **B. Start it in the background yourself.** Call `node` directly so that the
-process id is the server's, not npm's:
+process id is the server's, not npm's (`npm` and `npx` do not pass a `kill` on
+to the server). The process id goes into a file in the app folder that is
+named after the port, so a second instance on another port does not overwrite
+it:
 
 ```sh
 cd ~/paper-pal
-nohup node server.mjs > paper-pal.log 2>&1 &
-echo $! > "${TMPDIR:-/tmp}/paper-pal.pid"
+PORT=4317
+nohup node server.mjs --port "$PORT" > paper-pal.log 2>&1 &
+echo $! > "paper-pal.$PORT.pid"
 sleep 2
 cat paper-pal.log
+echo "pid file: $PWD/paper-pal.$PORT.pid"
 ```
+
+The last line prints the full path of the pid file. Keep it for the report in
+Step 8. To stop this instance later:
+
+```sh
+kill "$(cat ~/paper-pal/paper-pal.4317.pid)" && rm -f ~/paper-pal/paper-pal.4317.pid
+```
+
+`paper-pal.log` and `paper-pal.<port>.pid` are git-ignored (`*.log`, `*.pid`).
 
 Expected log:
 
@@ -265,9 +330,10 @@ Paper Pal 0.1.0 is running at http://127.0.0.1:4317
 - `Port 4317 is already in use...` (exit code 1): another instance or another
   program has the port. Check `curl -s http://127.0.0.1:4317/api/health`. If
   it answers with `"name":"paper-pal"` and the right project title, Paper Pal
-  is already running. Otherwise add a port to the start command
-  (`npm start -- --port 4318`, or `node server.mjs --port 4318`; `--port 0`
-  picks any free port and prints it) and use that port everywhere below.
+  is already running. Otherwise choose another port (`npm start -- --port 4318`,
+  or `PORT=4318` in the block above; `--port 0` picks any free port and prints
+  it, so name the pid file after the port in the log) and use that port
+  everywhere below.
 - If you ran setup with `--no-remember`, also add
   `--repo "/absolute/path/to/paper"` to the start command.
 - If the log is still empty after two seconds, keep retrying the health check
@@ -334,11 +400,16 @@ App folder: ~/paper-pal   (your API key, if any, is in ~/paper-pal/.env and nowh
 
 Your .tex files change only on your own action in the page: Accept on a proposal, your own edit of a paragraph, resolving a tracked change, or Undo/Revert.
 
-Stop:      Ctrl+C in the terminal that runs it      (or: kill "$(cat "${TMPDIR:-/tmp}/paper-pal.pid")")
+Stop:      Ctrl+C in the terminal that runs it      (or: kill "$(cat <pid file>)" && rm -f <pid file>)
 Start:     cd ~/paper-pal && npm start [-- <the same --port / --repo flags you used>]
 Update:    cd ~/paper-pal && git pull && npm install
 Uninstall: stop the server, delete ~/paper-pal; to remove all traces from the paper also delete .paper-pal.json and .paper-pal/ (this deletes your comments and chat history)
 ```
+
+`<pid file>` is the full path that Step 6 B printed after `pid file:`, for
+example `/home/ana/paper-pal/paper-pal.4317.pid`. Write it out in full: no
+`~`, no `$TMPDIR`, no other variable, because the user's shell may resolve
+those differently from yours.
 
 Also tell the user which text leaves their machine: with an API provider or a
 CLI agent, the passages they comment on and surrounding manuscript text are
@@ -386,6 +457,12 @@ to change that). The copy is deleted when the server stops; `--keep` keeps it.
 It works with no backend at all: the page loads and AI actions say what is
 missing.
 
+Stop it with Ctrl+C. From a script, send SIGTERM to the `node scripts/demo.mjs`
+process itself (not to `npm` or `npx`, which do not pass the signal on), or
+write the line `stop` to its stdin when that is a pipe. The stdin line is the
+only orderly stop on native Windows, where `kill` ends a process without
+letting it clean up.
+
 ## Safety rules for you, the agent
 
 - Keep the server on loopback. Do not set `PAPER_PAL_HOST=0.0.0.0` or any
@@ -394,8 +471,8 @@ missing.
   and whoever reaches it can edit the manuscript and spend the user's API
   credit.
 - Do not commit `.env`, `paper-pal.local.json` or anything under `.paper-pal/`.
-- Do not set `PAPER_PAL_ALLOW_CUSTOM_LATEX`, `PAPER_PAL_ALLOW_CUSTOM_COMMANDS`
-  or `PAPER_PAL_ALLOW_PROJECT_BASE_URL` unless the user asks for it and
+- Do not set `PAPER_PAL_ALLOW_CUSTOM_LATEX`, `PAPER_PAL_ALLOW_CUSTOM_COMMANDS`,
+  `PAPER_PAL_ALLOW_PROJECT_BASE_URL` or `PAPER_PAL_ALLOW_PROJECT_KEY_ENV` unless the user asks for it and
   understands that the switch lets a project file choose which program runs
   or where the API key is sent.
 - Do not paste manuscript text, keys or files from `.paper-pal/` into issues,

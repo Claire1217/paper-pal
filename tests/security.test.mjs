@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { api, apiOk, cleanupAll, getDocument, makeProject, makeTempDir, rawRequest, startServer, stateDirectory } from "./helpers.mjs";
+import { api, apiOk, cleanupAll, getDocument, makeProject, makeTempDir, rawRequest, startServer, stateDirectory, trySymlink } from "./helpers.mjs";
 
 describe("HTTP hardening", () => {
   let project;
   let server;
   let outsideDirectory;
+  let linksCreated = false;
 
   before(async () => {
     project = await makeProject({
@@ -35,9 +36,11 @@ describe("HTTP hardening", () => {
     outsideDirectory = await makeTempDir("paper-pal-outside-");
     await fs.writeFile(path.join(outsideDirectory, "secret.tex"), "TOP SECRET OUTSIDE CONTENT\n", "utf8");
     await fs.writeFile(path.join(outsideDirectory, "secret.png"), "not really a png", "utf8");
-    await fs.symlink(path.join(outsideDirectory, "secret.tex"), path.join(project.root, "link.tex"));
-    await fs.symlink(path.join(outsideDirectory, "secret.png"), path.join(project.root, "link.png"));
-    await fs.symlink(outsideDirectory, path.join(project.root, "linked-dir"));
+    linksCreated = (await Promise.all([
+      trySymlink(path.join(outsideDirectory, "secret.tex"), path.join(project.root, "link.tex"), "file"),
+      trySymlink(path.join(outsideDirectory, "secret.png"), path.join(project.root, "link.png"), "file"),
+      trySymlink(outsideDirectory, path.join(project.root, "linked-dir"), "dir"),
+    ])).every(Boolean);
     server = await startServer(project.root);
   });
 
@@ -85,7 +88,8 @@ describe("HTTP hardening", () => {
     assert.equal(formPost.status, 415, "a body must be application/json");
   });
 
-  it("does not follow symlinks out of the source root", async () => {
+  it("does not follow symlinks out of the source root", async (t) => {
+    if (!linksCreated) return t.skip("this Windows account may not create symbolic links");
     const bootstrap = await apiOk(server, "/api/bootstrap");
     const listed = bootstrap.documents.map((item) => item.path);
     assert.ok(listed.includes("main.tex"));

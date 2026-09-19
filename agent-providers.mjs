@@ -1,4 +1,4 @@
-import { existsSync, promises as fs } from "node:fs";
+import { existsSync, promises as fs, openSync, readSync, closeSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -190,6 +190,33 @@ export function providerCommand(provider, config) {
   return resolveCommand(process.env[row.commandEnv] || config?.[resolved]?.command || row.defaultCommand);
 }
 
+/**
+ * A `codex` or `claude` on PATH is sometimes a small wrapper script that adds
+ * flags which switch the agent's sandbox or permission checks off. Paper Pal
+ * asks for a read-only agent, and such a wrapper can silently undo that, so
+ * say so. Only small text files are inspected; a real binary is never read.
+ */
+const UNSAFE_WRAPPER_FLAGS = ["--dangerously-bypass-approvals-and-sandbox", "--yolo", "--dangerously-skip-permissions", "danger-full-access"];
+
+export function inspectAgentCommand(executablePath) {
+  try {
+    const stats = statSync(executablePath);
+    if (!stats.isFile() || stats.size > 65536) return null;
+    const buffer = Buffer.alloc(stats.size);
+    const handle = openSync(executablePath, "r");
+    try {
+      readSync(handle, buffer, 0, stats.size, 0);
+    } finally {
+      closeSync(handle);
+    }
+    if (buffer.includes(0)) return null;
+    const flag = UNSAFE_WRAPPER_FLAGS.find((candidate) => buffer.includes(candidate));
+    return flag ? flag : null;
+  } catch {
+    return null;
+  }
+}
+
 const loopbackNames = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 export function isLoopbackUrl(value) {
@@ -304,9 +331,17 @@ export function providerAvailability(provider, config, env = process.env) {
   if (row.kind === "cli") {
     const command = env[row.commandEnv] || config?.[resolved]?.command || row.defaultCommand;
     const found = resolveExecutable(command, fallbackDirectories());
-    return found
-      ? { available: true, reason: null }
-      : { available: false, reason: `${path.basename(String(command))} CLI not found on PATH. Install it, or set ${row.commandEnv} in .env.` };
+    if (found) {
+      const flag = inspectAgentCommand(found);
+      return flag
+        ? {
+            available: true,
+            reason: null,
+            warning: `The ${path.basename(String(command))} command on PATH is a wrapper script that passes ${flag}, which turns the agent's read-only sandbox off. Point ${row.commandEnv} in .env at the real binary to keep agents read-only.`,
+          }
+        : { available: true, reason: null };
+    }
+    return { available: false, reason: `${path.basename(String(command))} CLI not found on PATH. Install it, or set ${row.commandEnv} in .env.` };
   }
   const settings = apiSettings(resolved, config, env);
   if (!settings.baseUrl) {
@@ -431,7 +466,11 @@ export async function buildAgentInvocation({
     return { command, args, input: fullPrompt, capturesStdout: true, provider: resolved };
   }
 
-  const args = ["-a", "never", "exec", "--ephemeral", "--sandbox", "read-only", "--color", "never"];
+  // The approval policy goes in as a config override, not as the global
+  // "-a never" flag: some setups put a wrapper named `codex` on PATH that adds
+  // --dangerously-bypass-approvals-and-sandbox, and the CLI refuses that flag
+  // together with --ask-for-approval before it runs anything.
+  const args = ["exec", "--ephemeral", "--sandbox", "read-only", "--config", 'approval_policy="never"', "--color", "never"];
   if (model) args.push("--model", String(model));
   if (reasoningEffort) args.push("--config", `model_reasoning_effort="${reasoningEffort}"`);
   if (schemaPath) args.push("--output-schema", schemaPath);

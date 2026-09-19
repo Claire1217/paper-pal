@@ -419,6 +419,63 @@ function appendTextDiff(container, beforeValue, afterValue, { emptyLabel = "Dele
   container.append(removedLine, addedLine);
 }
 
+// LaTeX that the prose view renders as nothing. A proposal that adds, drops or
+// changes one of these looks harmless (or empty) in the rendered diff, so the
+// card says so and offers the source. The list follows the server's hidden
+// text commands; the last alternative is a comment.
+const HIDDEN_LATEX_PATTERN = /\\(?:label|vspace|hspace|addvspace|phantom|hphantom|vphantom|index|glsadd|nocite|enlargethispage|looseness)(?![A-Za-z@])\*?\s*(?:=\s*-?\d+|(?:\[[^\]]*\])?\s*\{(?:[^{}]|\{[^{}]*\})*\})?|\\(?:noindent|indent|smallskip|medskip|bigskip|clearpage|cleardoublepage|newpage|pagebreak|nopagebreak|linebreak|nolinebreak|allowbreak|sloppy|fussy|hfill|vfill|protect|relax)(?![A-Za-z@])|(?<!\\)%[^\n]*/g;
+
+function hiddenLatexTokens(source) {
+  return (String(source ?? "").match(HIDDEN_LATEX_PATTERN) || []).map((token) => token.replace(/\s+/g, " ").trim());
+}
+
+// True when Accept would change source that the rendered before/after rows do
+// not show: the two read the same, or the hidden LaTeX in them differs.
+function proposalChangesHiddenSource(original, replacement, originalDisplay, replacementDisplay) {
+  if (typeof original !== "string" || typeof replacement !== "string" || original === replacement) return false;
+  const readable = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+  if (readable(originalDisplay) === readable(replacementDisplay)) return true;
+  return hiddenLatexTokens(original).join("\n") !== hiddenLatexTokens(replacement).join("\n");
+}
+
+// Which cards have their source rows open; cards are rebuilt on every refresh.
+const openSourceDiffs = new Set();
+
+function appendHiddenSourceWarning(card, request) {
+  const proposal = request.proposal;
+  if (!proposalChangesHiddenSource(proposal.originalText, proposal.replacementText, proposal.originalDisplay, proposal.replacementDisplay)) return;
+  const warning = document.createElement("div");
+  warning.className = "request-source-warning";
+  warning.setAttribute("role", "note");
+  const message = document.createElement("span");
+  message.textContent = "This proposal changes LaTeX that is not visible in the prose view — check the source diff.";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "request-source-toggle";
+  const source = document.createElement("div");
+  source.className = "request-diff request-source-diff";
+  source.id = `source-diff-${request.id}`;
+  source.setAttribute("aria-label", "LaTeX source before and after");
+  appendTextDiff(source, proposal.originalText, proposal.replacementText);
+  const apply = (open) => {
+    source.hidden = !open;
+    toggle.textContent = open ? "Hide source" : "Show source";
+    toggle.setAttribute("aria-expanded", String(open));
+  };
+  toggle.setAttribute("aria-controls", source.id);
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (openSourceDiffs.has(request.id)) openSourceDiffs.delete(request.id);
+    else openSourceDiffs.add(request.id);
+    apply(openSourceDiffs.has(request.id));
+    positionCommentCards();
+  });
+  source.addEventListener("click", (event) => event.stopPropagation());
+  apply(openSourceDiffs.has(request.id));
+  warning.append(message, toggle);
+  card.append(warning, source);
+}
+
 function currentSidePaneMode() {
   return dom.codexChat.hidden ? "comments" : "chat";
 }
@@ -4517,7 +4574,9 @@ function createRequestCard(request, { compact = false } = {}) {
       }
     });
     followup.append(followupInput, followupButton);
-    card.append(diff, actions, followup);
+    card.append(diff);
+    appendHiddenSourceWarning(card, request);
+    card.append(actions, followup);
   } else if (!compact && request.status === "pending") {
     const actions = document.createElement("div");
     actions.className = "request-actions";
@@ -5815,12 +5874,13 @@ function connectEvents() {
     events.addEventListener("document", (event) => {
       const value = JSON.parse(event.data);
       if (value.path !== state.document?.path || value.reason === "saved") return;
-      state.externalChange = true;
-      dom.externalChangeMessage.textContent = state.editing
-        ? "The source changed while you were editing. Your text is still preserved here."
-        : "The source changed outside this editor.";
-      dom.externalKeep.hidden = !state.editing;
-      dom.externalChange.hidden = false;
+      // Nothing local to protect: follow the disk quietly. The banner is for
+      // the case where reloading would cost the author something.
+      if (!hasLocalDocumentState()) {
+        reloadDocumentQuietly(value.path);
+        return;
+      }
+      showExternalChangeBanner();
     });
     events.onerror = () => {
       if (events !== source) return;
@@ -5840,6 +5900,41 @@ function connectEvents() {
   });
   window.addEventListener("pagehide", disconnect);
   connect();
+}
+
+// Local state that a reload from disk would discard or confuse: an unsaved
+// block edit or a save conflict, a comment being written, and everything that
+// already blocks a render (a caret in a block or proposal unit, a proposal
+// edit, a live selection in the manuscript).
+function hasLocalDocumentState() {
+  if (state.editing || state.savePromise || state.saveConflict) return true;
+  if (state.selection || state.commentDraft || !dom.commentComposer.hidden) return true;
+  return documentRenderBlocked();
+}
+
+function showExternalChangeBanner() {
+  state.externalChange = true;
+  dom.externalChangeMessage.textContent = state.editing
+    ? "The source changed while you were editing. Your text is still preserved here."
+    : "The source changed outside this editor.";
+  dom.externalKeep.hidden = !state.editing;
+  dom.externalChange.hidden = false;
+}
+
+// The open file changed on disk and this tab has nothing to lose: re-read it
+// where the author is, without a banner. If the read fails, or the author
+// started something while it was in flight, fall back to the banner.
+async function reloadDocumentQuietly(relativePath) {
+  const scrollTop = dom.editorPane.scrollTop;
+  let loaded = false;
+  try {
+    loaded = await loadDocument(relativePath, { quiet: true });
+  } catch {
+    loaded = false;
+  }
+  if (state.document?.path !== relativePath) return;
+  if (loaded) dom.editorPane.scrollTop = scrollTop;
+  else if (hasLocalDocumentState()) showExternalChangeBanner();
 }
 
 function escapeHtml(value) {

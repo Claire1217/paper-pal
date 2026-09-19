@@ -206,6 +206,19 @@ describe("agent timeouts", () => {
         return false;
       }
     };
+    if (process.platform === "win32") {
+      // Windows has no SIGTERM to ignore and no escalation: kill() ends the
+      // server's direct child at once. Here that child is the cmd.exe behind
+      // the .cmd shim, and the server signals nothing below it (see
+      // useProcessGroups in server.mjs), so the fake agent itself is not
+      // expected to be gone. End it, so it does not hold the temp folder open.
+      try {
+        process.kill(pid);
+      } catch {
+        // Already gone.
+      }
+      return;
+    }
     assert.equal(isAlive(), true, "SIGTERM alone does not stop this child");
     await waitFor(() => !isAlive(), { timeoutMs: 9000, label: "SIGKILL escalation" });
   });

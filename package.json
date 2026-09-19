@@ -27,6 +27,35 @@
   "bin": {
     "paper-pal": "bin/paper-pal.mjs"
   },
+  "files": [
+    "server.mjs",
+    "config.mjs",
+    "agent-providers.mjs",
+    "api-adapter.mjs",
+    "agent-context.mjs",
+    "names.mjs",
+    "env.mjs",
+    "bin/",
+    "public/",
+    "schemas/",
+    "examples/",
+    "scripts/setup.mjs",
+    "scripts/doctor.mjs",
+    "scripts/demo.mjs",
+    "scripts/reanchor-confirmations.mjs",
+    "docs/*.md",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "THIRD_PARTY.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "AGENTS.md",
+    "llms.txt",
+    "CITATION.cff",
+    ".env.example",
+    "paper-pal.config.example.json"
+  ],
   "engines": {
     "node": ">=20"
   },

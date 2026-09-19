@@ -59,14 +59,19 @@ Paper Pal opens your LaTeX project in the browser and shows the source as readab
 
 **1. Select and comment.** Pick anything from two words to several paragraphs and write what you want: tighten this, soften that claim, is this consistent with Section 4? The selection maps to exact source offsets, through math, citations and macros.
 
-<p><img src="docs/images/comment-light.png" alt="Two sentences selected in the abstract, with the comment composer open and a half-typed comment."></p>
+<p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/comment-dark.png">
+  <img src="docs/images/comment-light.png" alt="Two sentences selected in the abstract, with the comment composer open and a half-typed comment.">
+</picture>
+</p>
 
 **2. Review the diff.** The proposal appears inline in the manuscript and in the comment card, with a one-line rationale. Accept it, reject it, regenerate it, or reply to steer it.
 
 <p>
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/diff-dark.png">
-  <img src="docs/images/diff-light.png" alt="A proposed rewrite shown twice: inline in the manuscript as struck-through red and underlined green text, and as before and after rows in the comment card, above Reject and Accept buttons.">
+  <img src="docs/images/diff-light.png" alt="A proposed rewrite of a sentence that contains a citation, shown twice: inline in the manuscript, where the added clause is underlined in green and the citation is left as it was, and as before and after rows in the comment card, above Reject and Accept buttons.">
 </picture>
 </p>
 
@@ -74,11 +79,17 @@ Paper Pal opens your LaTeX project in the browser and shows the source as readab
 <tr>
 <td width="50%" valign="top">
 <p><b>3. Ask for a review.</b> <i>Review file</i> reads the file like a referee. You triage the findings; the ones you keep become ordinary comments.</p>
-<img src="docs/images/review-light.png" width="380" alt="Findings from a whole-file review, each of which can be kept as a comment.">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/review-dark.png">
+  <img src="docs/images/review-light.png" width="380" alt="Findings from a whole-file review, each of which can be kept as a comment.">
+</picture>
 </td>
 <td width="50%" valign="top">
 <p><b>4. Ask about the paper.</b> Chat answers questions about the project. A reply can become a proposal; chat itself never edits.</p>
-<img src="docs/images/chat-light.png" width="380" alt="Project chat answering a question about the paper.">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/chat-dark.png">
+  <img src="docs/images/chat-light.png" width="380" alt="Project chat answering a question about the paper.">
+</picture>
 </td>
 </tr>
 </table>
@@ -142,7 +153,12 @@ Use a command-line agent you are already signed in to (it comes with your Claude
 | **Custom** `custom` | any OpenAI-compatible URL |
 
 </td>
-<td width="300" valign="top"><img src="docs/images/backends-light.png" width="280" alt="The backend picker: command-line agents and API providers, with backends that are not ready saying what is missing."></td>
+<td width="300" valign="top">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/backends-dark.png">
+  <img src="docs/images/backends-light.png" width="280" alt="The backend picker: command-line agents and API providers, with backends that are not ready saying what is missing.">
+</picture>
+</td>
 </tr></table>
 
 > [!NOTE]
@@ -177,6 +193,14 @@ No default model ids ship with Paper Pal, because they go stale; take one from y
 - **Linked changes.** When a rewrite would leave another passage inconsistent, the agent can propose those edits too, and you confirm them as a set.
 - **Review progress.** Confirm paragraphs or whole sections as you read them; the outline shows how much of each section is done.
 - **Structure mode** for reorganising a section: agree on a paragraph plan first, then rewrite paragraph by paragraph.
+  <details>
+  <summary>Screenshot</summary>
+  <br>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/structure-dark.png">
+    <img src="docs/images/structure-light.png" width="720" alt="Structure mode: the paper's current sections on the left, the agent's proposed paragraph plan for Method on the right with rewrite, move and new marks, and a box for saying what feels structurally wrong.">
+  </picture>
+  </details>
 - **PDF pane** that recompiles with `latexmk` after accepted changes. Light and dark themes.
 
 Reference: [configuration](docs/configuration.md) · [LaTeX support and limits](docs/latex-conventions.md) · [backends](docs/backends.md) · [local HTTP API](docs/api.md) · [changelog](CHANGELOG.md)

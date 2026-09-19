@@ -436,21 +436,54 @@ describe("command line entry points", () => {
     assert.deepEqual(Object.keys(pkg.dependencies), ["katex"]);
   });
 
-  it("npm run demo serves a throwaway copy with no agent and no key, and cleans up", async () => {
+  it("the published package lists every module it needs and nothing for development", async () => {
+    const pkg = JSON.parse(await fs.readFile(path.join(appRoot, "package.json"), "utf8"));
+    // `files` is a whitelist, so a new root module that is not listed would be missing from the tarball.
+    const rootModules = (await fs.readdir(appRoot)).filter((name) => name.endsWith(".mjs"));
+    for (const name of rootModules) assert.ok(pkg.files.includes(name), `${name} is not in package.json "files"`);
+    for (const entry of ["bin/", "public/", "schemas/", "examples/", "scripts/setup.mjs", "scripts/doctor.mjs", "scripts/demo.mjs", ".env.example", "paper-pal.config.example.json"]) {
+      assert.ok(pkg.files.includes(entry), entry);
+    }
+    for (const entry of pkg.files.filter((value) => !value.includes("*"))) assert.ok(existsSync(path.join(appRoot, entry)), `${entry} does not exist`);
+    assert.deepEqual(pkg.files.filter((entry) => /^(tests|[.]github|docs\/images|node_modules)\b/.test(entry)), []);
+    assert.match(pkg.repository.url, /github[.]com\/claire1217\/paper-pal/i);
+  });
+
+  // Starts the demo and resolves once the banner shows the port and the copy.
+  async function startDemo(stdin) {
     const child = spawn(process.execPath, [path.join(appRoot, "scripts", "demo.mjs"), "--port", "0"], {
-      cwd: appRoot, env: { ...process.env, ...testEnvironment, ...noAgents, PATH: "/nonexistent" }, stdio: ["ignore", "pipe", "pipe"],
+      cwd: appRoot, env: { ...process.env, ...testEnvironment, ...noAgents, PATH: "/nonexistent" }, stdio: [stdin, "pipe", "pipe"],
     });
-    let output = "";
-    child.stdout.on("data", (chunk) => { output += chunk; });
-    child.stderr.on("data", (chunk) => { output += chunk; });
-    try {
-      const deadline = Date.now() + 20_000;
-      while (!/running at http:\/\/127\.0\.0\.1:(\d+)/.test(output)) {
-        if (Date.now() > deadline || child.exitCode !== null) throw new Error(`demo did not start:\n${output}`);
-        await new Promise((resolve) => setTimeout(resolve, 100));
+    const demo = { child, output: "" };
+    child.stdout.on("data", (chunk) => { demo.output += chunk; });
+    child.stderr.on("data", (chunk) => { demo.output += chunk; });
+    const deadline = Date.now() + 20_000;
+    while (!/running at http:\/\/127\.0\.0\.1:(\d+)/.test(demo.output)) {
+      if (Date.now() > deadline || child.exitCode !== null) {
+        child.kill("SIGKILL");
+        throw new Error(`demo did not start:\n${demo.output}`);
       }
-      const port = output.match(/running at http:\/\/127\.0\.0\.1:(\d+)/)[1];
-      const copy = output.match(/throwaway copy in (.+)/)[1].trim();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    demo.port = demo.output.match(/running at http:\/\/127\.0\.0\.1:(\d+)/)[1];
+    demo.copy = demo.output.match(/throwaway copy in (.+)/)[1].trim();
+    return demo;
+  }
+
+  async function assertStoppedAndClean(demo) {
+    const code = await new Promise((resolve) => (demo.child.exitCode !== null ? resolve(demo.child.exitCode) : demo.child.once("exit", resolve)));
+    assert.equal(code, 0, demo.output);
+    assert.ok(!existsSync(path.dirname(demo.copy)), `the copy is removed\n${demo.output}`);
+    await assert.rejects(fetch(`http://127.0.0.1:${demo.port}/api/health`), "the server is gone too");
+  }
+
+  // Stopped by the line "stop" on stdin: the one orderly stop that exists on
+  // every platform. On Windows kill() ends the demo at once, without running
+  // its handlers, so a signal can never show the clean-up there.
+  it("npm run demo serves a throwaway copy with no agent and no key, and cleans up", async () => {
+    const demo = await startDemo("pipe");
+    try {
+      const { port, copy } = demo;
       assert.ok(!copy.startsWith(appRoot), "the repository stays clean");
       assert.ok(existsSync(path.join(copy, CONFIG_NAME)));
       const health = await (await fetch(`http://127.0.0.1:${port}/api/health`)).json();
@@ -459,13 +492,22 @@ describe("command line entry points", () => {
       assert.equal(health.providers.find((item) => item.id === "codex").available, false);
       assert.equal(health.latex.enabled, false);
       assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200);
-      assert.match(output, /Agent:\s+Codex - not ready\./);
-      assert.match(output, /Press Ctrl\+C to stop/);
-      child.kill("SIGTERM");
-      await new Promise((resolve) => child.once("exit", resolve));
-      assert.ok(!existsSync(copy), "the copy is removed");
+      assert.match(demo.output, /Agent:\s+Codex - not ready\./);
+      assert.match(demo.output, /Press Ctrl\+C to stop/);
+      demo.child.stdin.write("stop\n");
+      await assertStoppedAndClean(demo);
     } finally {
-      if (child.exitCode === null) child.kill("SIGKILL");
+      if (demo.child.exitCode === null) demo.child.kill("SIGKILL");
+    }
+  });
+
+  it("npm run demo cleans up after SIGTERM", { skip: process.platform === "win32" && "Windows has no SIGTERM; kill() ends the process without running handlers" }, async () => {
+    const demo = await startDemo("ignore");
+    try {
+      demo.child.kill("SIGTERM");
+      await assertStoppedAndClean(demo);
+    } finally {
+      if (demo.child.exitCode === null) demo.child.kill("SIGKILL");
     }
   });
 });

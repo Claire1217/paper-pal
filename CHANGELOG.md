@@ -7,7 +7,48 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ## [Unreleased]
 
+### Fixed
+
+- **Codex runs failed with "the argument '--dangerously-bypass-approvals-and-sandbox'
+  cannot be used with '--ask-for-approval'"** when the `codex` on PATH is a
+  wrapper that adds that flag. Paper Pal now passes the approval policy as a
+  config override (`--config approval_policy="never"`) instead of the global
+  `-a never` flag.
+- Math did not render when Paper Pal was installed as a package, because npm
+  hoists `katex` out of Paper Pal's own `node_modules`. The server and
+  `doctor` now resolve it the way Node does.
+- Windows: a timed-out or cancelled agent run behind a `.cmd` shim is now
+  ended with its whole process tree (`taskkill /T`).
+
 ### Added
+
+- A warning, in the start banner and in `npm run doctor` (check id
+  `sandbox:<id>`), when the `codex` or `claude` command is a wrapper script
+  that passes a flag which switches the agent's sandbox or permission checks
+  off. Point `CODEX_BIN` / `CLAUDE_BIN` at the real binary to keep agents
+  read-only.
+- A proposal that changes LaTeX the prose view does not show (`\label`,
+  `\vspace`, `\index`, `\nocite`, comments, ...) carries a warning on its
+  card, with a "Show source" toggle for the raw before/after source.
+- New brand mark: two nested letters P, in the logo, the favicon, the top bar
+  and the social preview.
+- Every README screenshot has a dark variant; `npm run screenshots` takes every
+  scene in both themes.
+
+- `npm run demo` can be stopped in an orderly way by a supervising process:
+  the line `stop` on a piped stdin, or the IPC message `"shutdown"`. It also
+  handles SIGHUP (and Ctrl+Break on Windows), and removes its copy of the
+  sample paper only after the server has exited, retrying while Windows keeps
+  the folder locked. A failed removal names the folder that is left.
+- CI: the failing tests of a run are reported as annotations on the run summary
+  (`scripts/ci-failures.mjs`).
+- `package.json` has a `files` whitelist. The npm tarball holds what is needed
+  to run (server modules, `bin/`, `public/`, `schemas/`, `examples/`, the
+  `setup`, `doctor`, `demo` and `reanchor-confirmations` scripts, the docs as
+  Markdown, `.env.example`, `paper-pal.config.example.json`) and no longer the
+  tests, fixtures, `.github/`, `docs/images/` or the development scripts:
+  52 files and 0.6 MB instead of 110 files and 1.7 MB. A test fails when a new
+  root module is missing from the list.
 
 - The prose view copes with other people's LaTeX. It is tested against a
   multi-file torture manuscript (`tests/fixtures/realworld/`) with typical
@@ -50,6 +91,19 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Changed
 
+- When the open file changes on disk and the tab has no unsaved edit, open
+  comment, selection or proposal edit, the page reloads it quietly and keeps
+  the scroll position. The banner and the merge/conflict flow are unchanged
+  when there is local state.
+- docs/INSTALL-FOR-AGENTS.md: the background server's process id goes to
+  `paper-pal.<port>.pid` in the app folder instead of one global file under
+  `$TMPDIR`, and the report gives its full path. An existing `~/paper-pal` is
+  checked with `git remote get-url origin` before it is reused. The guide
+  explains doctor's `env-file` check (how to confirm a saved key without
+  opening `.env`), shows sample provider checks, and says what `next` holds
+  with `--no-remember`.
+- CI uses `actions/checkout@v7` and `actions/setup-node@v7` (Node 24 runtime;
+  the v4 actions printed a deprecation warning).
 - A command the parser does not know no longer leaks its name into the prose
   (`footnotex`, `urlhttps...`): the text of its arguments is shown, and a bare
   unknown command is shown as written, in grey monospace.
@@ -72,6 +126,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- Tests on macOS: temporary folders are resolved through the `/var` →
+  `/private/var` symlink, so path comparisons hold.
+- Tests on Windows (still experimental, the CI jobs do not fail the build):
+  the fake agent runs through a `.cmd` shim; the file-mode assertion and the
+  SIGTERM → SIGKILL escalation assertion are POSIX-only; symlink tests are
+  skipped where the account may not create links; the demo test stops the demo
+  over stdin, because `kill()` there ends a process without running its
+  handlers; temporary folders are removed with retries.
+- `npm run demo` left its temporary copy and its server behind when the demo
+  process itself failed, and never removed the copy on SIGHUP.
 - Data loss: editing any block of a file that is not valid UTF-8 (Latin-1,
   Windows-1252) rewrote the whole file as UTF-8 and turned every non-ASCII
   byte into U+FFFD, also in untouched blocks. Such a file is now read-only:
@@ -92,6 +156,17 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - `\\[4pt]` (a line break with a length) was taken for the start of `\[`
   display math.
 - The caption of a figure with subfigures was the first subfigure's caption.
+
+### Security
+
+- `<provider>.apiKeyEnv` in a project configuration may only name a provider
+  key variable (`OPENAI_API_KEY`, ...) or a `PAPER_PAL_*_KEY` variable, because
+  the value of that variable is sent to the API host. A project file could
+  otherwise send any environment variable to a host of its choosing.
+  `PAPER_PAL_ALLOW_PROJECT_KEY_ENV=1` in the shell or in Paper Pal's `.env`
+  lifts the restriction.
+- Request ids in API calls are capped in length (`rw_` plus at most 120
+  characters); a longer id is rejected before it is used as a file name.
 
 ## [0.1.0] - 2026-09-20
 

@@ -6,6 +6,7 @@
 //   node scripts/doctor.mjs [--repo <dir>] [--config <file>] [--port <n>] [--json] [--ping]
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -100,7 +101,13 @@ const nodeMajor = Number(process.versions.node.split(".")[0]);
 check("node", nodeMajor >= 20, "error", `Node.js ${process.versions.node}`, "Install Node.js 20 or newer (https://nodejs.org).");
 
 // 2. KaTeX (the only runtime dependency; renders math in the page)
-const katexFound = existsSync(path.join(appRoot, "node_modules", "katex", "dist", "katex.min.js"));
+let katexDist = path.join(appRoot, "node_modules", "katex", "dist");
+try {
+  katexDist = path.join(path.dirname(createRequire(import.meta.url).resolve("katex/package.json")), "dist");
+} catch {
+  // Not resolvable: the check below reports it.
+}
+const katexFound = existsSync(path.join(katexDist, "katex.min.js"));
 check("katex", katexFound, "error", katexFound ? "katex is installed" : "node_modules/katex is missing", "Run \"npm install\" in the Paper Pal folder.");
 
 // 3. .env (informational)
@@ -165,6 +172,9 @@ if (loaded) {
       `${state.label}${isDefault ? " (default)" : ""}: ${detail}`,
       state.reason,
     );
+    if (state.warning) {
+      check(`sandbox:${id}`, false, isDefault && !agentOff ? "warn" : "info", `${state.label}: ${state.warning}`, `Set ${PROVIDER_TABLE[id].commandEnv}=/path/to/the/real/binary in .env.`);
+    }
     // "Ready" for a keyless local provider only means a model is configured.
     // Say so when nothing is listening; a warning, because the app still opens.
     if (state.available && PROVIDER_TABLE[id].kind === "api" && !PROVIDER_TABLE[id].keyRequired) {

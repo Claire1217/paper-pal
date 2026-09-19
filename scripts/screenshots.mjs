@@ -13,7 +13,10 @@
 //
 // The pictures are framed for a README column: one 1240 px overview (hero) and
 // close-ups of one part of the window each, all at twice the CSS size, with
-// rounded corners and a hairline baked in. The acting agent is Claude Code.
+// rounded corners and a hairline baked in. Every scene is taken in the light
+// and in the dark theme (<name>-light.png, <name>-dark.png) for the READMEs'
+// <picture> elements; the social card is light only. The acting agent is
+// Claude Code.
 //
 // Playwright is deliberately not a dependency of Paper Pal. Install it for one
 // run with:   npm install --no-save playwright && npx playwright install chromium
@@ -40,6 +43,7 @@ const FRAME = { radius: 10, line: { light: "rgba(27, 31, 36, 0.2)", dark: "rgba(
 const SIZE_TARGET = 450 * 1024;
 const PAPER_TITLE = "Earlier Every Year";
 const INTRO = "sections/01_introduction.tex";
+const RELATED = "sections/02_related_work.tex";
 
 // ------------------------------------------------------------------ arguments
 function readArguments(argv) {
@@ -96,6 +100,19 @@ const TEXT = {
   exclusive: "Under this account the birds are not fooled by the light at all.",
 };
 
+// The close-up of a proposal uses a different passage from the overview: a
+// sentence of Related Work with a \citet in it, so the picture shows that a
+// citation comes through a rewrite untouched. The rewrite is one insertion, so
+// the diff reads at a glance. `{cite}` stands for the citation: \citet{…} in
+// the source, and in the card whatever the manuscript shows for it.
+const CITED = {
+  key: "tanaka2020gradient",
+  before: "To our knowledge only {cite} sampled both variables at the same sites, and their 14 sites were too few to separate the effects.",
+  after: "To our knowledge only {cite} sampled both variables at the same sites, and their 14 sites were too few, with light and noise too closely matched, to separate the effects.",
+  comment: "Too few is only half of it: their bright sites were also their loud ones. Say so.",
+  summary: "Adds the second reason in a clause. The citation is untouched.",
+};
+
 // Two sentences of the abstract, selected from the first words of one to the
 // last words of the other.
 const COMMENT_TARGET = ["Song onset advanced by 4.1 minutes", "before those in unlit parks."];
@@ -127,7 +144,7 @@ function requestFactory(document) {
   };
 }
 
-function buildFixtures(intro, structure) {
+function buildFixtures(intro, related, structure) {
   const make = requestFactory(intro);
   const proposalComment = "“The observation is old” has no source behind it. Cut it and go straight to the explanation.";
   const proposed = make("req-0001", TEXT.opening, {
@@ -248,9 +265,31 @@ function buildFixtures(intro, structure) {
     ],
   };
 
+  const citeSource = `\\citet{${CITED.key}}`;
+  const citedBlock = related.blocks.find((block) => block.raw.includes(citeSource));
+  const citation = citedBlock?.annotations?.find((annotation) => annotation.type === "citation" && annotation.keys.includes(CITED.key));
+  if (!citation) throw new Error(`examples/sample-paper no longer cites ${CITED.key} in ${RELATED}.`);
+  const citeDisplay = citedBlock.display.slice(citation.start, citation.end);
+  const cited = requestFactory(related)("req-0004", CITED.before.replace("{cite}", citeSource), {
+    status: "proposed",
+    agentStatus: "complete",
+    comment: CITED.comment,
+    proposal: {
+      originalText: CITED.before.replace("{cite}", citeSource),
+      replacementText: CITED.after.replace("{cite}", citeSource),
+      originalDisplay: CITED.before.replace("{cite}", citeDisplay),
+      replacementDisplay: CITED.after.replace("{cite}", citeDisplay),
+      summary: CITED.summary,
+    },
+    conversation: [
+      { role: "user", content: CITED.comment },
+      { role: "assistant", summary: CITED.summary },
+    ],
+  });
+
   // The proposal comes first in the file, so its card and its Accept and
   // Reject buttons are the first thing in the comments pane.
-  return { hero: [proposed, drafting, discussed], proposalOnly: [proposed], review, chat, chats, structureChat };
+  return { hero: [proposed, drafting, discussed], cited: [cited], review, chat, chats, structureChat };
 }
 
 // A typical machine: both command-line agents installed, one API key set and
@@ -273,6 +312,7 @@ function typicalProviders(providers) {
 const CONFIRMED = {
   "main.tex": "all",
   [INTRO]: ["\\section{Introduction}", "Anyone who has walked home", "That explanation may well be right"],
+  [RELATED]: ["\\section{Related Work}", "\\paragraph{", "Early surveys compared", "A separate literature argues"],
 };
 const OUTLINE_PROGRESS = { "main.tex": 100, [INTRO]: 43 };
 
@@ -443,6 +483,32 @@ async function closeUp(page, startSelector, aside, { through = aside, pad = 12, 
   return { x, y: top, width: side.right + pad - x, height: bottom - top };
 }
 
+// A proposal card with its passage. The passage is wherever the file puts it
+// (here the last paragraph, which cannot scroll to the top), so the crop runs
+// from the space above `startSelector`, or above the card if that is higher,
+// down to just below `through`: the Reject and Accept row. It refuses to cut
+// through a line of manuscript at either edge.
+async function proposalCloseUp(page, startSelector, aside, through, { pad = 12, margin = 24 } = {}) {
+  await scrollEditorTo(page, startSelector, 96);
+  const text = await boxOf(page, startSelector);
+  const side = await boxOf(page, aside);
+  const last = await boxOf(page, through);
+  const blocks = await page.evaluate(() => [...document.querySelectorAll("#editor > .editor-block")]
+    .map((block) => block.getBoundingClientRect())
+    .filter((box) => box.height > 0)
+    .map((box) => ({ top: box.top, bottom: box.bottom })));
+  const header = await boxOf(page, ".editor-header");
+  const wanted = Math.min(text.y - GAP, side.y - pad);
+  const top = Math.max(header.bottom, ...blocks.map((box) => box.top - GAP).filter((edge) => edge <= wanted));
+  const bottom = last.bottom + 8; // short of the rule that separates the follow-up box
+  const cut = blocks.find((box) => (box.top < top && box.bottom > top) || (box.top < bottom && box.bottom > bottom));
+  if (cut) throw new Error("The proposal close-up would cut through a line of manuscript.");
+  const floor = Math.min((await boxOf(page, ".comments-footer")).y, (await boxOf(page, ".editor-pane")).bottom);
+  if (bottom > floor) throw new Error(`The close-up would end ${Math.round(bottom - floor)} px below the panes; make its window taller.`);
+  const x = text.x - margin;
+  return { x, y: top, width: side.right + pad - x, height: bottom - top };
+}
+
 async function unionClip(page, selectors, pad) {
   const viewport = page.viewportSize();
   let left = Infinity;
@@ -494,7 +560,7 @@ async function frame(browser, png, { width, height }, theme) {
 // <file>-<theme>.png. A close-up uses a narrower window, as an author with a
 // smaller screen would have, so that the crop stays near README width.
 const CLOSE_UP = { width: 1044, height: 1000 };
-const WIDE_CARDS = { comments: 340 }; // 40 px more than that window's default
+const WIDE_CARDS = { comments: 384 }; // dragged wider than the default, so a card holds a whole diff
 
 const scenes = {
   hero: {
@@ -510,16 +576,23 @@ const scenes = {
   },
   diff: {
     themes: ["light", "dark"],
-    viewport: { ...CLOSE_UP, width: CLOSE_UP.width + 40 },
+    // Tall: the passage is the last paragraph of its file and cannot scroll up.
+    viewport: { width: CLOSE_UP.width + 40, height: 1340 },
     async run({ open, fixtures, save }) {
-      const { page, problems } = await open({ requests: fixtures.proposalOnly }, { panes: WIDE_CARDS });
+      // Not the overview's proposal: a sentence with a citation in it.
+      const { page, problems } = await open({ requests: fixtures.cited }, { documentPath: RELATED, panes: WIDE_CARDS });
       await page.waitForSelector(".request-card .request-diff");
-      await save(page, "diff", { clip: await closeUp(page, ".editor-block.has-proposal", ".request-card.request-proposed") });
+      const clipped = await page.locator(".request-card .request-diff").first().evaluate((diff) => diff.scrollHeight - diff.clientHeight);
+      if (clipped > 0) problems.push(`the before and after rows are ${clipped} px taller than their box`);
+      const kept = await page.locator(".editor-block.has-proposal [data-citation-keys]").count();
+      if (!kept) problems.push("the citation is not rendered inside the proposed passage");
+      // From the run-in heading of the paragraph down to the Reject and Accept row.
+      await save(page, "diff", { clip: await proposalCloseUp(page, `#editor > .editor-block:has-text("Separating the two.")`, ".request-card.request-proposed", ".request-card.request-proposed .request-actions") });
       return problems;
     },
   },
   comment: {
-    themes: ["light"],
+    themes: ["light", "dark"],
     viewport: { ...CLOSE_UP, height: 620 }, // short, so that the abstract can scroll up to the composer
     async run({ open, save }) {
       // main.tex: the title block and the abstract.
@@ -533,22 +606,24 @@ const scenes = {
     },
   },
   review: {
-    themes: ["light"],
+    themes: ["light", "dark"],
     viewport: { ...CLOSE_UP, width: CLOSE_UP.width + 40 },
     async run({ open, fixtures, save }) {
       const { page, problems } = await open({ requests: [], review: fixtures.review }, { panes: WIDE_CARDS });
       await page.click("#review-section");
       await page.waitForSelector(".review-finding");
       await settle(page, 300);
-      await save(page, "review", { clip: await closeUp(page, ".editor-block.kind-heading", "#review-panel", { margin: 36 }) });
+      // The panel alone, at the width it has in a README column next to the
+      // chat: the manuscript is in every other picture.
+      await save(page, "review", { clip: await unionClip(page, ["#review-panel"], 12) });
       return problems;
     },
   },
   chat: {
-    themes: ["light"],
-    viewport: { width: 1240, height: 804 },
+    themes: ["light", "dark"],
+    viewport: { width: 1240, height: 816 },
     async run({ open, fixtures, save }) {
-      const { page, problems } = await open({ requests: [], chat: fixtures.chat, chats: fixtures.chats });
+      const { page, problems } = await open({ requests: [], chat: fixtures.chat, chats: fixtures.chats }, { panes: { chat: 420 } });
       await page.click("#open-codex-chat");
       await page.waitForSelector(".chat-message");
       await settle(page, 600);
@@ -559,7 +634,7 @@ const scenes = {
     },
   },
   backends: {
-    themes: ["light"],
+    themes: ["light", "dark"],
     async run({ open, save }) {
       const { page, problems } = await open({ requests: [] });
       await page.click("#agent-provider-button");
@@ -576,7 +651,7 @@ const scenes = {
     },
   },
   structure: {
-    themes: ["light"],
+    themes: ["light", "dark"],
     // Wide enough for the two trees side by side; only the middle pane is kept.
     viewport: { width: 1540, height: 744 },
     async run({ open, fixtures, save }) {
@@ -749,7 +824,8 @@ async function main() {
       if (options.compile) await compileOnce(paperPal.base);
       const intro = await getJson(paperPal.base, `/api/document?path=${encodeURIComponent(INTRO)}`);
       const structure = await getJson(paperPal.base, "/api/structure");
-      const fixtures = buildFixtures(intro, structure);
+      const related = await getJson(paperPal.base, `/api/document?path=${encodeURIComponent(RELATED)}`);
+      const fixtures = buildFixtures(intro, related, structure);
       for (const [name, scene] of Object.entries(scenes)) {
         if (!wanted(name)) continue;
         for (const theme of scene.themes.filter(themeWanted)) {

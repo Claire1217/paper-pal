@@ -5,9 +5,9 @@ import http from "node:http";
 import path from "node:path";
 import { after, describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
-import { api, apiOk, appRoot, cleanupAll, configName, getDocument, makeProject, makeTempDir, runSetup, saveBlock, startServer, stateDirectory, waitFor } from "./helpers.mjs";
+import { api, apiOk, appRoot, cleanupAll, configName, getDocument, makeProject, makeTempDir, runSetup, saveBlock, startServer, stateDirectory, trySymlink, waitFor } from "./helpers.mjs";
 import { isInside, loadReviewConfig } from "../config.mjs";
-import { AGENT_PROVIDERS, buildAgentInvocation, childEnvironment, redactSecrets, resolveExecutable } from "../agent-providers.mjs";
+import { AGENT_PROVIDERS, buildAgentInvocation, childEnvironment, inspectAgentCommand, providerAvailability, redactSecrets, resolveExecutable } from "../agent-providers.mjs";
 
 after(cleanupAll);
 
@@ -114,6 +114,31 @@ describe("agent adapters", () => {
     assert.equal(claude.args[1], "--output-format");
   });
 
+  it("asks Codex for a read-only, never-asking run without the global approval flag", async () => {
+    // "-a never" clashes with a wrapper that adds --dangerously-bypass-approvals-and-sandbox:
+    // the CLI then refuses to start. The policy travels as a config override instead.
+    const invocation = await buildAgentInvocation({ provider: "codex", config: {}, prompt: "hi", outputPath: "/tmp/o", repoRoot: "/tmp" });
+    assert.ok(!invocation.args.includes("-a") && !invocation.args.includes("--ask-for-approval"));
+    assert.equal(invocation.args[0], "exec");
+    assert.ok(invocation.args.includes('approval_policy="never"'));
+    assert.equal(invocation.args[invocation.args.indexOf("--sandbox") + 1], "read-only");
+    assert.equal(invocation.args.at(-1), "-", "the prompt is read from stdin");
+  });
+
+  it("warns when the agent command is a wrapper that switches the sandbox off", { skip: process.platform === "win32" }, async () => {
+    const bin = await makeTempDir();
+    const wrapper = path.join(bin, "codex");
+    await fs.writeFile(wrapper, '#!/bin/sh\nexec /opt/real/codex --dangerously-bypass-approvals-and-sandbox "$@"\n', { mode: 0o755 });
+    assert.equal(inspectAgentCommand(wrapper), "--dangerously-bypass-approvals-and-sandbox");
+    const state = providerAvailability("codex", {}, { CODEX_BIN: wrapper });
+    assert.equal(state.available, true);
+    assert.match(state.warning, /wrapper script .* read-only sandbox off.*CODEX_BIN/s);
+    const plain = path.join(bin, "claude");
+    await fs.writeFile(plain, '#!/bin/sh\nexec /opt/real/claude "$@"\n', { mode: 0o755 });
+    assert.equal(inspectAgentCommand(plain), null);
+    assert.equal(providerAvailability("claude", {}, { CLAUDE_BIN: plain }).warning, undefined);
+  });
+
   it("locate the bundled API adapter when the checkout path contains a space", async () => {
     const parent = await makeTempDir();
     const checkout = path.join(parent, "app dir with space");
@@ -217,19 +242,25 @@ describe("running project", () => {
   it("keeps a symlinked manuscript file a symlink and preserves the file mode", async () => {
     const project = await makeProject({ files: { "main.tex": "\\section{A}\nLinked text here.\n", "real/body.tex": "\\section{B}\nBody text here.\n" } });
     const linkPath = path.join(project.root, "alias.tex");
-    await fs.symlink(path.join("real", "body.tex"), linkPath);
-    await fs.chmod(path.join(project.root, "main.tex"), 0o640);
+    // False where Windows refuses to create links; the rest of the test still runs.
+    const linked = await trySymlink(path.join("real", "body.tex"), linkPath, "file");
+    // Windows has no permission bits: chmod only toggles read-only and stat reports 0o666.
+    const posixModes = process.platform !== "win32";
+    if (posixModes) await fs.chmod(path.join(project.root, "main.tex"), 0o640);
     const server = await startServer(project.root);
-    // A link that stays inside the source root may be opened by path.
-    const aliased = await getDocument(server, "alias.tex");
-    const block = aliased.blocks.find((item) => item.kind === "paragraph");
-    await saveBlock(server, aliased, block, block.raw.replace("Body", "Changed body"));
-    assert.ok((await fs.lstat(linkPath)).isSymbolicLink(), "the link survives the save");
-    assert.match(await fs.readFile(path.join(project.root, "real", "body.tex"), "utf8"), /Changed body text/);
+    if (linked) {
+      // A link that stays inside the source root may be opened by path.
+      const aliased = await getDocument(server, "alias.tex");
+      const block = aliased.blocks.find((item) => item.kind === "paragraph");
+      await saveBlock(server, aliased, block, block.raw.replace("Body", "Changed body"));
+      assert.ok((await fs.lstat(linkPath)).isSymbolicLink(), "the link survives the save");
+      assert.match(await fs.readFile(path.join(project.root, "real", "body.tex"), "utf8"), /Changed body text/);
+    }
     const main = await getDocument(server, "main.tex");
     const paragraph = main.blocks.find((item) => item.kind === "paragraph");
     await saveBlock(server, main, paragraph, paragraph.raw.replace("Linked", "Plain"));
-    assert.equal((await fs.stat(path.join(project.root, "main.tex"))).mode & 0o777, 0o640);
+    assert.match(await fs.readFile(path.join(project.root, "main.tex"), "utf8"), /Plain text here/);
+    if (posixModes) assert.equal((await fs.stat(path.join(project.root, "main.tex"))).mode & 0o777, 0o640);
   });
 
   it("warns loudly when bound to a non-loopback host, and still checks Host", async () => {

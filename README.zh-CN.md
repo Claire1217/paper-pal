@@ -59,14 +59,19 @@ Paper Pal 在浏览器里打开你的 LaTeX 项目，把源码渲染成可读的
 
 **1. 选中并评论。** 可以选两个词，也可以选好几段，然后写下你的要求：这里写紧凑一点、这个结论说得太满、这和第 4 节一致吗？选区会精确对应到源码位置，中间夹着公式、引用和宏也没问题。
 
-<p><img src="docs/images/comment-light.png" alt="在摘要中选中两句话，评论输入框已打开，里面有一条写到一半的评论。"></p>
+<p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/comment-dark.png">
+  <img src="docs/images/comment-light.png" alt="在摘要中选中两句话，评论输入框已打开，里面有一条写到一半的评论。">
+</picture>
+</p>
 
 **2. 审 diff。** 修改提议会同时出现在正文里和评论卡片中，并附一句理由。你可以接受、拒绝、重新生成，或者回复一句继续引导它。
 
 <p>
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/diff-dark.png">
-  <img src="docs/images/diff-light.png" alt="同一处修改提议显示了两次：在稿件正文中以红色删除线和绿色下划线内嵌显示；在评论卡片中以修改前、修改后两行显示，下方是 Reject 和 Accept 按钮。">
+  <img src="docs/images/diff-light.png" alt="对一个含引用的句子的修改提议，显示了两次：在稿件正文中，新增的从句以绿色下划线内嵌显示，引用原样保留；在评论卡片中以修改前、修改后两行显示，下方是 Reject 和 Accept 按钮。">
 </picture>
 </p>
 
@@ -74,11 +79,17 @@ Paper Pal 在浏览器里打开你的 LaTeX 项目，把源码渲染成可读的
 <tr>
 <td width="50%" valign="top">
 <p><b>3. 请它审一遍。</b><i>Review file</i> 会像审稿人一样通读当前文件。问题由你筛选，留下的会变成普通评论。</p>
-<img src="docs/images/review-light.png" width="380" alt="整文件审阅给出的问题列表，每一条都可以保留为评论。">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/review-dark.png">
+  <img src="docs/images/review-light.png" width="380" alt="整文件审阅给出的问题列表，每一条都可以保留为评论。">
+</picture>
 </td>
 <td width="50%" valign="top">
 <p><b>4. 就论文提问。</b>聊天可以回答关于整个项目的问题。某条回复可以转成修改提议，但聊天本身从不改动文件。</p>
-<img src="docs/images/chat-light.png" width="380" alt="项目聊天正在回答一个关于论文的问题。">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/chat-dark.png">
+  <img src="docs/images/chat-light.png" width="380" alt="项目聊天正在回答一个关于论文的问题。">
+</picture>
 </td>
 </tr>
 </table>
@@ -142,7 +153,12 @@ Ask me before choosing an AI backend, and never ask me to paste an API key into 
 | **自定义** `custom` | 任何兼容 OpenAI 协议的地址 |
 
 </td>
-<td width="300" valign="top"><img src="docs/images/backends-light.png" width="280" alt="后端选择器：分为命令行 agent 和 API 提供方两组，未就绪的后端会说明缺少什么。"></td>
+<td width="300" valign="top">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/backends-dark.png">
+  <img src="docs/images/backends-light.png" width="280" alt="后端选择器：分为命令行 agent 和 API 提供方两组，未就绪的后端会说明缺少什么。">
+</picture>
+</td>
 </tr></table>
 
 > [!NOTE]
@@ -177,6 +193,14 @@ Paper Pal 不内置任何默认模型 id，因为它们很快会过时；请从�
 - **关联修改。** 当一处改写会让别处前后不一致时，agent 可以一并提出那些修改，由你整组确认。
 - **审阅进度。** 读完一段或一整节就确认一下，大纲会显示每节完成了多少。
 - **结构模式**，用于重组一节：先商定段落计划，再逐段改写。
+  <details>
+  <summary>截图</summary>
+  <br>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/structure-dark.png">
+    <img src="docs/images/structure-light.png" width="720" alt="结构模式：左边是论文当前的各节，右边是 agent 为 Method 一节提出的段落计划，标有改写、移动和新增，下方是描述结构问题的输入框。">
+  </picture>
+  </details>
 - **PDF 面板**，接受修改后用 `latexmk` 重新编译。支持浅色和深色主题。
 
 参考文档（英文）：[配置](docs/configuration.md) · [LaTeX 支持范围与限制](docs/latex-conventions.md) · [后端](docs/backends.md) · [本地 HTTP API](docs/api.md) · [更新日志](CHANGELOG.md)

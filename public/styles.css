@@ -1860,6 +1860,15 @@ button.request-location:focus-visible { color: var(--accent-ink); background: va
   font: 14px/1.68 var(--serif);
 }
 .request-multiblock .request-diff { max-height: min(52vh, 520px); }
+/* A proposal that changes LaTeX the prose view does not show (\label, \vspace,
+   a comment…): one warning line and, on request, the source rows. */
+.request-source-warning { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 8px 0 0; padding: 7px 10px; border: 1px solid var(--warn-line); border-radius: var(--r-md); color: var(--warn-ink); background: var(--warn-soft); font-size: var(--fs-xs); line-height: 1.45; }
+.request-source-warning span { flex: 1 1 200px; }
+.request-source-toggle { flex: 0 0 auto; margin-left: auto; padding: 0; border: 0; color: inherit; background: none; font: 600 var(--fs-xs)/1.45 var(--ui); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.request-source-toggle:hover { color: var(--ink); }
+.request-source-diff { margin-top: 6px; font: 12px/1.6 var(--font-mono); overflow-wrap: anywhere; }
+.request-source-diff[hidden] { display: none; }
+.request-source-diff .request-diff-line::before { font-size: 13px; line-height: 1.5; }
 .request-diff-line { position: relative; padding: 9px var(--sp-3) 9px 30px; color: var(--ink-muted); white-space: pre-wrap; }
 .request-diff-line::before { position: absolute; left: 11px; top: 9px; width: 12px; font: 600 14px/1.68 var(--ui); text-align: center; }
 .request-diff-before { background: var(--del-wash); }

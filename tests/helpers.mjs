@@ -34,8 +34,23 @@ export async function makeTempDir(prefix = `${TEMP_PREFIX}test-`) {
   // realpath: on macOS the temp folder sits behind a symlink (/var -> /private/var),
   // and tools that report their working directory give the resolved path.
   const directory = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), prefix)));
-  cleanups.push(() => fs.rm(directory, { recursive: true, force: true }));
+  // Retries: on Windows a folder stays locked for a moment after the process that used it ends.
+  cleanups.push(() => fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   return directory;
+}
+
+/**
+ * fs.symlink that returns false instead of throwing where Windows refuses:
+ * only administrators and Developer Mode users may create links there.
+ */
+export async function trySymlink(target, linkPath, type = undefined) {
+  try {
+    await fs.symlink(target, linkPath, type);
+    return true;
+  } catch (error) {
+    if (process.platform === "win32" && ["EPERM", "EACCES", "ENOSYS", "UNKNOWN"].includes(error.code)) return false;
+    throw error;
+  }
 }
 
 export function runSetup(args, options = {}) {

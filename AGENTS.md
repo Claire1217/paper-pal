@@ -133,10 +133,14 @@ An endpoint that already speaks the OpenAI protocol needs no preset: the `custom
 
 ## Regenerating screenshots
 
-`npm run screenshots` runs `scripts/screenshots.mjs` and rewrites `docs/images/*.png`. It works on
+`npm run screenshots` runs `scripts/screenshots.mjs` and rewrites `docs/images/*.png`: every scene
+as `<name>-light.png` and `<name>-dark.png` (the READMEs pair them in `<picture>` elements), plus
+`social-preview.png` from `docs/images/src/social-preview.html`. It works on
 a temporary copy of the sample paper, calls no model (agent-dependent state is injected in the
-browser), and cleans up after itself. Playwright is deliberately not a dependency; install it
-for one run:
+browser), and cleans up after itself. The brand mark is hand-written SVG in two drawings:
+`docs/images/logo.svg`, and a simplified 32-unit version for the favicon and `.brand-mark` in
+`public/index.html`. Change them together, then regenerate the images. Playwright is deliberately
+not a dependency; install it for one run:
 
 ```sh
 npm install --no-save playwright && npx playwright install chromium
