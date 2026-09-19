@@ -23,7 +23,7 @@ and nothing is written to your `.tex` files until you click **Accept**.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-dark.svg">
-  <img src="docs/images/flow-light.svg" alt="Paper Pal, animated. Two sentences are selected in the manuscript, Comment is chosen from the selection toolbar and a comment is typed. The proposal arrives as a red and green word diff, inline and in the comment card. Accept is clicked: the sentences are rewritten, the file is saved, the text turns from grey to black and the section's review progress goes up.">
+  <img src="docs/images/flow-light.svg" alt="Paper Pal, animated. Two sentences are selected in the manuscript, Comment is chosen from the selection toolbar and a comment is typed. The card says Claude is drafting, then the proposal arrives as a red and green word diff, inline and in the comment card. Accept is clicked: the sentences are rewritten and saved to the .tex file, the text turns from grey to black, the section's review progress goes up and the PDF recompiles.">
 </picture>
 
 <p align="center"><sub>The animations are drawings of the app; the screenshots are the app itself. The manuscript in all of them is fictional. It ships in <a href="examples/sample-paper">examples/sample-paper</a>, and <code>npm run demo</code> opens it.</sub></p>
@@ -104,12 +104,12 @@ Paper Pal opens your LaTeX project in the browser and shows the source as readab
 </tr>
 </table>
 
-**5. Confirm what you have read, then compile.** Text you have not read yet is grey. Select a passage, or a whole section, and click **Confirm**: it turns black, and the outline counts it. Accepted proposals count as read. **Compile** runs `latexmk` and opens the PDF beside the manuscript.
+**5. Confirm what you have read, and look at the PDF.** Text you have not read yet is grey. Select a passage and click **Confirm** (or use *Confirm section*): it turns black, and the outline counts it. Text from an accepted proposal counts as read. **Compile** rebuilds the PDF with `latexmk`, which also happens by itself after every accepted change, and **Preview** opens the PDF beside the manuscript.
 
 <p>
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/confirm-dark.svg">
-  <img src="docs/images/confirm-light.svg" alt="Paper Pal, animated. A grey, unread paragraph is selected and Confirm is chosen from the selection toolbar: the paragraph turns black and the section's review progress goes up. Then Compile is clicked, the status shows Compiling, and the compiled PDF opens beside the manuscript.">
+  <img src="docs/images/confirm-light.svg" alt="Paper Pal, animated. A grey, unread paragraph is selected and Confirm is chosen from the selection toolbar: the paragraph turns black and the section's review progress goes up. Then Compile is clicked and the status shows Compiling, then PDF updated. Preview is clicked and the compiled PDF opens beside the manuscript, which reflows into half the width.">
 </picture>
 </p>
 

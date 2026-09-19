@@ -158,8 +158,10 @@ recordings: one SVG per scene and theme, animated with CSS keyframes only, becau
 GitHub plays inside `<img>`. Flags: `--only flow,confirm`, `--theme`, `--out`. The script lays
 the text out itself, measures it with the app's fonts (Playwright, as above) and embeds those
 fonts. Its colours are copies of the tokens in `public/styles.css`, its passage is the one in the
-hero screenshot, and its labels are the app's own ("Awaiting approval", "Confirmed text is now
-black.", "PDF updated"); change them together.
+hero screenshot, and what happens at each step is the app's own behaviour: the selection toolbar,
+the composer's buttons, the status labels, the toasts, the card leaving the list after Accept, the
+recompile after an accepted change, Preview (not Compile) opening the PDF pane, the empty-state
+explainer. Change them together with `public/app.js`.
 
 ## PR checklist
 

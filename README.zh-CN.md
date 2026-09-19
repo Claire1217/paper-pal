@@ -23,7 +23,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/flow-dark.svg">
-  <img src="docs/images/flow-light.svg" alt="Paper Pal 动画演示：在稿件里选中两句话，从选区工具条里点 Comment 并写下评论；修改提议以红绿逐词 diff 的形式出现在正文和评论卡片里；点击 Accept 后，句子被改写，文件被保存，文字由灰变黑，该章节的审阅进度随之上升。">
+  <img src="docs/images/flow-light.svg" alt="Paper Pal 动画演示：在稿件里选中两句话，从选区工具条里点 Comment 并写下评论；卡片先显示 Claude is drafting，随后修改提议以红绿逐词 diff 的形式出现在正文和评论卡片里；点击 Accept 后，句子被改写并写入 .tex 文件，文字由灰变黑，该章节的审阅进度上升，PDF 自动重新编译。">
 </picture>
 
 <p align="center"><sub>动画是对应用的示意，截图才是应用本身。其中的论文都是虚构的，随仓库附带于 <a href="examples/sample-paper">examples/sample-paper</a>，运行 <code>npm run demo</code> 即可打开。</sub></p>
@@ -104,12 +104,12 @@ Paper Pal 在浏览器里打开你的 LaTeX 项目，把源码渲染成可读的
 </tr>
 </table>
 
-**5. 读过的就确认，然后编译。** 还没读过的文字是灰色的。选中一段（或整个章节），点 **Confirm**，它就变成黑色，并计入大纲里的审阅进度；接受过的修改提议也算已读。**Compile** 会运行 `latexmk`，并在稿件旁边打开 PDF。
+**5. 读过的就确认，再看看 PDF。** 还没读过的文字是灰色的。选中一段点 **Confirm**（或用 *Confirm section* 确认整节），它就变成黑色，并计入大纲里的审阅进度；来自已接受提议的文字也算已读。**Compile** 用 `latexmk` 重新编译 PDF（每次接受修改后也会自动编译），**Preview** 在稿件旁边打开 PDF。
 
 <p>
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/confirm-dark.svg">
-  <img src="docs/images/confirm-light.svg" alt="Paper Pal 动画演示：选中一段灰色的未读段落，从选区工具条里点 Confirm，段落变成黑色，章节的审阅进度上升；接着点击 Compile，状态显示 Compiling，编译好的 PDF 在稿件旁边打开。">
+  <img src="docs/images/confirm-light.svg" alt="Paper Pal 动画演示：选中一段灰色的未读段落，从选区工具条里点 Confirm，段落变成黑色，章节的审阅进度上升；接着点击 Compile，状态先显示 Compiling，再显示 PDF updated；点击 Preview 后，编译好的 PDF 在稿件旁边打开，稿件重排为一半宽度。">
 </picture>
 </p>
 
