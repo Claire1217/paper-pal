@@ -12,10 +12,17 @@
 一个在本机运行的论文写作工具。选中一段话写下意见，AI 给出改写，以逐词 diff 的形式呈现；<br>
 在你点击 **Accept** 之前，`.tex` 文件一个字都不会被改动。
 
+**背后的 AI 就是你已经在用的 Claude Code 或 Codex。** Paper Pal 直接调用你已登录的命令行工具，<br>
+走你现有的 Claude 或 ChatGPT 订阅：不需要 API key，也不用再买一份订阅。想用 API key 或本地模型也可以。
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-2d6a4f?style=flat-square)](LICENSE)
 [![Tests](https://img.shields.io/github/actions/workflow/status/claire1217/paper-pal/ci.yml?branch=main&style=flat-square&label=tests)](https://github.com/claire1217/paper-pal/actions/workflows/ci.yml)
 [![Node 20+](https://img.shields.io/badge/node-%E2%89%A5%2020-2d6a4f?style=flat-square)](https://nodejs.org)
 [![Local first](https://img.shields.io/badge/%E6%9C%AC%E5%9C%B0%E4%BC%98%E5%85%88-%E6%97%A0%E9%81%A5%E6%B5%8B-2d6a4f?style=flat-square)](#隐私与安全)
+<br>
+[![Works with Claude Code](https://img.shields.io/badge/works%20with-Claude%20Code-d97757?style=flat-square)](#选择-ai-后端)
+[![Works with Codex CLI](https://img.shields.io/badge/works%20with-Codex%20CLI-10a37f?style=flat-square)](#选择-ai-后端)
+[![Also: API keys and Ollama](https://img.shields.io/badge/also-OpenAI%20%C2%B7%20Anthropic%20%C2%B7%20OpenRouter%20%C2%B7%20DeepSeek%20%C2%B7%20Ollama-555?style=flat-square)](#选择-ai-后端)
 
 <a href="./README.md">English</a> · <strong>简体中文</strong> &nbsp;|&nbsp; [工作方式](#工作方式) · [快速开始](#快速开始) · [让 AI agent 替你安装](#让你的-ai-agent-替你安装) · [AI 后端](#选择-ai-后端) · [隐私](#隐私与安全) · [常见问题](#常见问题)
 
@@ -32,6 +39,8 @@
 ## 这是什么
 
 Paper Pal 在浏览器里打开你的 LaTeX 项目，把源码渲染成可读的正文：公式、引用、交叉引用都正常显示。你选中一段文字，说出哪里不对；你已经在用的 AI 给出改写，并以 diff 的形式与原文对照。对 `.tex` 文件的每一次写入，都来自你的一次点击。
+
+**它是你现有编程 agent 的一个前端。** 只要终端里能运行 `claude`（Claude Code）或 `codex`（Codex CLI），Paper Pal 就能直接用：每条评论它都会在你的论文目录里、以只读方式、用你现有的登录状态启动那个 CLI。Agent 可以读项目里的其他内容（别的章节、笔记、数据、代码）来回应评论，但不能写文件。没有 CLI？也可以改用 API key（OpenAI、Anthropic、OpenRouter、DeepSeek，或任何兼容 OpenAI 协议的地址）或本机的 Ollama 模型，每条评论都能单独切换。
 
 <p>
 <picture>
@@ -122,6 +131,8 @@ git clone https://github.com/claire1217/paper-pal.git ~/paper-pal && cd ~/paper-
 npm run setup -- /path/to/your/paper      # 找到主 .tex 文件，写入 .paper-pal.json
 npm start                                 # 然后打开 http://127.0.0.1:4317
 ```
+
+setup 会替你选好后端：PATH 上有 `codex` 就用 Codex，否则有 `claude` 就用 Claude Code，再否则用第一个找到 key 的 API 提供方。想自己指定，加上 `--provider claude` 或 `--provider codex`；之后也可以随时在应用顶栏里切换。CLI 需要事先登录好（在终端里运行一次 `claude` 或 `codex login`），`npm run doctor` 会检查这一点。
 
 手边没有论文？`npm run demo -- --open` 会在同一地址打开示例论文的一份临时副本，停止时自动删除。不需要 LaTeX，不需要 AI 后端，也不需要任何 key。
 
@@ -227,6 +238,12 @@ Paper Pal 不内置任何默认模型 id，因为它们很快会过时；请从�
 ## 常见问题
 
 <details open>
+<summary><b>需要 API key 或者再买一份订阅吗？</b></summary>
+
+不需要。如果你在用 Claude Code 或 Codex CLI，Paper Pal 就跑在它上面：调用的是你已登录的 CLI，用量计入你现有的 Claude 或 ChatGPT 订阅，和你自己在终端里输入请求完全一样。只有当你更想用 API 提供方时才需要 API key；用本机的 Ollama 模型则两者都不需要。
+</details>
+
+<details>
 <summary><b>它会不会把我的源码弄坏？</b></summary>
 
 接受一处提议只会替换一段已映射的区间，其余内容原封不动。测试套件会对一份多文件测试稿件的每一个可编辑块逐一编辑（120 多次），并检查其他内容没有任何变化；还有一个模糊测试，把截断和变异过的文件喂给解析器。即便如此，仍请用 git 管理论文。Paper Pal 从不替你提交，所以 `git diff` 永远能准确告诉你改了什么。
