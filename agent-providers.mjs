@@ -470,7 +470,10 @@ export async function buildAgentInvocation({
   // "-a never" flag: some setups put a wrapper named `codex` on PATH that adds
   // --dangerously-bypass-approvals-and-sandbox, and the CLI refuses that flag
   // together with --ask-for-approval before it runs anything.
-  const args = ["exec", "--ephemeral", "--sandbox", "read-only", "--config", 'approval_policy="never"', "--color", "never"];
+  // --skip-git-repo-check: `codex exec` refuses to run outside a git repository
+  // ("Not inside a trusted directory"), and a paper folder often is not one.
+  // The run is read-only, so the check protects nothing here.
+  const args = ["exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--config", 'approval_policy="never"', "--color", "never"];
   if (model) args.push("--model", String(model));
   if (reasoningEffort) args.push("--config", `model_reasoning_effort="${reasoningEffort}"`);
   if (schemaPath) args.push("--output-schema", schemaPath);

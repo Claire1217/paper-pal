@@ -122,6 +122,7 @@ describe("agent adapters", () => {
     assert.equal(invocation.args[0], "exec");
     assert.ok(invocation.args.includes('approval_policy="never"'));
     assert.equal(invocation.args[invocation.args.indexOf("--sandbox") + 1], "read-only");
+    assert.ok(invocation.args.includes("--skip-git-repo-check"), "a paper folder need not be a git repository");
     assert.equal(invocation.args.at(-1), "-", "the prompt is read from stdin");
   });
 

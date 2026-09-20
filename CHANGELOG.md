@@ -14,6 +14,11 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   wrapper that adds that flag. Paper Pal now passes the approval policy as a
   config override (`--config approval_policy="never"`) instead of the global
   `-a never` flag.
+- **Codex runs failed with "Not inside a trusted directory and --skip-git-repo-check
+  was not specified"** when the paper folder is not a git repository (the demo
+  copy never is). Paper Pal now passes `--skip-git-repo-check`; the run is
+  read-only either way. Both Codex fixes were checked against the real CLI's
+  argument parser (codex-cli 0.155).
 - Math did not render when Paper Pal was installed as a package, because npm
   hoists `katex` out of Paper Pal's own `node_modules`. The server and
   `doctor` now resolve it the way Node does.
