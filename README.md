@@ -1,11 +1,11 @@
 <div align="center">
 
+<p>
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
-  <img src="docs/images/logo.svg" width="72" alt="Paper Pal logo">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/wordmark-dark.svg">
+  <img src="docs/images/wordmark.svg" width="380" alt="Paper Pal">
 </picture>
-
-# Paper Pal
+</p>
 
 **Review every AI edit before it touches your LaTeX.**
 

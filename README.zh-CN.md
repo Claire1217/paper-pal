@@ -1,11 +1,11 @@
 <div align="center">
 
+<p>
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
-  <img src="docs/images/logo.svg" width="72" alt="Paper Pal 标志">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/wordmark-dark.svg">
+  <img src="docs/images/wordmark.svg" width="380" alt="Paper Pal">
 </picture>
-
-# Paper Pal
+</p>
 
 **AI 的每一处修改，先过你的眼，再进你的 LaTeX。**
 
