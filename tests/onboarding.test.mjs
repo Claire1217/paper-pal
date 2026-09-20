@@ -277,6 +277,21 @@ describe("doctor", () => {
     assert.ok(!fixed.stdout.includes("sk-doctor-test-0123456789"));
   });
 
+  it("says when the default CLI is installed but signed out", { skip: process.platform === "win32" && "uses a shell script as the CLI" }, async () => {
+    const bin = await makeTempDir("bin-");
+    const codex = path.join(bin, "codex");
+    await fs.writeFile(codex, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli 0.0.0; exit 0; fi\necho 'Not logged in'\nexit 1\n", { mode: 0o755 });
+    const project = await makeProject({ config: { agent: { enabled: true, provider: "codex" } } });
+    const result = runDoctor(["--repo", project.root, "--json"], { env: { ...noAgents, CODEX_BIN: codex } });
+    assert.equal(result.status, 1, result.stdout);
+    const byId = Object.fromEntries(json(result).checks.map((item) => [item.id, item]));
+    assert.equal(byId["provider:codex"].ok, true);
+    assert.deepEqual(
+      { ok: byId["signin:codex"].ok, severity: byId["signin:codex"].severity, fix: byId["signin:codex"].fix },
+      { ok: false, severity: "error", fix: "Run \"codex login\" in a terminal." },
+    );
+  });
+
   it("a missing LaTeX program is an error only when compilation is enabled", async () => {
     const project = await makeProject({ fakeAgent: true, config: { latex: { enabled: true, cwd: ".", command: "latexmk", args: ["main.tex"] } } });
     const result = runDoctor(["--repo", project.root, "--json"], { env: { PATH: "/nonexistent" } });
@@ -509,6 +524,26 @@ describe("command line entry points", () => {
     } finally {
       if (demo.child.exitCode === null) demo.child.kill("SIGKILL");
     }
+  });
+});
+
+describe("starting before any setup", () => {
+  after(cleanupAll);
+
+  // A developer's own remembered project would be opened instead of failing.
+  const remembered = ["paper-pal.local.json", "review.local.json"].some((name) => existsSync(path.join(appRoot, name)));
+  it("says to run setup on the paper, without a stack trace and without naming the current folder", { skip: remembered && "this checkout remembers a project" }, async () => {
+    const empty = await makeTempDir("nothing-");
+    const result = spawnSync(process.execPath, [path.join(appRoot, "server.mjs"), "--port", "0"], {
+      cwd: empty, encoding: "utf8", timeout: 20000,
+      env: { ...process.env, ...testEnvironment },
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /could not start/);
+    assert.match(result.stderr, /npm run setup -- \/path\/to\/your\/paper/);
+    assert.match(result.stderr, /npm run demo/);
+    assert.doesNotMatch(result.stderr, /^\s+at .*\(.*:\d+:\d+\)$/m, "no stack trace");
+    assert.ok(!result.stderr.includes(`setup -- ${empty}`), "the empty current folder is not offered as the paper");
   });
 });
 

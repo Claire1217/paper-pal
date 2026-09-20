@@ -26,6 +26,16 @@ export const testEnvironment = {
   [ENV.port]: "",
   HOST: "",
   [ENV.allowCustomCommands]: "1",
+  // A developer's own exported keys must not make providers "ready" in a test
+  // (an empty value counts as unset). Tests that need a key set it themselves.
+  OPENAI_API_KEY: "",
+  ANTHROPIC_API_KEY: "",
+  OPENROUTER_API_KEY: "",
+  DEEPSEEK_API_KEY: "",
+  PAPER_PAL_API_KEY: "",
+  PAPER_PAL_API_BASE_URL: "",
+  CODEX_BIN: "",
+  CLAUDE_BIN: "",
 };
 
 const cleanups = [];

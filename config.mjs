@@ -179,16 +179,22 @@ function apiProviderBlock(provider, block, env) {
 
 export async function loadReviewConfig({ appRoot, argv = process.argv.slice(2), cwd = process.cwd(), env = process.env }) {
   const explicitRepo = readArg(argv, "--repo");
-  const repoRoot = path.resolve(explicitRepo || await localProjectRoot(appRoot) || cwd);
+  const rememberedRepo = explicitRepo ? null : await localProjectRoot(appRoot);
+  const repoRoot = path.resolve(explicitRepo || rememberedRepo || cwd);
   const explicitConfig = readArg(argv, "--config");
   const configPath = explicitConfig
     ? path.resolve(cwd, explicitConfig)
     // .paper-pal.json, or the pre-rename .draft-review.json when only that exists.
     : resolveConfigPath(repoRoot);
   if (!existsSync(configPath)) {
+    // Started before any setup, the "project" is just the current folder (usually
+    // Paper Pal's own): telling the user to run setup on that would be wrong.
+    const namedProject = Boolean(explicitRepo || rememberedRepo || explicitConfig);
     throw new Error([
       `No ${APP_NAME} configuration (${CONFIG_NAME}) was found at ${configPath}.`,
-      `Run \"npm run setup -- ${repoRoot}\" first, or pass --repo and --config explicitly.`,
+      namedProject
+        ? `Run \"npm run setup -- ${repoRoot}\" first, or pass --repo and --config explicitly.`
+        : "No paper is set up yet: run \"npm run setup -- /path/to/your/paper\" first, or \"npm run demo\" to try the sample paper.",
     ].join("\n"));
   }
 

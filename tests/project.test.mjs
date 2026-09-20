@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { after, describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 import { api, apiOk, appRoot, cleanupAll, configName, getDocument, makeProject, makeTempDir, runSetup, saveBlock, startServer, stateDirectory, trySymlink, waitFor } from "./helpers.mjs";
@@ -100,9 +101,12 @@ describe("agent adapters", () => {
   it("put the prompt on stdin for every provider", async () => {
     const prompt = "PROMPT ".repeat(100);
     const schemaPath = path.join(appRoot, "schemas", "proposal-output.schema.json");
+    // Codex gets a simplified copy of the schema written next to the output file.
+    const scratch = await fs.mkdtemp(path.join(tmpdir(), "paper-pal-argv-"));
+    after(() => fs.rm(scratch, { recursive: true, force: true }));
     for (const provider of AGENT_PROVIDERS) {
       const invocation = await buildAgentInvocation({
-        provider, config: { custom: { baseUrl: "http://127.0.0.1:9/v1" } }, prompt, schemaPath, outputPath: "/tmp/out.json", repoRoot: "/tmp", model: "m", reasoningEffort: "low",
+        provider, config: { custom: { baseUrl: "http://127.0.0.1:9/v1" } }, prompt, schemaPath, outputPath: path.join(scratch, "out.json"), repoRoot: "/tmp", model: "m", reasoningEffort: "low",
       });
       assert.ok(invocation.input.startsWith(prompt), provider);
       assert.ok(!invocation.args.some((value) => value.includes("PROMPT")), `${provider}: prompt leaked into argv`);
@@ -112,6 +116,34 @@ describe("agent adapters", () => {
     const claude = await buildAgentInvocation({ provider: "claude", config: { claude: {} }, prompt, outputPath: "/tmp/o", repoRoot: "/tmp" });
     assert.equal(claude.args[0], "-p");
     assert.equal(claude.args[1], "--output-format");
+  });
+
+  it("gives Codex a schema that strict structured output accepts", async () => {
+    // The CLI passes --output-schema to the provider's strict mode, which refuses
+    // the request outright over minLength, maxItems or $schema.
+    const root = await fs.mkdtemp(path.join(tmpdir(), "paper-pal-schema-"));
+    try {
+      for (const name of ["proposal", "discussion", "link", "review"]) {
+        const schemaPath = path.join(appRoot, "schemas", `${name}-output.schema.json`);
+        const outputPath = path.join(root, `${name}.json`);
+        const invocation = await buildAgentInvocation({ provider: "codex", config: {}, prompt: "hi", schemaPath, outputPath, repoRoot: root });
+        const passed = invocation.args[invocation.args.indexOf("--output-schema") + 1];
+        assert.equal(path.dirname(passed), root, "the copy lives in the run's temporary folder");
+        const text = await fs.readFile(passed, "utf8");
+        assert.doesNotMatch(text, /"(?:\$schema|minLength|maxLength|minItems|maxItems|pattern|format)"/, name);
+        const check = (node) => {
+          if (!node || typeof node !== "object") return;
+          if (node.type === "object") {
+            assert.equal(node.additionalProperties, false, name);
+            assert.deepEqual([...node.required].sort(), Object.keys(node.properties).sort(), `${name}: every property is required`);
+          }
+          Object.values(node).forEach(check);
+        };
+        check(JSON.parse(text));
+      }
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("asks Codex for a read-only, never-asking run without the global approval flag", async () => {
@@ -218,6 +250,30 @@ describe("running project", () => {
     }, { label: "compile failure" });
     assert.match(state.log, /was not found/);
     assert.match(state.log, /TeX/);
+  });
+
+  it("puts the LaTeX error lines first in a failed compile's log", async () => {
+    const project = await makeProject();
+    const script = path.join(project.root, "fake-latex.mjs");
+    await fs.writeFile(script, [
+      "console.log('This is pdfTeX');",
+      "console.log('! Undefined control sequence.');",
+      "console.log('<recently read> \\\\undefinedmacro');",
+      "console.log('l.18 ...sites \\\\undefinedmacro');",
+      "console.log('Latexmk: boilerplate\\n'.repeat(40));",
+      "process.exit(12);",
+    ].join("\n"), "utf8");
+    const config = JSON.parse(await fs.readFile(project.configPath, "utf8"));
+    config.latex = { enabled: true, cwd: ".", command: process.execPath, args: [script] };
+    await fs.writeFile(project.configPath, JSON.stringify(config), "utf8");
+    const server = await startServer(project.root, { env: { PAPER_PAL_ALLOW_CUSTOM_LATEX: "1" } });
+    await apiOk(server, "/api/compile", { method: "POST" });
+    const state = await waitFor(async () => {
+      const value = await apiOk(server, "/api/compile");
+      return value.status === "failed" ? value : null;
+    }, { label: "compile failure" });
+    assert.match(state.log, /^LaTeX errors:\n! Undefined control sequence\.\n {4}l\.18 /);
+    assert.match(state.log, /Full compiler output:\nThis is pdfTeX/);
   });
 
   it("compiles again when a compile was requested while one was running", async () => {

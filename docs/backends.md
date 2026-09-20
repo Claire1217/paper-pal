@@ -67,12 +67,22 @@ child process only, the bundled `api-adapter.mjs`. It is never written to
 disk by Paper Pal, never passed to CLI agents, LaTeX or git, and is removed
 from traces and error messages.
 
+**A CLI that signs in with a key from your shell.** Paper Pal removes
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and the other provider keys from the
+environment of the CLI agents on purpose. If your `claude` or `codex` works in
+the terminal only because such a variable is exported there, it is signed out
+inside Paper Pal and every run fails with an authentication error. Sign the
+CLI in with its own login (`codex login`, or `claude` and `/login`), or use
+the matching API backend with the key in `.env`. `npm run doctor` checks the
+sign-in state the same way, without those variables.
+
 ## Codex CLI (`codex`)
 
 - What it is: OpenAI's Codex command-line agent, run as `codex exec` in a
   read-only sandbox.
 - You need: the `codex` CLI installed and signed in. Check with
-  `codex --version`.
+  `codex --version` and `codex login status`; `npm run doctor` runs the second
+  one for you and reports a signed-out CLI.
 - Setup: `npm run setup -- <paper> --provider codex`
 - Optional, in `.paper-pal.json`:
 
@@ -82,14 +92,20 @@ from traces and error messages.
 
   Without `model`, the CLI's own default is used.
 - Binary not on `PATH`: put `CODEX_BIN=/full/path/to/codex` in `.env`.
-- The answer format is enforced with `--output-schema`.
+- The answer format is enforced with `--output-schema`. The CLI hands that
+  file to the provider's strict structured-output mode, so it gets a copy of
+  the schema without the keywords that mode rejects (`minLength`, `maxItems`,
+  `$schema` and similar), the same simplification the API adapter applies.
+- A run that reads other files can take longer than a minute. The comment card
+  counts the seconds; if runs end in "timed out", raise `agent.timeoutMs`
+  (default 90000) in `.paper-pal.json` and restart.
 
 ## Claude Code CLI (`claude`)
 
 - What it is: Anthropic's Claude Code, run in print mode (`claude -p`) with
   read-only tools.
 - You need: the `claude` CLI installed and signed in. Check with
-  `claude --version`.
+  `claude --version` and `claude auth status` (`npm run doctor` does both).
 - Setup: `npm run setup -- <paper> --provider claude`
 - Optional, in `.paper-pal.json`:
 

@@ -744,12 +744,19 @@ async function api(url, options = {}) {
     ...(mutating ? { "Content-Type": "application/json", "X-Paper-Pal": "1" } : {}),
     ...(options.headers || {}),
   };
-  const response = await fetch(url, {
-    ...options,
-    method,
-    ...(mutating && options.body == null ? { body: "{}" } : {}),
-    headers,
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      method,
+      ...(mutating && options.body == null ? { body: "{}" } : {}),
+      headers,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    // The browser's own text is "Failed to fetch", which says nothing.
+    throw new Error("The local Paper Pal server is not answering. Check the terminal where it runs, then try again.");
+  }
   const value = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(value.error || `Request failed (${response.status})`);
   return value;
@@ -3104,9 +3111,13 @@ function updateProgress() {
   const reviewable = blocks.filter((block) => block.kind !== "structure");
   const points = reviewable.reduce((sum, block) => {
     if (["accepted", "human"].includes(block.status)) return sum + 1;
+    // Same measure as the server's outline: the text without the white space at
+    // the block's edges, which no selection can cover.
+    const textStart = block.raw.length - block.raw.trimStart().length;
+    const textEnd = Math.max(textStart, block.raw.trimEnd().length);
     const reviewed = mergeRanges([...(block.acceptedRanges || []), ...(block.humanRanges || [])], block.raw.length)
-      .reduce((n, range) => n + range.end - range.start, 0);
-    return sum + Math.min(1, reviewed / Math.max(1, block.raw.length));
+      .reduce((n, range) => n + Math.max(0, Math.min(textEnd, range.end) - Math.max(textStart, range.start)), 0);
+    return sum + Math.min(1, reviewed / Math.max(1, textEnd - textStart));
   }, 0);
   const progress = reviewable.length ? Math.round((points / reviewable.length) * 100) : 0;
   dom.sectionProgressFill.style.width = `${progress}%`;
@@ -3155,6 +3166,12 @@ async function loadDocument(relativePath, { quiet = false, discardEditing = fals
     renderDocument();
     renderRequestLists();
     setSaveState("Saved", false);
+    if (previousPath !== relativePath) restoreSectionReview(relativePath);
+    try {
+      sessionStorage.setItem(OPEN_DOCUMENT_STORAGE_KEY, relativePath);
+    } catch {
+      // Without storage a reload opens the entry point, as before.
+    }
     return true;
   } catch (error) {
     if (loadToken !== state.documentLoadToken) return false;
@@ -3866,7 +3883,18 @@ function closeCommentComposer() {
 // how the passage reads comes back as a word swap. Say so before it happens.
 const SHORT_SELECTION_CHARS = 200;
 
+// The collapsed Options line states what is chosen inside it; as fixed text it
+// kept saying "Selected text · paper context" whatever the two menus held.
+function updateComposerOptionsSummary() {
+  const summary = dom.commentComposerOptions?.querySelector("summary span");
+  if (!summary) return;
+  const scope = dom.rewriteScope.value === "paragraph" ? "Whole paragraph" : "Selected text";
+  const context = { local: "this paragraph only", project: "full project review" }[dom.contextMode.value] || "paper context";
+  summary.textContent = `${scope} · ${context}`;
+}
+
 function updateScopeHint() {
+  updateComposerOptionsSummary();
   if (!dom.scopeHint) return;
   const selected = state.selection?.selectedText || "";
   const short = selected.length > 0 && selected.length < SHORT_SELECTION_CHARS;
@@ -3892,7 +3920,16 @@ async function runSectionReview() {
       body: JSON.stringify({ path: reviewedPath }),
     });
     if (state.document?.path !== reviewedPath) {
-      showToast(`The review of ${sourceRelativePath(reviewedPath)} finished, but another file is open now. Run it again from that file.`, 5200);
+      let kept = false;
+      try {
+        sessionStorage.setItem(`${REVIEW_STORAGE_PREFIX}${reviewedPath}`, JSON.stringify({ ...review, path: reviewedPath }));
+        kept = true;
+      } catch {
+        kept = false;
+      }
+      showToast(kept
+        ? `The review of ${sourceRelativePath(reviewedPath)} is ready. Open that file to see the findings.`
+        : `The review of ${sourceRelativePath(reviewedPath)} finished, but another file is open now. Run it again from that file.`, 5200);
       return;
     }
     renderSectionReview(review);
@@ -3904,12 +3941,48 @@ async function runSectionReview() {
   }
 }
 
-function renderSectionReview(review) {
+// A review takes the agent half a minute and lived only in this variable: a
+// reload, or a look at another file, threw the findings away. They are kept per
+// file for the life of the tab (sessionStorage, so nothing outlives it), minus
+// the ones already dismissed.
+const REVIEW_STORAGE_PREFIX = "paper-pal.review.";
+const OPEN_DOCUMENT_STORAGE_KEY = "paper-pal.openDocument";
+
+function storeSectionReview() {
+  try {
+    if (state.review?.path) sessionStorage.setItem(`${REVIEW_STORAGE_PREFIX}${state.review.path}`, JSON.stringify(state.review));
+  } catch {
+    // No storage: the review just does not survive a reload.
+  }
+}
+
+function forgetSectionReview(path) {
+  try {
+    if (path) sessionStorage.removeItem(`${REVIEW_STORAGE_PREFIX}${path}`);
+  } catch {
+    // Nothing to forget.
+  }
+}
+
+function restoreSectionReview(path) {
+  let stored = null;
+  try {
+    stored = JSON.parse(sessionStorage.getItem(`${REVIEW_STORAGE_PREFIX}${path}`) || "null");
+  } catch {
+    stored = null;
+  }
+  if (stored && typeof stored === "object" && stored.path === path) renderSectionReview(stored, { restored: true });
+}
+
+function renderSectionReview(review, { restored = false } = {}) {
   review = review && typeof review === "object" ? review : {};
-  const findings = (Array.isArray(review.findings) ? review.findings : [])
+  review.findings = (Array.isArray(review.findings) ? review.findings : [])
     .filter((finding) => finding && typeof finding === "object");
+  review.path = review.path || state.document?.path;
+  const findings = review.findings;
   state.review = review;
-  if (!dom.codexChat.hidden) closeCodexChat();
+  storeSectionReview();
+  if (!restored && !dom.codexChat.hidden) closeCodexChat();
   dom.reviewPanel.hidden = false;
   dom.reviewPanel.scrollTop = 0;
   dom.reviewSummary.textContent = review.summary || "";
@@ -3953,11 +4026,20 @@ function renderSectionReview(review) {
     dismiss.type = "button";
     dismiss.className = "text-button";
     dismiss.textContent = "Dismiss";
-    dismiss.addEventListener("click", () => card.remove());
+    dismiss.addEventListener("click", () => {
+      card.remove();
+      review.findings = review.findings.filter((item) => item !== finding);
+      storeSectionReview();
+    });
     const take = document.createElement("button");
     take.type = "button";
     take.className = "button button-dark button-small";
     take.textContent = "Take as comment";
+    if (finding.taken) {
+      card.classList.add("is-taken");
+      take.textContent = "Added";
+      take.disabled = true;
+    }
     take.addEventListener("click", async () => {
       take.disabled = true;
       try {
@@ -3974,6 +4056,8 @@ function renderSectionReview(review) {
         await refreshRequests();
         card.classList.add("is-taken");
         take.textContent = "Added";
+        finding.taken = true;
+        storeSectionReview();
       } catch (error) {
         showToast(error.message, 5200);
         take.disabled = false;
@@ -4141,12 +4225,21 @@ async function submitComment({ responseMode = "rewrite" } = {}) {
     });
     closeCommentComposer();
     await refreshRequests();
-    showToast(
-      responseMode === "link"
-        ? "Looking for the other locations this comment reaches. Each one will get its own linked comment; nothing is rewritten."
-        : `Comment sent to ${providerDisplayName()}. A red/green proposal will appear here.`,
-      responseMode === "link" ? 5200 : 4200,
-    );
+    // Do not promise a proposal from a backend that cannot run.
+    const picked = agentProviderOptions().find((option) => option.id === state.agentProvider);
+    const agentOff = state.bootstrap?.agent?.enabled === false;
+    if (agentOff || (picked && !providerIsAvailable(picked))) {
+      showToast(agentOff
+        ? "Comment saved. The AI agent is turned off in this project, so nothing will answer it."
+        : `Comment saved, but ${picked.label} is not ready: ${providerUnavailableReason(picked)} Choose another agent in the top bar, then Retry on the card.`, 7000);
+    } else {
+      showToast(
+        responseMode === "link"
+          ? "Looking for the other locations this comment reaches. Each one will get its own linked comment; nothing is rewritten."
+          : `Comment sent to ${providerDisplayName()}. A red/green proposal will appear here.`,
+        responseMode === "link" ? 5200 : 4200,
+      );
+    }
   } catch (error) {
     showToast(error.message, 5000);
   } finally {
@@ -4206,6 +4299,17 @@ function appendLinkedComments(container, request) {
   container.append(section);
 }
 
+function tickRunningStatuses() {
+  for (const status of document.querySelectorAll(".request-status[data-running-since]")) {
+    const since = Number(status.dataset.runningSince);
+    if (!since) continue;
+    const seconds = Math.max(0, Math.round((Date.now() - since) / 1000));
+    const elapsed = seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min ${String(seconds % 60).padStart(2, "0")} s`;
+    status.textContent = `${status.dataset.label} ${elapsed}`;
+  }
+}
+setInterval(tickRunningStatuses, 1000);
+
 function createRequestCard(request, { compact = false } = {}) {
   const card = document.createElement("article");
   card.className = `request-card request-${request.status}${compact ? " request-compact" : ""}`;
@@ -4250,8 +4354,16 @@ function createRequestCard(request, { compact = false } = {}) {
             ? `${providerDisplayNameStart(request.provider)} needs attention`
             : request.rejectedAt
               ? "Ready to retry"
-              : `Waiting for ${providerDisplayName(request.provider)}`;
+              // Nothing is running for this comment (auto-processing is off, or the
+              // server restarted while it was queued): "Waiting for…" read as progress.
+              : "Not sent yet";
   if (request.agentError) status.title = request.agentError;
+  // A run can take a minute or more with some backends; a label that never
+  // changes looks stuck. tickRunningStatuses() appends the elapsed time.
+  if (request.status === "pending" && request.agentStatus === "running" && request.agentUpdatedAt) {
+    status.dataset.runningSince = String(Date.parse(request.agentUpdatedAt) || "");
+    status.dataset.label = status.textContent;
+  }
   // The explicit, keyboard-reachable way to the passage. The card itself is a
   // plain article: it holds buttons and a text field, so it cannot be a button.
   const location = document.createElement(anchorMissing ? "span" : "button");
@@ -4589,7 +4701,9 @@ function createRequestCard(request, { compact = false } = {}) {
     const process = document.createElement("button");
     process.type = "button";
     process.className = "button button-dark";
-    process.textContent = `${request.rejectedAt || ["failed", "complete"].includes(request.agentStatus) ? "Retry" : "Run"} ${providerDisplayName(request.provider)}`;
+    // The run goes to the backend picked in the top bar now, not to the one that
+    // failed: name that one, so "Retry" after switching backends says what it does.
+    process.textContent = `${request.rejectedAt || ["failed", "complete"].includes(request.agentStatus) ? "Retry" : "Run"} ${providerDisplayName()}`;
     process.addEventListener("click", async (event) => {
       event.stopPropagation();
       process.disabled = true;
@@ -5246,7 +5360,11 @@ function renderRequestLists() {
   const previousScrollTop = dom.requestList.scrollTop;
   const cardDrafts = captureRequestCardDrafts();
   commentCardResizeObserver?.disconnect();
-  const active = state.requests.filter((request) => ["pending", "proposed", "discussed"].includes(request.status) && request.anchorValid !== false);
+  // A comment whose passage no longer exists in the file (another proposal
+  // rewrote it, or the file changed on disk) stays in the list as an "Anchor
+  // changed" card below the others. It used to be filtered out here, so the
+  // author's comment vanished without a word and could never be deleted.
+  const active = state.requests.filter((request) => ["pending", "proposed", "discussed"].includes(request.status));
   const current = active
     .filter((request) => Boolean(linkedChangeForCurrentDocument(request)))
     .sort(compareCurrentReviewRequests);
@@ -5287,6 +5405,7 @@ function renderRequestLists() {
     commentCardResizeObserver?.observe(card);
   }
   decorateReviewCards(new Map(current.map((request, index) => [request.id, index + 1])));
+  tickRunningStatuses();
   commentCardResizeObserver?.observe(dom.commentComposer);
   applyCommentMarkers();
   positionCommentCards({ restoreScrollTop: previousScrollTop });
@@ -5779,7 +5898,14 @@ function applyCompileState(value) {
   dom.compileStatus.textContent = labels[value.status] || value.status;
   dom.compileButton.disabled = value.status === "running";
   dom.compileLog.textContent = value.log || "No compiler output yet.";
-  if (value.status === "failed") dom.compileDetails.open = true;
+  // The log panel ships hidden; a failed compile is the one time it matters.
+  // Without this the author only ever saw the two words "Compile failed".
+  const failed = value.status === "failed";
+  if (failed && dom.compileDetails.hidden) {
+    dom.compileDetails.open = true;
+    showToast("The PDF did not compile. The compiler's output is open at the bottom right; Undo takes back the last change.", 6000);
+  }
+  dom.compileDetails.hidden = !failed;
   if (value.status === "succeeded") {
     state.compiledPdfUrl = `/api/pdf?v=${value.pdfVersion}`;
     if (!dom.paperPreview.hidden && state.paperPreviewMode === "compiled") renderCompiledPdfPreview();
@@ -6215,7 +6341,12 @@ function initAgentProvider() {
   } catch {
     stored = null;
   }
-  setAgentProvider(stored || agent.provider, { persist: false });
+  // The remembered choice is per browser origin, so it follows the user from one
+  // paper (or the demo) to the next. When it cannot run here and this project's
+  // own default can, the default wins; the remembered choice is left alone.
+  const option = (id) => agentProviderOptions().find((item) => item.id === id);
+  const storedUnusable = stored && !providerIsAvailable(option(stored)) && providerIsAvailable(option(agent.provider));
+  setAgentProvider(storedUnusable ? agent.provider : stored || agent.provider, { persist: false });
   dom.agentProvider.addEventListener("change", (event) => {
     setAgentProvider(event.target.value);
     showToast(`New comments and chat turns will use ${providerDisplayName(event.target.value)}.`, 3200);
@@ -6279,9 +6410,16 @@ async function start() {
       option.textContent = documentInfo.label;
       dom.documentSelect.append(option);
     }
-    const initial = state.bootstrap.documents.some((item) => item.path === state.bootstrap.initialDocument)
-      ? state.bootstrap.initialDocument
-      : state.bootstrap.documents[0]?.path;
+    // A reload comes back to the file this tab had open, not to the entry point.
+    let reopened = null;
+    try {
+      reopened = sessionStorage.getItem(OPEN_DOCUMENT_STORAGE_KEY);
+    } catch {
+      reopened = null;
+    }
+    const initial = [reopened, state.bootstrap.initialDocument]
+      .find((candidate) => state.bootstrap.documents.some((item) => item.path === candidate))
+      || state.bootstrap.documents[0]?.path;
     if (!initial) throw new Error("No LaTeX or Markdown documents were found.");
     applyCompileState(state.bootstrap.compile);
     // The document, the comments and the outline all feed one render; hold it
@@ -6523,9 +6661,13 @@ dom.closeComment.addEventListener("click", closeCommentComposer);
 dom.cancelComment.addEventListener("click", closeCommentComposer);
 dom.askCommentInChat.addEventListener("click", askCommentQuestionInChat);
 if (dom.rewriteScope) dom.rewriteScope.addEventListener("change", updateScopeHint);
+if (dom.contextMode) dom.contextMode.addEventListener("change", updateComposerOptionsSummary);
 if (dom.reviewSection) dom.reviewSection.addEventListener("click", runSectionReview);
 if (dom.reviewPanelClose) {
-  dom.reviewPanelClose.addEventListener("click", () => { dom.reviewPanel.hidden = true; });
+  dom.reviewPanelClose.addEventListener("click", () => {
+    dom.reviewPanel.hidden = true;
+    forgetSectionReview(state.review?.path);
+  });
 }
 dom.submitComment.addEventListener("click", () => submitComment());
 dom.findLinked.addEventListener("click", () => submitComment({ responseMode: "link" }));

@@ -82,6 +82,18 @@ function ping(provider, config) {
   });
 }
 
+// Everything a short status subcommand prints. stdin is closed so a CLI that
+// reads it cannot wait; any failure is just an empty answer.
+function commandOutput(command, args) {
+  return new Promise((resolve) => {
+    const plan = spawnPlan(command, args);
+    const child = execFile(plan.command, plan.args, { cwd: appRoot, timeout: 10000, env: childEnvironment(), ...plan.options }, (error, stdout, stderr) => {
+      resolve(`${stdout || ""}\n${stderr || ""}`);
+    });
+    child.stdin?.end();
+  });
+}
+
 // Is anything listening at a local, keyless endpoint (Ollama, a local
 // OpenAI-compatible server)? Any HTTP answer counts; no key and no prompt is
 // sent, and only loopback addresses are probed, so this stays offline.
@@ -172,6 +184,17 @@ if (loaded) {
       `${state.label}${isDefault ? " (default)" : ""}: ${detail}`,
       state.reason,
     );
+    // An installed CLI that is signed out looks "ready" and then fails every run.
+    // Asked only of the real binaries (a wrapper or test double is left alone),
+    // and reported only when the CLI says so in as many words.
+    const signIn = PROVIDER_TABLE[id].signIn;
+    const executable = state.available && signIn ? path.basename(String(resolveExecutable(providerCommand(id, config)) || "")) : "";
+    if (executable.replace(/\.(exe|cmd)$/i, "") === PROVIDER_TABLE[id].defaultCommand) {
+      const status = await commandOutput(providerCommand(id, config), signIn.args);
+      if (signIn.signedOut.test(status)) {
+        check(`signin:${id}`, false, isDefault && !agentOff ? "error" : "info", `${state.label}: installed, but not signed in`, signIn.fix);
+      }
+    }
     if (state.warning) {
       check(`sandbox:${id}`, false, isDefault && !agentOff ? "warn" : "info", `${state.label}: ${state.warning}`, `Set ${PROVIDER_TABLE[id].commandEnv}=/path/to/the/real/binary in .env.`);
     }

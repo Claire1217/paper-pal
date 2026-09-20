@@ -60,6 +60,9 @@ writeFileSync(path.join(logRoot, "last-run.json"), JSON.stringify({
 // Echo the instruction so the test can check that traces are redacted.
 process.stderr.write(`fake-agent instruction: ${task?.instruction ?? ""}\n`);
 
+// A real CLI traces on stderr: the echoed prompt, then timestamped log lines.
+if (process.env.FAKE_AGENT_STDERR) process.stderr.write(`${process.env.FAKE_AGENT_STDERR}\n`);
+
 if (process.env.FAKE_AGENT_SLEEP_MS) {
   await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_AGENT_SLEEP_MS)));
 }
@@ -87,5 +90,8 @@ if (!schemaPath) {
     relatedChanges: [],
   });
 }
+// FAKE_AGENT_ANSWER replaces the final message (malformed or unexpected output).
+if (process.env.FAKE_AGENT_ANSWER !== undefined) answer = process.env.FAKE_AGENT_ANSWER;
 if (outputPath) writeFileSync(outputPath, answer);
 else process.stdout.write(answer);
+if (process.env.FAKE_AGENT_EXIT) process.exitCode = Number(process.env.FAKE_AGENT_EXIT);

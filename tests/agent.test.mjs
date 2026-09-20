@@ -184,8 +184,118 @@ describe("state files under concurrency", () => {
   });
 });
 
+describe("agent answers that need care", () => {
+  after(cleanupAll);
+
+  it("drops words the agent echoed from just outside the selection", async () => {
+    // Selection "loud streets" inside "…are also loud streets." A model tends to
+    // return the word before it and the full stop after it as well.
+    const project = await makeProject({ fakeAgent: true });
+    const answer = JSON.stringify({ replacementText: "also noisy streets.", summary: "plainer", relatedChanges: [] });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_ANSWER: answer } });
+    const file = path.join(project.root, "sections/01_introduction.tex");
+    const before = await fs.readFile(file, "utf8");
+    const created = await commentOn(server, "sections/01_introduction.tex", "loud streets", "Plainer.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    const proposed = await waitForRequest(server, created.id, (request) => request.status === "proposed", "proposal");
+    assert.equal(proposed.proposal.replacementText, "noisy streets");
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: created.id } });
+    assert.equal(await fs.readFile(file, "utf8"), before.replace("are also loud streets.", "are also noisy streets."));
+  });
+});
+
+describe("review progress after an accepted proposal", () => {
+  after(cleanupAll);
+
+  it("counts a block whose whole text was accepted as fully reviewed", async () => {
+    // The abstract block starts with the newline after \begin{abstract}; that
+    // character can never be selected and must not hold the section at 99%.
+    const project = await makeProject({ fakeAgent: true });
+    // A short abstract: in a long one the missing character is rounded away.
+    const main = path.join(project.root, "main.tex");
+    const source = await fs.readFile(main, "utf8");
+    await fs.writeFile(main, source.replace(/(\\begin\{abstract\}\n)[\s\S]*?(\n\\end\{abstract\})/, "$1Urban songbirds are widely reported to sing early.$2"));
+    const server = await startServer(project.root);
+    const document = await getDocument(server, "main.tex");
+    const block = document.blocks.find((item) => item.raw.includes("Urban songbirds are widely reported"));
+    assert.match(block.raw, /^\s/, "the fixture's abstract block begins with white space");
+    const created = await commentOn(server, "main.tex", block.raw.trim(), "Louder.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    await waitForRequest(server, created.id, (request) => request.status === "proposed", "proposal");
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: created.id } });
+    const outline = await apiOk(server, "/api/outline");
+    assert.equal(outline.items.find((item) => item.title === "Abstract").reviewedPercent, 100);
+  });
+});
+
+describe("agent answers that change nothing", () => {
+  after(cleanupAll);
+
+  it("keeps the agent's reason when it returns the rest of the sentence and no change", async () => {
+    // Half a sentence is selected; the agent answers with the whole, unchanged
+    // sentence. Accepting that as written would repeat the second half.
+    const project = await makeProject({ fakeAgent: true });
+    const answer = JSON.stringify({ replacementText: "Bright streets are also loud streets.", summary: "The sentence is already fine.", relatedChanges: [] });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_ANSWER: answer } });
+    const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are", "Is this fine?");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    const failed = await waitFor(async () => {
+      const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+      return request?.agentStatus === "failed" ? request : null;
+    }, { label: "no-change answer" });
+    assert.equal(failed.status, "pending", "no proposal that would duplicate text is offered");
+    assert.match(failed.agentError, /proposed no change: The sentence is already fine\./);
+  });
+});
+
 describe("agent timeouts", () => {
   after(cleanupAll);
+
+  it("reports a failed run as a short message, not as the tail of the CLI's trace", async () => {
+    const reconnect = (n) => `2026-01-01T00:00:0${n}.000000Z ERROR codex_api::endpoint: failed to connect to websocket: URL error\nERROR: Reconnecting... ${n}/5`;
+    const noise = [`user\n${"prompt echo ".repeat(400)}`, ...[1, 2, 3, 4, 5].map(reconnect), "ERROR: Reconnecting... waiting for network"].join("\n");
+    const project = await makeProject({ fakeAgent: true, config: { agent: { timeoutMs: 1500 } } });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_SLEEP_MS: "60000", FAKE_AGENT_STDERR: noise } });
+    const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Tighten.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    const failed = await waitFor(async () => {
+      const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+      return request?.agentStatus === "failed" ? request : null;
+    }, { label: "noisy timeout" });
+    assert.match(failed.agentError, /^Codex rewrite timed out after 2 s\./, "the message leads with the timeout");
+    assert.match(failed.agentError, /waiting for network/);
+    assert.match(failed.agentError, /check the network connection or proxy, then Retry\.$/);
+    assert.ok(failed.agentError.length < 900, `short enough to read (${failed.agentError.length})`);
+    assert.equal(failed.agentError.match(/failed to connect to websocket/g).length, 1, "repeated log lines are shown once");
+    assert.doesNotMatch(failed.agentError, /prompt echo|2026-01-01T/);
+  });
+
+  it("says what to do when the CLI is not signed in", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_STDERR: "ERROR: unexpected status 401 Unauthorized: Missing bearer", FAKE_AGENT_EXIT: "1" } });
+    const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Tighten.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    const failed = await waitFor(async () => {
+      const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+      return request?.agentStatus === "failed" ? request : null;
+    }, { label: "auth failure" });
+    assert.match(failed.agentError, /401 Unauthorized/);
+    assert.match(failed.agentError, /not signed in: sign in to its CLI/);
+  });
+
+  it("says to update a CLI that refuses one of the options", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    const stderr = "error: unexpected argument '--ephemeral' found\n\nUsage: codex exec [OPTIONS] [PROMPT]\n\nFor more information, try '--help'.";
+    const server = await startServer(project.root, { env: { FAKE_AGENT_STDERR: stderr, FAKE_AGENT_EXIT: "2" } });
+    const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Tighten.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    const failed = await waitFor(async () => {
+      const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+      return request?.agentStatus === "failed" ? request : null;
+    }, { label: "argument failure" });
+    assert.match(failed.agentError, /unexpected argument '--ephemeral'/);
+    assert.match(failed.agentError, /update the CLI to its current version/);
+  });
 
   it("names the provider, fails the run, and kills a child that ignores SIGTERM", async () => {
     const project = await makeProject({ fakeAgent: true, config: { agent: { timeoutMs: 600 } } });

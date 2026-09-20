@@ -2,6 +2,7 @@ import { existsSync, promises as fs, openSync, readSync, closeSync, statSync } f
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { schemaForResponseFormat } from "./api-adapter.mjs";
 import { APP_NAME, CONFIG_NAME, ENV } from "./names.mjs";
 
 // Paper Pal talks to an agent through one narrow contract: write the prompt to
@@ -30,6 +31,8 @@ import { APP_NAME, CONFIG_NAME, ENV } from "./names.mjs";
 //                 itself is never stored in a configuration file.
 //   keyRequired   false for endpoints that work without a key (local servers)
 //   effortStyle   how a reasoning effort is expressed in the request body
+//   signIn        (cli) the subcommand that reports the sign-in state, the output
+//                 that means "signed out", and what to tell the user. Doctor only.
 //
 // No model ids are listed on purpose: they go stale. An API provider without a
 // configured model is reported as "not ready" instead of guessing one.
@@ -37,10 +40,12 @@ export const PROVIDER_TABLE = Object.freeze({
   codex: {
     label: "Codex", kind: "cli", capabilities: { readRepo: true },
     defaultCommand: "codex", commandEnv: "CODEX_BIN",
+    signIn: { args: ["login", "status"], signedOut: /not logged in/i, fix: "Run \"codex login\" in a terminal." },
   },
   claude: {
     label: "Claude", kind: "cli", capabilities: { readRepo: true },
     defaultCommand: "claude", commandEnv: "CLAUDE_BIN",
+    signIn: { args: ["auth", "status"], signedOut: /"loggedIn"\s*:\s*false|not logged in/i, fix: "Run \"claude\" in a terminal and sign in with /login." },
   },
   openai: {
     label: "OpenAI API", kind: "api", capabilities: { readRepo: false },
@@ -476,7 +481,16 @@ export async function buildAgentInvocation({
   const args = ["exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--config", 'approval_policy="never"', "--color", "never"];
   if (model) args.push("--model", String(model));
   if (reasoningEffort) args.push("--config", `model_reasoning_effort="${reasoningEffort}"`);
-  if (schemaPath) args.push("--output-schema", schemaPath);
+  if (schemaPath) {
+    // Codex hands --output-schema to the same strict structured-output mode the
+    // API adapter talks to, which rejects the whole request over a keyword such
+    // as minLength or maxItems. Give it the simplified copy, written next to
+    // the run's output file so it is removed with it.
+    const strictSchemaPath = `${outputPath}.schema.json`;
+    const strictSchema = schemaForResponseFormat(JSON.parse(await fs.readFile(schemaPath, "utf8")));
+    await fs.writeFile(strictSchemaPath, `${JSON.stringify(strictSchema, null, 2)}\n`, "utf8");
+    args.push("--output-schema", strictSchemaPath);
+  }
   // "-" as the prompt makes `codex exec` read the instructions from stdin.
   args.push("--output-last-message", outputPath, "-C", repoRoot, "-");
   return { command, args, input: prompt, capturesStdout: false, provider: resolved };

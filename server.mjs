@@ -26,7 +26,7 @@ import {
 import { isInside, loadReviewConfig } from "./config.mjs";
 import { loadEnvFile } from "./env.mjs";
 import {
-  APP_ID, APP_NAME, ENV, TEMP_PREFIX, appVersion, hostFromEnvironment, resolveStateDir,
+  APP_ID, APP_NAME, CONFIG_NAME, ENV, TEMP_PREFIX, appVersion, hostFromEnvironment, resolveStateDir,
 } from "./names.mjs";
 
 
@@ -34,7 +34,12 @@ const appRoot = path.dirname(fileURLToPath(import.meta.url));
 // API keys and app-local switches come from <appRoot>/.env (never from the
 // project directory). Variables already set in the shell win.
 loadEnvFile(appRoot);
-const { repoRoot, configPath, config, port } = await loadReviewConfig({ appRoot });
+// A missing or invalid configuration is the most common first-run mistake: say
+// what to do in plain words, without a stack trace around it.
+const { repoRoot, configPath, config, port } = await loadReviewConfig({ appRoot }).catch((error) => {
+  console.error(`${APP_NAME} could not start.\n${error instanceof Error ? error.message : error}`);
+  process.exit(1);
+});
 rememberConfig(config);
 // Only the app-specific variable is honoured. Many shells and CI images export
 // a generic HOST=<machine name>, which would silently expose this
@@ -3153,8 +3158,13 @@ async function compiledOutline() {
         points += 1;
         continue;
       }
+      // Measured over the block's text without the white space at its edges: a
+      // selection can never cover that, so an abstract block that begins with a
+      // newline stopped at 99% after its whole text was accepted.
+      const textStart = block.raw.length - block.raw.trimStart().length;
+      const textEnd = Math.max(textStart, block.raw.trimEnd().length);
       const ranges = [...(block.acceptedRanges || []), ...(block.humanRanges || [])]
-        .map((range) => ({ start: Math.max(0, range.start), end: Math.min(block.raw.length, range.end) }))
+        .map((range) => ({ start: Math.max(textStart, range.start), end: Math.min(textEnd, range.end) }))
         .filter((range) => range.end > range.start)
         .sort((a, b) => a.start - b.start);
       const merged = [];
@@ -3164,7 +3174,7 @@ async function compiledOutline() {
         else merged.push({ ...range });
       }
       const acceptedLength = merged.reduce((sum, range) => sum + range.end - range.start, 0);
-      points += Math.min(1, acceptedLength / Math.max(1, block.raw.length));
+      points += Math.min(1, acceptedLength / Math.max(1, textEnd - textStart));
     }
     directMetrics.push({ points, total: reviewable.length });
   }
@@ -3591,10 +3601,47 @@ function spawnCaptured(command, args, { cwd, env = childEnvironment(), input = n
     timer = setTimeout(() => {
       terminateChild(child);
       const message = `${label} timed out after ${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${timeoutMs} ms`}.`;
-      stderr = stderr ? `${message}\n${stderr}` : message;
-      finish({ code: -1, error: new Error(message) });
+      finish({ code: -1, error: new Error(message), timedOut: true, timeoutMessage: message });
     }, timeoutMs);
   });
+}
+
+// What a failed agent run tells the author. A CLI's stderr is a trace, not a
+// message: Codex echoes the whole prompt there and logs every reconnect with a
+// timestamp, so the raw tail is a wall of noise that also pushes "timed out"
+// out of view. Lead with our own sentence, keep the few lines that say what
+// went wrong (once each), and end with what to do. The full trace stays in
+// TRACE.log.
+function agentFailureMessage(result, fallback, { timeoutSetting = "agent.timeoutMs" } = {}) {
+  const seen = new Set();
+  const lines = String(result?.stderr || result?.stdout || "")
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z?\s+(?:ERROR|WARN|INFO)\s+/, "").trim())
+    .reverse()
+    .filter((line) => {
+      // "Reconnecting... 2/5" and "3/5" are one message; keep the last of each.
+      const key = line.replace(/\d+/g, "#");
+      if (!line || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .reverse();
+  const telling = lines.filter((line) => /error|fail|denied|unauthori[sz]ed|invalid|cannot|could not|not (?:found|logged|supported|permitted|allowed)|refus|limit|quota|log ?in|warning/i.test(line));
+  const detail = (telling.length ? telling : lines).slice(-3).join(" ").slice(0, 600);
+  const all = lines.join("\n");
+  // The API adapter already ends its messages with what to check.
+  const hint = /\.env\b/.test(all) ? "" : /unexpected argument|unrecognized (?:option|argument)|unknown (?:option|argument)/i.test(all)
+    ? "The installed CLI does not accept an option Paper Pal passes: update the CLI to its current version, then Retry."
+    : /unauthori[sz]ed|\b401\b|not logged in|log ?in (?:required|again)|please (?:run )?.{0,20}log ?in|invalid api key|authentication/i.test(all)
+    ? "The backend is not signed in: sign in to its CLI in a terminal (or check the key in .env), then Retry."
+    : /waiting for network|failed to connect|connection failed|stream disconnected|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|fetch failed/i.test(all)
+      ? "The backend could not reach its service: check the network connection or proxy, then Retry."
+      : result?.timedOut
+        ? `Retry, or raise ${timeoutSetting} in ${CONFIG_NAME} and restart.`
+        : "";
+  const head = result?.timedOut ? result.timeoutMessage : "";
+  return [head, detail || (head ? "" : fallback), hint].filter(Boolean).join(" ").trim();
 }
 
 function codexRunRoot(requestId) {
@@ -4120,6 +4167,58 @@ async function validateRelatedProposalChanges(rawChanges, primaryPath) {
   return { changes, warnings };
 }
 
+// A model asked to rewrite part of a sentence sometimes repeats what stands
+// just outside the selection: "the evidence for it is" + "is weaker than…", the
+// rest of a sentence whose first half was selected, or a full stop that is
+// already there. Accepting that would double the text in the source. An echo
+// is removed when the replacement begins (ends) with the text right before
+// (after) the selection and the selected text itself did not: either up to
+// three whole words, or any run of 12 or more characters.
+function trimBoundaryEcho(replacementText, originalText, before, after) {
+  let result = replacementText;
+  const overlap = (longest, candidate, original) => {
+    for (let length = longest; length >= 12; length -= 1) {
+      const echo = candidate(length);
+      if (echo && !original(echo)) return echo.length;
+    }
+    return 0;
+  };
+  const longLead = overlap(
+    Math.min(before.length, result.length),
+    (length) => (result.startsWith(before.slice(-length)) ? before.slice(-length) : ""),
+    (echo) => originalText.startsWith(echo),
+  );
+  if (longLead) result = result.slice(longLead);
+  const longTail = overlap(
+    Math.min(after.length, result.length),
+    (length) => (result.endsWith(after.slice(0, length)) ? after.slice(0, length) : ""),
+    (echo) => originalText.endsWith(echo),
+  );
+  if (longTail) result = result.slice(0, -longTail);
+
+  const lead = longLead || /^\s/.test(result) ? "" : before.match(/(?:^|\s)((?:\S+[ \t]+){1,3})$/)?.[1] || "";
+  const leadWords = lead.split(/(?<=[ \t])(?=\S)/);
+  for (let count = leadWords.length; count >= 1; count -= 1) {
+    const echo = leadWords.slice(-count).join("");
+    if (/\w/.test(echo) && result.startsWith(echo) && !originalText.startsWith(echo)) {
+      result = result.slice(echo.length);
+      break;
+    }
+  }
+  const tail = longTail || /\s$/.test(result) ? "" : after.match(/^((?:[ \t]+\S+){1,3})(?=\s|$)/)?.[1] || "";
+  const tailWords = tail.split(/(?<=\S)(?=[ \t])/);
+  for (let count = tailWords.length; count >= 1; count -= 1) {
+    const echo = tailWords.slice(0, count).join("");
+    if (/\w/.test(echo) && result.endsWith(echo) && !originalText.endsWith(echo)) {
+      result = result.slice(0, -echo.length);
+      break;
+    }
+  }
+  const mark = longTail ? null : after.match(/^[.,;:!?]/)?.[0];
+  if (mark && result.trim() && result.endsWith(mark) && !originalText.endsWith(mark)) result = result.slice(0, -1);
+  return result;
+}
+
 async function attachGeneratedProposal(requestId, replacementText, summary) {
   const { target, value: request } = await readRewriteRequest(requestId);
   const unitRevision = request.status === "proposed"
@@ -4136,7 +4235,16 @@ async function attachGeneratedProposal(requestId, replacementText, summary) {
     throw new Error(`The selected passage matched ${matchCount} locations; refusing to guess.`);
   }
   const originalText = source.slice(match.absoluteStart, match.absoluteEnd);
-  if (replacementText === originalText) throw new Error("The proposed replacement is identical to the selected text.");
+  replacementText = trimBoundaryEcho(
+    replacementText, originalText,
+    source.slice(Math.max(0, match.absoluteStart - 200), match.absoluteStart),
+    source.slice(match.absoluteEnd, match.absoluteEnd + 200),
+  );
+  if (replacementText === originalText) {
+    // Usually the agent's way of saying "this is fine": its reason is the answer
+    // the author was waiting for, so it must not be lost behind a bare error.
+    throw new Error(`The agent proposed no change${summary ? `: ${summary}` : "."} Retry with a more specific instruction, or delete the comment.`);
+  }
   request.status = "proposed";
   request.proposal = {
     proposedAt: new Date().toISOString(),
@@ -4475,7 +4583,7 @@ async function runSectionReview(body = {}) {
     activeReviewChild = null;
     await captureAgentOutput({ invocation, result, outputPath });
     if (result.code !== 0) {
-      throw new HttpError(502, redactSecrets((result.stderr || result.stdout || "The review could not be produced.").trim()).slice(-600));
+      throw new HttpError(502, redactSecrets(agentFailureMessage(result, "The review could not be produced.", { timeoutSetting: "agent.projectTimeoutMs" })));
     }
     let parsed;
     try {
@@ -4826,7 +4934,11 @@ async function generateCodexProposal(requestId) {
       error.code = "CODEX_CANCELLED";
       throw error;
     }
-    if (result.code !== 0) throw new Error((result.stderr || result.stdout || `${providerLabel(provider)} could not create a proposal.`).trim());
+    if (result.code !== 0) {
+      throw new Error(agentFailureMessage(result, `${providerLabel(provider)} could not create a proposal.`, {
+        timeoutSetting: contextMode === "project" ? "agent.projectTimeoutMs" : "agent.timeoutMs",
+      }));
+    }
     let proposal;
     try {
       proposal = JSON.parse(cleanJsonOutput(await fs.readFile(outputPath, "utf8")));
@@ -5623,7 +5735,7 @@ async function runChatTurn(sessionId) {
     await captureAgentOutput({ invocation, result, outputPath });
     const activeRun = activeChatRuns.get(sessionId);
     if (activeRun) activeRun.child = null;
-    if (result.code !== 0) throw new Error((result.stderr || result.stdout || `${providerLabel(provider)} chat could not answer.`).trim());
+    if (result.code !== 0) throw new Error(agentFailureMessage(result, `${providerLabel(provider)} chat could not answer.`, { timeoutSetting: "agent.chatTimeoutMs" }));
     const rawContent = (await fs.readFile(outputPath, "utf8")).trim();
     if (!rawContent) throw new Error(`${providerLabel(provider)} chat returned an empty answer.`);
     await withProjectLock(async () => {
@@ -6111,11 +6223,26 @@ async function compilePdf() {
     finish({
       status: code === 0 ? "succeeded" : "failed",
       exitCode: code,
-      log,
+      log: code === 0 ? log : `${latexErrorSummary(log)}${log}`,
       pdfVersion: code === 0 ? Date.now() : compileState.pdfVersion,
     });
   });
   return compileState;
+}
+
+// A failed latexmk run ends in a page of boilerplate; the lines that say what is
+// wrong ("! Undefined control sequence." and the "l.18 …" below it) are far
+// above. Put them first so the author does not have to dig.
+function latexErrorSummary(log) {
+  const lines = String(log || "").split(/\r?\n/);
+  const found = [];
+  for (let index = 0; index < lines.length && found.length < 5; index += 1) {
+    if (!/^! /.test(lines[index])) continue;
+    const where = lines.slice(index + 1, index + 10).find((line) => /^l\.\d+ /.test(line));
+    const entry = where ? `${lines[index]}\n    ${where.trim()}` : lines[index];
+    if (!found.includes(entry)) found.push(entry);
+  }
+  return found.length ? `LaTeX errors:\n${found.join("\n")}\n\nFull compiler output:\n` : "";
 }
 
 function singleChangeSpan(baseText, changedText) {
@@ -7453,6 +7580,8 @@ async function listRequests() {
       if (agent) {
         request.agentStatus = agent.status;
         if (agent.error) request.agentError = agent.error;
+        // When the current state began; the page counts the seconds of a run from it.
+        if (agent.updatedAt) request.agentUpdatedAt = agent.updatedAt;
       }
       requests.push(request);
     } catch {

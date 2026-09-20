@@ -243,8 +243,11 @@ ever fail the run:
 ```
 
 For a CLI backend the detail is the first line that `<command> --version`
-prints. That is the only way doctor runs the backend binary: no prompt is
-sent and no model is called (without `--ping`, see below).
+prints. Doctor also asks an installed `codex` or `claude` for its sign-in state
+(`codex login status`, `claude auth status`) and adds a `signin:<id>` check
+only when the CLI answers that it is signed out (`severity: "error"` for the
+default backend). Those are the only ways doctor runs the backend binary: no
+prompt is sent and no model is called (without `--ping`, see below).
 
 The `env-file` check is always `ok: true`. Read its `detail`:
 
@@ -269,6 +272,7 @@ Typical failures:
 | `config` | The message says why. No configuration: run Step 4. A credential-like field, a custom `latex.command`, or a non-local `baseUrl` in `.paper-pal.json`: show the message to the user; do not set a `PAPER_PAL_ALLOW_*` switch on your own. |
 | `latex` | `latexmk` is missing but compilation is on. Ask the user: install a TeX distribution, or run Step 4 again with `--no-compile --force`. |
 | `provider:<default>` | `fix` holds the reason. See "Not ready" in Troubleshooting. |
+| `signin:<default>` | The CLI is installed but signed out. The **user** runs the command in `fix` (`codex login`, or `claude` and `/login`) in their own terminal. |
 
 Optional: `npm run --silent doctor -- --json --ping` also sends one real
 request (one output token) to each API provider that is ready, and adds
@@ -422,7 +426,7 @@ sent to that provider. With `ollama` everything stays local.
 | `Port 4317 is already in use. Stop the existing Paper Pal instance or start with --port <number>.` | Start with `--port <n>` (or set `PAPER_PAL_PORT` in `.env`). `--port 0` picks a free port and prints it. |
 | HTTP 421, `This server only answers requests addressed to its own local address.` | The URL used a host name other than `127.0.0.1`, `localhost` or `[::1]`. Use `http://127.0.0.1:<port>`. |
 | HTTP 403, `State-changing requests must carry the X-Paper-Pal: 1 header.` | A scripted POST needs `-H 'X-Paper-Pal: 1'` and a JSON body with `Content-Type: application/json`. The page does this by itself. |
-| `No Paper Pal configuration (.paper-pal.json) was found at ...` | Run Step 4, or pass `--repo "<paper>"`. |
+| `Paper Pal could not start.` followed by `No Paper Pal configuration (.paper-pal.json) was found at ...` | Run Step 4, or pass `--repo "<paper>"`. The server exits with code 1. |
 | Setup exit 5, several main files | Show `error.candidates`, rerun with `--main <file.tex>`. |
 | `latexmk was not found on PATH` | Install a TeX distribution, or rerun setup with `--no-compile --force`. |
 | PDF figures show no inline preview | Inline previews of `.pdf` figures need `pdftoppm` (poppler) or macOS `sips`. The figure still opens on click. |
