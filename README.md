@@ -12,17 +12,10 @@
 A local web app for writing papers. Comment on a passage, get a proposed rewrite as a word-level diff,<br>
 and nothing is written to your `.tex` files until you click **Accept**.
 
-**The AI is the Claude Code or Codex you already use.** Paper Pal drives the CLI you are signed in to,<br>
-so your Claude or ChatGPT plan covers it: no API key, no second subscription. API keys and local models work too.
-
 [![License: MIT](https://img.shields.io/badge/license-MIT-2d6a4f?style=flat-square)](LICENSE)
 [![Tests](https://img.shields.io/github/actions/workflow/status/claire1217/paper-pal/ci.yml?branch=main&style=flat-square&label=tests)](https://github.com/claire1217/paper-pal/actions/workflows/ci.yml)
 [![Node 20+](https://img.shields.io/badge/node-%E2%89%A5%2020-2d6a4f?style=flat-square)](https://nodejs.org)
 [![Local first](https://img.shields.io/badge/local--first-no%20telemetry-2d6a4f?style=flat-square)](#privacy-and-safety)
-<br>
-[![Works with Claude Code](https://img.shields.io/badge/works%20with-Claude%20Code-d97757?style=flat-square)](#choose-your-ai-backend)
-[![Works with Codex CLI](https://img.shields.io/badge/works%20with-Codex%20CLI-10a37f?style=flat-square)](#choose-your-ai-backend)
-[![Also: API keys and Ollama](https://img.shields.io/badge/also-OpenAI%20%C2%B7%20Anthropic%20%C2%B7%20OpenRouter%20%C2%B7%20DeepSeek%20%C2%B7%20Ollama-555?style=flat-square)](#choose-your-ai-backend)
 
 <strong>English</strong> · <a href="./README.zh-CN.md">简体中文</a> &nbsp;|&nbsp; [How it works](#how-it-works) · [Quick start](#quick-start) · [Agent install](#let-your-ai-agent-install-it) · [Backends](#choose-your-ai-backend) · [Privacy](#privacy-and-safety) · [FAQ](#faq)
 
@@ -39,8 +32,6 @@ so your Claude or ChatGPT plan covers it: no API key, no second subscription. AP
 ## What it is
 
 Paper Pal opens your LaTeX project in the browser and shows the source as readable prose, with math, citations and cross-references rendered. You select a passage and say what is wrong with it; the AI you already use answers with a rewrite, shown as a diff against your words. Every write to a `.tex` file is a click of yours.
-
-**It is a front end for the coding agent you already have.** If `claude` (Claude Code) or `codex` (Codex CLI) runs in your terminal, Paper Pal is ready: it starts that CLI for every comment, read-only, inside your paper's folder, under your existing sign-in. The agent can read the rest of your project (other sections, notes, data, code) to answer a comment; it cannot write. No CLI? Use an API key (OpenAI, Anthropic, OpenRouter, DeepSeek, any OpenAI-compatible endpoint) or a local Ollama model instead, and switch between them per comment.
 
 <p>
 <picture>
@@ -131,8 +122,6 @@ git clone https://github.com/claire1217/paper-pal.git ~/paper-pal && cd ~/paper-
 npm run setup -- /path/to/your/paper      # finds your main .tex, writes .paper-pal.json
 npm start                                 # then open http://127.0.0.1:4317
 ```
-
-Setup picks the backend for you: Codex if `codex` is on your PATH, otherwise Claude Code if `claude` is, otherwise the first API provider whose key it finds. To choose yourself, add `--provider claude` or `--provider codex`; you can also switch in the app's top bar at any time. The CLI must already be signed in (`claude` or `codex login` once in a terminal); `npm run doctor` checks that.
 
 No paper at hand? `npm run demo -- --open` serves a throwaway copy of the sample paper at the same address and deletes it when you stop. It needs no LaTeX, no AI backend and no key.
 
@@ -238,12 +227,6 @@ Reference: [configuration](docs/configuration.md) · [LaTeX support and limits](
 ## FAQ
 
 <details open>
-<summary><b>Do I need an API key or another subscription?</b></summary>
-
-No. If you use Claude Code or the Codex CLI, Paper Pal runs on that: it calls the CLI you are signed in to, so usage counts against your existing Claude or ChatGPT plan, exactly as if you had typed the request in your terminal. An API key is only needed if you prefer an API provider, and a local Ollama model needs neither.
-</details>
-
-<details>
 <summary><b>Will it mangle my source?</b></summary>
 
 An accepted proposal replaces one mapped range and leaves everything else alone. The test suite edits every editable block of a multi-file test manuscript, more than 120 edits, and checks that nothing else changed; a fuzz test feeds the parser truncated and mutated files. Keep your paper in git anyway. Paper Pal never commits for you, so `git diff` always shows exactly what changed.
