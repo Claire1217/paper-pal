@@ -280,6 +280,12 @@ Paper Pal 本身免费。后端费用由提供方按你的账号计费。使用 
 不认识的宏会退化为只显示其参数文字，不常见的环境会退化为只读块，所以最坏的情况应该是“朴素”而不是“坏掉”。如果有内容被隐藏或显示成乱码，请提 issue 并附一个最小复现片段——不要贴你未发表的正文。
 </details>
 
+<details>
+<summary><b>它和 Paperpal，或者其他叫 “PaperPal” 的项目是一回事吗？</b></summary>
+
+不是。Paper Pal（两个词，仓库 <code>claire1217/paper-pal</code>）是一个独立的开源工具：在你自己的电脑上，逐条审阅 AI 对 LaTeX 论文的修改。Paperpal（paperpal.com）是另一家公司的商业写作服务，GitHub 上还有好几个同名但无关的仓库。想找到这个项目，请在 GitHub 搜 <code>claire1217/paper-pal</code> 或 <code>paper pal latex</code>。
+</details>
+
 ## 路线图
 
 把两个过大的源文件拆成模块、支持 `\chapter`、可编辑的标题块、脚注编号、后端设置界面，以及一个不需要 git 就能安装的打包版本。

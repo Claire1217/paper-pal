@@ -2,6 +2,8 @@
 
 > Paper Pal is a local-first, review-first AI writing workspace for LaTeX manuscripts. A small Node.js server on 127.0.0.1:4317 shows the .tex source as readable prose in the browser. The author selects a passage and comments, an AI backend (Codex CLI, Claude Code CLI, or an API provider: OpenAI, Anthropic, OpenRouter, DeepSeek, Ollama, any OpenAI-compatible endpoint) proposes a rewrite, a red/green diff is shown, and the .tex file changes only when the author clicks Accept.
 
+Paper Pal (two words, repository claire1217/paper-pal) is an independent open-source project. It is not Paperpal (paperpal.com), an unrelated commercial writing service, and not one of the other GitHub repositories named PaperPal.
+
 Paper Pal is MIT-licensed, needs Node.js 20 or newer and has one runtime dependency (KaTeX). There is no build step, no account and no hosted service. Installation is non-interactive: `npm run setup -- <paper-dir> --json` writes `<paper>/.paper-pal.json` and has documented exit codes, `npm run doctor -- --json` checks the environment, and `GET /api/health` reports whether the running app is ready. API keys live only in the `.env` file of the app folder, never in the paper's repository. No model ids are built in: the user supplies the model id of their provider. If you are an agent asked to install Paper Pal, read "Install guide for AI agents" first and follow it step by step.
 
 ## Docs

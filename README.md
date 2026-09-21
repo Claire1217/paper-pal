@@ -280,6 +280,12 @@ Experimental and untested by the maintainer. CI runs the suite on Windows, but t
 Unknown macros fall back to their argument text and unusual environments to read-only blocks, so the worst case should look plain, not broken. If something is hidden or shown as junk, please open an issue with a minimal snippet, not your unpublished text.
 </details>
 
+<details>
+<summary><b>Is this the same as Paperpal, or one of the other "PaperPal" projects?</b></summary>
+
+No. Paper Pal (two words, repository <code>claire1217/paper-pal</code>) is an independent open-source tool for reviewing AI edits to LaTeX on your own machine. Paperpal (paperpal.com) is an unrelated commercial writing service, and several unrelated GitHub repositories share the name. To find this one, search GitHub for <code>claire1217/paper-pal</code> or <code>paper pal latex</code>.
+</details>
+
 ## Roadmap
 
 Splitting the two large source files into modules, `\chapter` support, an editable title block, footnote numbering, a settings screen for backends, and a packaged release so installing does not need git.
