@@ -460,7 +460,7 @@ describe("command line entry points", () => {
       assert.ok(pkg.files.includes(entry), entry);
     }
     for (const entry of pkg.files.filter((value) => !value.includes("*"))) assert.ok(existsSync(path.join(appRoot, entry)), `${entry} does not exist`);
-    assert.deepEqual(pkg.files.filter((entry) => /^(tests|[.]github|docs\/images|node_modules)\b/.test(entry)), []);
+    assert.deepEqual(pkg.files.filter((entry) => /^(tests|[.]github|docs\/images|site|node_modules)\b/.test(entry)), []);
     assert.match(pkg.repository.url, /github[.]com\/claire1217\/paper-pal/i);
   });
 

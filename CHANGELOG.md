@@ -11,6 +11,11 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 - FAQ entry (both READMEs) and a line in `llms.txt` saying that Paper Pal is not
   Paperpal or one of the other "PaperPal" repositories, and how to find this one.
+- A landing page in `site/`, for https://claire1217.github.io/paper-pal/: the
+  README's story, quick start, backends, privacy notes and FAQ on one static
+  page, with search-engine metadata (`SoftwareApplication` and `FAQPage`
+  JSON-LD). `node scripts/pages.mjs <dir>` assembles it, and refuses to when
+  its FAQ and the README's differ.
 
 ### Fixed
 

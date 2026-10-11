@@ -67,6 +67,7 @@ npm run setup -- <paper-dir> [--json]   # writes <paper>/.paper-pal.json, never 
 npm run doctor -- [--json] [--ping]     # environment and provider checks
 npm run screenshots    # regenerates docs/images/*.png (see below)
 npm run animation      # regenerates docs/images/flow-*.svg and confirm-*.svg (see below)
+node scripts/pages.mjs _site            # assembles the landing page (see below)
 ```
 
 ## Code map
@@ -82,11 +83,12 @@ npm run animation      # regenerates docs/images/flow-*.svg and confirm-*.svg (s
 | `names.mjs` | Every on-disk and environment name, plus the pre-rename fallbacks. |
 | `env.mjs` | `.env` parser and loader (app folder only). |
 | `schemas/` | JSON Schemas of the four agent outputs. |
-| `scripts/` | `setup`, `doctor`, `demo`, `check`, `reanchor-confirmations`, `screenshots`, `readme-animation`. |
+| `scripts/` | `setup`, `doctor`, `demo`, `check`, `reanchor-confirmations`, `screenshots`, `readme-animation`, `pages`. |
 | `bin/paper-pal.mjs` | `paper-pal <setup\|doctor\|start\|demo>` dispatcher. |
 | `examples/sample-paper/` | Fictional manuscript used by the demo, the tests and the screenshots. |
 | `tests/` | `*.test.mjs` suites, `helpers.mjs`, `portable.mjs`, `run.mjs`, `fixtures/fake-agent.mjs`. |
 | `docs/` | User and reference documentation. `docs/api.md` must match the route table. |
+| `site/` | The landing page (one static HTML file, `robots.txt`, `sitemap.xml`). Not part of the npm package. |
 
 `server.mjs` and `public/app.js` are monoliths. Do not split them as a side effect of another
 change. Make the smallest edit that works, next to the related code, and search for an existing
@@ -162,6 +164,18 @@ hero screenshot, and what happens at each step is the app's own behaviour: the s
 the composer's buttons, the status labels, the toasts, the card leaving the list after Accept, the
 recompile after an accepted change, Preview (not Compile) opening the PDF pane, the empty-state
 explainer. Change them together with `public/app.js`.
+
+## The landing page
+
+`site/index.html` is the page at https://claire1217.github.io/paper-pal/: one file with inline
+CSS, no script and no third-party request, like the app. It uses the images in `docs/images/`
+and the fonts in `public/fonts/` by the paths `docs/images/...` and `fonts/...`.
+`node scripts/pages.mjs <dir>` copies the page and exactly the files it references into `<dir>`,
+writes the version from `package.json` into it, and fails when a referenced file is missing,
+the JSON-LD does not parse, or the FAQ (the visible one or the `FAQPage` data) no longer says
+what the README's FAQ says.
+To look at it: `node scripts/pages.mjs _site && python3 -m http.server -d _site 8000`.
+When you change the README's story or FAQ, change the page with it.
 
 ## PR checklist
 
