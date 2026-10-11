@@ -173,7 +173,8 @@ and the fonts in `public/fonts/` by the paths `docs/images/...` and `fonts/...`.
 `node scripts/pages.mjs <dir>` copies the page and exactly the files it references into `<dir>`,
 writes the version from `package.json` into it, and fails when a referenced file is missing,
 the JSON-LD does not parse, or the FAQ (the visible one or the `FAQPage` data) no longer says
-what the README's FAQ says.
+what the README's FAQ says. `.github/workflows/pages.yml` runs it on pushes to `main` that touch
+the page or what it uses, and deploys the result.
 To look at it: `node scripts/pages.mjs _site && python3 -m http.server -d _site 8000`.
 When you change the README's story or FAQ, change the page with it.
 

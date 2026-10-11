@@ -15,7 +15,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   README's story, quick start, backends, privacy notes and FAQ on one static
   page, with search-engine metadata (`SoftwareApplication` and `FAQPage`
   JSON-LD). `node scripts/pages.mjs <dir>` assembles it, and refuses to when
-  its FAQ and the README's differ.
+  its FAQ and the README's differ. `.github/workflows/pages.yml` deploys it
+  once GitHub Pages is switched on for the repository.
 
 ### Fixed
 
