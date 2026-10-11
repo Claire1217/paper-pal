@@ -11,7 +11,7 @@ version: "0.1.0"
 date-released: "2026-09-20"
 license: MIT
 repository-code: "https://github.com/claire1217/paper-pal"
-url: "https://github.com/claire1217/paper-pal"
+url: "https://claire1217.github.io/paper-pal/"
 keywords:
   - LaTeX
   - academic writing

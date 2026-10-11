@@ -21,9 +21,17 @@ describe("landing page", () => {
     assert.equal(software.softwareVersion, pkg.version);
     assert.equal(software.name, "Paper Pal");
     assert.ok(jsonLd(html).some((item) => item["@type"] === "FAQPage"));
+    assert.ok(html.includes(`<link rel="canonical" href="${pkg.homepage}" />`), "the canonical URL is package.json's homepage");
     for (const name of ["llms.txt", "robots.txt", "sitemap.xml", "docs/images/social-preview.png", "fonts/LICENSE-Inter.txt"]) {
       assert.ok(existsSync(path.join(out, name)), name);
     }
+  });
+
+  it("is the homepage named by package.json, CITATION.cff and llms.txt", async () => {
+    const { homepage } = JSON.parse(await read("package.json"));
+    assert.equal(homepage, "https://claire1217.github.io/paper-pal/");
+    assert.match(await read("CITATION.cff"), new RegExp(`^url: "${homepage}"$`, "m"));
+    assert.ok((await read("llms.txt")).includes(homepage));
   });
 
   it("takes its version from package.json, in the JSON-LD and on the page", async () => {
