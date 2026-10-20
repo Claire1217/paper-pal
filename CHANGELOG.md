@@ -37,6 +37,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   redefining `\footnote` to call `\oldfootnote` still shows the footnote. A
   macro whose body calls itself is shown like an unknown command instead of
   repeating.
+- **Applying a linked change set with two changes in one file kept only the
+  last one.** Each change was written from the file as it was before the set,
+  so the others were lost, and Undo then failed with "changed after this
+  action". This happened when a related change named the commented file
+  through a symlink or in another letter case. All changes to one file are now
+  applied together and the file is written once, so Undo restores it. Changes
+  in one file that overlap refuse the set, and the agent can no longer attach a
+  related change to a file that already has one under another spelling.
 - **"Keep my edit" could overwrite a different paragraph.** After a co-author
   added or removed a paragraph above the one being edited, the forced save
   replaced whatever paragraph now sat at the old position. It now finds the

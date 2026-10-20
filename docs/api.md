@@ -153,7 +153,7 @@ A "request" is one comment with its conversation, proposal and history.
 | POST | `/api/request/restore-unit-revision` | Restore the previous proposal after an interrupted unit revision. | `id` |
 | POST | `/api/request/review-linked-change` | Set the status of the primary or one linked (cross-file) change. | `id`, `changeId`, `status` |
 | POST | `/api/request/confirm-all-linked` | Confirm the primary and all linked changes. | `id` |
-| POST | `/api/request/apply-linked` | Apply the confirmed linked change set across files in one step. **Writes source.** | `id` |
+| POST | `/api/request/apply-linked` | Apply the confirmed linked change set across files in one step and push one undo entry. Changes to one file are applied together and the file is written once, under its real path. `400` when the comment has no set, when the primary or a linked change is still undecided or a required one is rejected, when two changes in one file overlap, or when a change would put a heading command inside a heading. `409` when a target file is not UTF-8, when a target changed and its passage cannot be found again, or when a file changed while the set was being applied. `400` for a malformed `id`, `404` for an unknown one. A refused set writes nothing; a write that fails partway restores the files already written. **Writes source.** | `id` |
 
 ### Section review
 

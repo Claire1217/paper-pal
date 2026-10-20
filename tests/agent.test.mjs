@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { api, apiOk, cleanupAll, commentOn, getDocument, makeProject, startServer, stateDirectory, waitFor, waitForRequest } from "./helpers.mjs";
+import { api, apiOk, cleanupAll, commentOn, getDocument, makeProject, startServer, stateDirectory, trySymlink, waitFor, waitForRequest } from "./helpers.mjs";
 
 const SECRET = "sk-test-DO-NOT-LEAK-0123456789";
 
@@ -626,5 +626,205 @@ describe("agent queue and chat runs that overlap", () => {
     await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
     await waitFor(async () => (await apiOk(server, "/api/requests")).find((item) => item.id === created.id)?.agentStatus === "failed", { label: "failed run" });
     assert.deepEqual(await fs.readdir(server.tmpDir), []);
+  });
+});
+
+describe("linked change sets with several changes in one file", () => {
+  const MAIN = "\\documentclass{article}\n\\begin{document}\n\\input{sec}\n\\input{other}\nMain body paragraph here.\n\\end{document}\n";
+  const SEC = "Alpha opens the study.\n\nBeta opens the result.\n\nGamma paragraph to edit by link.\n";
+  const OTHER = "Other paragraph to change.\n";
+  let project;
+  let server;
+
+  before(async () => {
+    project = await makeProject({ files: { "main.tex": MAIN, "sec.tex": SEC, "other.tex": OTHER }, fakeAgent: true });
+    server = await startServer(project.root);
+  });
+  after(cleanupAll);
+
+  async function resetSources() {
+    await Promise.all([["main.tex", MAIN], ["sec.tex", SEC], ["other.tex", OTHER]]
+      .map(([name, text]) => fs.writeFile(path.join(project.root, name), text, "utf8")));
+  }
+
+  // The agent run writes "proposed" first and the linked changes (or their
+  // warnings) in a second write that also adds its answer to the conversation.
+  // Wait for that answer, or a test can read, or rewrite, the half-done request.
+  const waitForProposal = (target, id) => waitForRequest(target, id, (request) =>
+    request.status === "proposed" && (request.conversation || []).some((message) => message.role === "assistant"), "proposal");
+
+  // The agent attaches at most one related change per file, so a set with
+  // several changes in one file is written into the stored request, as an
+  // older request or two spellings of one file can leave it.
+  async function proposeSet(primary, changes) {
+    const created = await commentOn(server, primary.path, primary.selectedText, "Shorten this.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    await waitForProposal(server, created.id);
+    const requestFile = path.join(project.root, stateDirectory, "requests", `${created.id}.json`);
+    const stored = JSON.parse(await fs.readFile(requestFile, "utf8"));
+    stored.proposal.replacementText = primary.replacementText;
+    stored.proposal.primaryReviewStatus = "confirmed";
+    stored.proposal.linkedChanges = [];
+    for (const [index, change] of changes.entries()) {
+      const document = await getDocument(server, change.path);
+      const absoluteStart = document.source.indexOf(change.selectedText);
+      assert.ok(absoluteStart >= 0, `${change.path} contains ${change.selectedText}`);
+      stored.proposal.linkedChanges.push({
+        id: `linked_${index + 1}`, path: change.path, status: "confirmed", required: true, summary: "test", reason: "test",
+        sourceEtag: document.etag, absoluteStart, absoluteEnd: absoluteStart + change.selectedText.length,
+        selectedText: change.selectedText, replacementText: change.replacementText,
+      });
+    }
+    // Write-then-rename, as the server does: a reader must never see half a file.
+    await fs.writeFile(`${requestFile}.test.tmp`, JSON.stringify(stored), "utf8");
+    await fs.rename(`${requestFile}.test.tmp`, requestFile);
+    return created.id;
+  }
+
+  const read = (name) => fs.readFile(path.join(project.root, name), "utf8");
+
+  for (const scenario of [
+    {
+      name: "two changes in one file and a primary in another",
+      primary: { path: "main.tex", selectedText: "Main body paragraph here.", replacementText: "Main." },
+      changes: [
+        { path: "sec.tex", selectedText: "Gamma paragraph to edit by link.", replacementText: "G." },
+        { path: "sec.tex", selectedText: "Alpha opens the study.", replacementText: "A." },
+      ],
+      expected: { "sec.tex": "A.\n\nBeta opens the result.\n\nG.\n", "main.tex": MAIN.replace("Main body paragraph here.", "Main.") },
+    },
+    {
+      name: "three changes in one file and one in a second file",
+      primary: { path: "sec.tex", selectedText: "Beta opens the result.", replacementText: "B." },
+      changes: [
+        { path: "sec.tex", selectedText: "Gamma paragraph to edit by link.", replacementText: "G." },
+        { path: "other.tex", selectedText: "Other paragraph to change.", replacementText: "O." },
+        { path: "sec.tex", selectedText: "Alpha opens the study.", replacementText: "A." },
+      ],
+      expected: { "sec.tex": "A.\n\nB.\n\nG.\n", "other.tex": "O.\n" },
+    },
+  ]) {
+    it(`applies every change of a set with ${scenario.name}, and Undo restores every file`, async () => {
+      await resetSources();
+      const id = await proposeSet(scenario.primary, scenario.changes);
+      const applied = await api(server, "/api/request/apply-linked", { method: "POST", body: { id } });
+      assert.equal(applied.status, 200, applied.value?.error);
+      for (const [name, text] of Object.entries(scenario.expected)) assert.equal(await read(name), text, name);
+      assert.equal((await apiOk(server, "/api/undo")).available, true);
+
+      const undone = await api(server, "/api/undo", { method: "POST" });
+      assert.equal(undone.status, 200, undone.value?.error);
+      assert.equal(await read("main.tex"), MAIN);
+      assert.equal(await read("sec.tex"), SEC);
+      assert.equal(await read("other.tex"), OTHER);
+      const request = (await apiOk(server, "/api/requests")).find((item) => item.id === id);
+      assert.equal(request.status, "proposed");
+      await apiOk(server, "/api/request/reject", { method: "POST", body: { id } });
+    });
+  }
+
+  it("applies a set whose changes name one file by two spellings", async (t) => {
+    await resetSources();
+    if (!(await trySymlink("sec.tex", path.join(project.root, "alias.tex"), "file"))) {
+      t.skip("symlinks are not available here");
+      return;
+    }
+    try {
+      const id = await proposeSet(
+        { path: "sec.tex", selectedText: "Beta opens the result.", replacementText: "B." },
+        [{ path: "alias.tex", selectedText: "Gamma paragraph to edit by link.", replacementText: "G." }],
+      );
+      const applied = await api(server, "/api/request/apply-linked", { method: "POST", body: { id } });
+      assert.equal(applied.status, 200, applied.value?.error);
+      assert.equal(await read("sec.tex"), "Alpha opens the study.\n\nB.\n\nG.\n");
+      const undone = await api(server, "/api/undo", { method: "POST" });
+      assert.equal(undone.status, 200, undone.value?.error);
+      assert.equal(await read("sec.tex"), SEC);
+      await apiOk(server, "/api/request/reject", { method: "POST", body: { id } });
+    } finally {
+      await fs.rm(path.join(project.root, "alias.tex"), { force: true });
+    }
+  });
+
+  it("keeps the review marks of a file whose changes name it by two spellings under its real name", async (t) => {
+    await resetSources();
+    if (!(await trySymlink("sec.tex", path.join(project.root, "alias.tex"), "file"))) {
+      t.skip("symlinks are not available here");
+      return;
+    }
+    const statePath = path.join(project.root, stateDirectory, "state.json");
+    const statePaths = async () => new Set(JSON.parse(await fs.readFile(statePath, "utf8")).selections.map((item) => item.path));
+    try {
+      // A confirmed range after a change in the same paragraph: its offsets must move.
+      const before = await getDocument(server, "sec.tex");
+      const block = before.blocks.find((item) => item.raw.includes("Beta opens the result."));
+      const start = block.raw.indexOf("the result.");
+      await apiOk(server, "/api/confirm", {
+        method: "POST",
+        body: { path: "sec.tex", etag: before.etag, segments: [{ blockIndex: block.index, blockId: block.id, start, end: start + "the result.".length }] },
+      });
+      const id = await proposeSet(
+        { path: "main.tex", selectedText: "Main body paragraph here.", replacementText: "Main." },
+        [
+          { path: "alias.tex", selectedText: "Beta opens", replacementText: "Beta now opens" },
+          { path: "sec.tex", selectedText: "Alpha opens the study.", replacementText: "A." },
+        ],
+      );
+      const applied = await api(server, "/api/request/apply-linked", { method: "POST", body: { id } });
+      assert.equal(applied.status, 200, applied.value?.error);
+      assert.equal(await read("sec.tex"), "A.\n\nBeta now opens the result.\n\nGamma paragraph to edit by link.\n");
+      assert.equal((await statePaths()).has("alias.tex"), false, "no review state under the alias");
+      const after = await getDocument(server, "sec.tex");
+      const moved = after.blocks.find((item) => item.raw.includes("Beta now opens"));
+      const ranges = moved.acceptedRanges.map((range) => moved.raw.slice(range.start, range.end));
+      assert.ok(ranges.includes("the result."), `the confirmed range moved with its text: ${JSON.stringify(ranges)}`);
+      assert.ok(ranges.includes("Beta now opens"), `the replacement is marked as accepted: ${JSON.stringify(ranges)}`);
+
+      const undone = await api(server, "/api/undo", { method: "POST" });
+      assert.equal(undone.status, 200, undone.value?.error);
+      assert.equal(await read("sec.tex"), SEC);
+      await apiOk(server, "/api/request/reject", { method: "POST", body: { id } });
+      await apiOk(server, "/api/undo", { method: "POST" });
+    } finally {
+      await fs.rm(path.join(project.root, "alias.tex"), { force: true });
+    }
+  });
+
+  it("refuses a set whose changes in one file overlap, and writes nothing", async () => {
+    await resetSources();
+    const id = await proposeSet(
+      { path: "sec.tex", selectedText: "Beta opens the result.", replacementText: "B." },
+      [
+        { path: "other.tex", selectedText: "Other paragraph to change.", replacementText: "O." },
+        { path: "sec.tex", selectedText: "opens the result.", replacementText: "ends." },
+      ],
+    );
+    const depth = (await apiOk(server, "/api/undo")).depth;
+    const applied = await api(server, "/api/request/apply-linked", { method: "POST", body: { id } });
+    assert.equal(applied.status, 400);
+    assert.match(applied.value.error, /overlap/);
+    assert.equal(await read("sec.tex"), SEC);
+    assert.equal(await read("other.tex"), OTHER);
+    assert.equal((await apiOk(server, "/api/undo")).depth, depth, "a refused set adds nothing to undo");
+    await apiOk(server, "/api/request/reject", { method: "POST", body: { id } });
+  });
+
+  it("does not attach a related change that reaches the commented file through a symlink", async (t) => {
+    const aliased = await makeProject({ files: { "main.tex": MAIN, "sec.tex": SEC, "other.tex": OTHER }, fakeAgent: true });
+    if (!(await trySymlink("sec.tex", path.join(aliased.root, "alias.tex"), "file"))) {
+      t.skip("symlinks are not available here");
+      return;
+    }
+    const answer = JSON.stringify({
+      replacementText: "B.",
+      summary: "test",
+      relatedChanges: [{ path: "alias.tex", selectedText: "Gamma paragraph to edit by link.", replacementText: "G.", summary: "test", reason: "test", required: true }],
+    });
+    const aliasedServer = await startServer(aliased.root, { env: { FAKE_AGENT_ANSWER: answer } });
+    const created = await commentOn(aliasedServer, "sec.tex", "Beta opens the result.", "Shorten this.");
+    await apiOk(aliasedServer, "/api/request/process", { method: "POST", body: { id: created.id } });
+    const proposed = await waitForProposal(aliasedServer, created.id);
+    assert.deepEqual(proposed.proposal.linkedChanges ?? [], []);
+    assert.match((proposed.proposal.linkedWarnings ?? []).join("\n"), /different file/);
   });
 });
