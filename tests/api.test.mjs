@@ -97,13 +97,15 @@ describe("API adapter: OpenAI-compatible protocol", () => {
   });
 
   it("retries once after a network error and reports it without the key", async () => {
-    // A listener that resets every connection: a failure on the wire, and no
-    // other test can take the port while it is held. A reset, not a plain
-    // close: Node 20's fetch waits out its timeout on a socket closed at once.
-    const dropper = net.createServer((socket) => socket.resetAndDestroy());
+    // A listener that hangs up once the request has arrived: a failure on the
+    // wire, and no other test can take the port while it is held. Closing
+    // before the request is written is not enough: on Node 20, and on Windows
+    // even after a reset, fetch then waits out its whole timeout. --timeout
+    // keeps a hang from costing two minutes.
+    const dropper = net.createServer((socket) => socket.once("data", () => socket.destroy()));
     await new Promise((resolve) => dropper.listen(0, "127.0.0.1", resolve));
     after(() => new Promise((resolve) => dropper.close(resolve)));
-    const run = await runAdapter(["--base-url", `http://127.0.0.1:${dropper.address().port}/v1`, "--model", "m", "--key-env", "MOCK_KEY"], { env: { MOCK_KEY: KEY } });
+    const run = await runAdapter(["--base-url", `http://127.0.0.1:${dropper.address().port}/v1`, "--model", "m", "--key-env", "MOCK_KEY", "--timeout", "15000"], { env: { MOCK_KEY: KEY } });
     assert.equal(run.status, 1);
     assert.match(run.stderr, /retrying once/);
     assert.match(run.stderr, /network error/);
