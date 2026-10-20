@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { apiOk, cleanupAll, getDocument, makeProject, saveBlock, startServer } from "./helpers.mjs";
+import { apiOk, cleanupAll, commentOn, getDocument, makeProject, saveBlock, startServer, waitForRequest } from "./helpers.mjs";
 
 const singleFile = String.raw`% A single-file article.
 \documentclass[11pt]{article}
@@ -392,5 +392,173 @@ Body text.
     assert.equal((await getDocument(todayServer, "main.tex")).frontMatter.date, null);
     const section = await getDocument(server, "sections/intro.tex");
     assert.equal(section.frontMatter ?? null, null);
+  });
+});
+
+describe("comments and rule arguments inside floats", () => {
+  const floats = String.raw`\documentclass{article}
+\usepackage{booktabs,colortbl,graphicx}
+\begin{document}
+\begin{table}
+% \caption{Old table caption}
+\caption{Live table caption}
+%\label{tab:old}
+\label{tab:live}
+\begin{tabular}{lll}
+\toprule[1.5pt]
+\rowcolor{gray!20} Name & Count & Note \\
+\midrule[0.8pt]
+% Dropped & 0 & row \\
+Kept & 1 & \cellcolor{red!10}fine % trailing & comment
+\\
+\cmidrule(lr){2-3}
+\specialrule{.1em}{.05em}{.05em}
+Last & 2 & done \\
+\bottomrule[1.5pt]
+\end{tabular}
+\end{table}
+
+\begin{table}
+\begin{tabular}{lll}
+\arrayrulecolor{gray}\Xhline{1pt}
+% \multicolumn{2}{c}{Old span} \\
+New & cell & one \\
+\hhline{|=|=|=|}
+% \multirow{2}{*}{OldRow} & q \\
+\multicolumn{2}{c}{Live span} & two \\
+\cmidrule{1-2}\morecmidrules\cmidrule{1-2}
+\quad Indented & x & three \\
+\end{tabular}
+\end{table}
+
+\begin{table}
+\begin{subtable}{0.45\linewidth}
+\caption{Left part}
+\begin{tabular}{ll}
+a & b \\
+\end{tabular}
+\end{subtable}
+\caption{Whole table}
+\end{table}
+
+\begin{figure}
+\centering
+%\label{fig:old}
+% \caption{Old figure caption}
+\includegraphics{missing}
+\caption{Live figure caption}
+\label{fig:live}
+\end{figure}
+
+\begin{equation}
+% \label{eq:old}
+x = 1 \label{eq:live}
+\end{equation}
+
+\begin{theorem}
+% \label{thm:old}
+\label{thm:live}
+Every kept row is kept.
+\end{theorem}
+
+See Table~\ref{tab:live}, Figure~\ref{fig:live} and Eq.~\eqref{eq:live}.
+\end{document}
+`;
+  const aux = String.raw`\relax
+\newlabel{tab:old}{{9}{1}}
+\newlabel{tab:live}{{1}{1}}
+\newlabel{fig:old}{{8}{1}}
+\newlabel{fig:live}{{1}{1}}
+\newlabel{eq:old}{{7}{1}}
+\newlabel{eq:live}{{1}{1}}
+\newlabel{thm:old}{{6}{1}}
+\newlabel{thm:live}{{1}{1}}
+`;
+  let project;
+  let server;
+  let document;
+
+  before(async () => {
+    project = await makeProject({ files: { "main.tex": floats, "main.aux": aux }, fakeAgent: true });
+    server = await startServer(project.root);
+    document = await getDocument(server, "main.tex");
+  });
+  after(cleanupAll);
+
+  it("covers the source with non-overlapping blocks at exact offsets", () => {
+    let cursor = 0;
+    for (const block of document.blocks) {
+      assert.ok(block.start >= cursor, "blocks must not overlap");
+      assert.equal(document.source.slice(block.start, block.end), block.raw);
+      assert.equal(document.source.slice(cursor, block.start).trim(), "", "only whitespace may sit between blocks");
+      cursor = block.end;
+    }
+    assert.equal(document.source.slice(cursor).trim(), "");
+  });
+
+  it("splits table rows and cells outside comments and drops rule and colour arguments", () => {
+    const table = document.blocks.find((block) => block.kind === "table");
+    assert.deepEqual(table.semantic.rows, [
+      ["Name", "Count", "Note"],
+      ["Kept", "1", "fine"],
+      ["Last", "2", "done"],
+    ]);
+    assert.equal(table.semantic.headerRows, 1);
+  });
+
+  it("does not take a span from a commented-out row and drops more rule commands", () => {
+    const table = document.blocks.filter((block) => block.kind === "table")[1];
+    assert.deepEqual(table.semantic.rows, [
+      ["New", "cell", "one"],
+      ["Live span", "two"],
+      ["Indented", "x", "three"],
+    ]);
+    assert.deepEqual(table.semantic.formattedRows.map((row) => row.map((cell) => cell.colspan)), [[1, 1, 1], [2, 1], [1, 1, 1]]);
+    assert.deepEqual(table.semantic.formattedRows.flat().map((cell) => cell.rowspan), [1, 1, 1, 1, 1, 1, 1, 1]);
+  });
+
+  it("takes a table's own caption, not its subtable's", () => {
+    const table = document.blocks.filter((block) => block.kind === "table")[2];
+    assert.equal(table.semantic.caption, "Whole table");
+    assert.equal(document.source.slice(table.semantic.captionSource.absoluteStart, table.semantic.captionSource.absoluteEnd), "Whole table");
+  });
+
+  it("uses the live \\caption and \\label, not the commented-out ones", () => {
+    const table = document.blocks.find((block) => block.kind === "table");
+    assert.equal(table.semantic.caption, "Live table caption");
+    assert.equal(table.semantic.label, "tab:live");
+    assert.equal(table.semantic.number, "1");
+    assert.equal(document.source.slice(table.semantic.captionSource.absoluteStart, table.semantic.captionSource.absoluteEnd), "Live table caption");
+    const figure = document.blocks.find((block) => block.kind === "figure");
+    assert.equal(figure.semantic.caption, "Live figure caption");
+    assert.equal(figure.semantic.label, "fig:live");
+    assert.equal(figure.semantic.number, "1");
+    const equation = document.blocks.find((block) => block.kind === "math");
+    assert.equal(equation.semantic.label, "eq:live");
+    assert.equal(equation.semantic.number, "1");
+    const theorem = document.blocks.find((block) => block.raw.includes("Every kept row is kept."));
+    assert.equal(theorem.environmentLabel, "thm:live");
+    // A commented-out label is not a reference target either.
+    assert.equal(document.references.labels.find((label) => label.key === "fig:old")?.blockId, undefined);
+  });
+
+  it("writes a caption edit into the live \\caption and an edited cell only into its row", async () => {
+    const file = path.join(project.root, "main.tex");
+    const table = document.blocks.find((block) => block.kind === "table");
+    const created = await commentOn(server, "main.tex", table.raw, "Tighten the caption.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    const proposed = await waitForRequest(server, created.id, (request) => request.status === "proposed", "caption proposal");
+    assert.equal(proposed.proposal.originalText, "Live table caption");
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: created.id } });
+    let expected = floats.replace("\\caption{Live table caption}", "\\caption{LIVE TABLE CAPTION}");
+    assert.equal(await fs.readFile(file, "utf8"), expected);
+
+    const current = await getDocument(server, "main.tex");
+    const edited = current.blocks.find((block) => block.kind === "table");
+    await saveBlock(server, current, edited, edited.raw.replace("Last & 2", "Last & 3"));
+    expected = expected.replace("Last & 2", "Last & 3");
+    assert.equal(await fs.readFile(file, "utf8"), expected);
+    const reloaded = (await getDocument(server, "main.tex")).blocks.find((block) => block.kind === "table");
+    assert.deepEqual(reloaded.semantic.rows.at(-1), ["Last", "3", "done"]);
   });
 });
