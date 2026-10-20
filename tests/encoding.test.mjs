@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { api, apiOk, cleanupAll, commentOn, getDocument, makeProject, saveBlock, startServer, stateDirectory, waitForRequest } from "./helpers.mjs";
+import vm from "node:vm";
+import { api, apiOk, appRoot, cleanupAll, commentOn, getDocument, makeProject, saveBlock, startServer, stateDirectory, waitForRequest } from "./helpers.mjs";
 
 after(cleanupAll);
 
@@ -98,9 +99,13 @@ describe("a source file that is not UTF-8 is read-only", () => {
   it("refuses to resolve a tracked change", async () => {
     const document = await getDocument(server, "sections/latin1.tex");
     const block = document.blocks.find((item) => item.raw.includes("\\chadd"));
+    const [group] = block.trackedChanges;
     const result = await api(server, "/api/tracked-change/resolve", {
       method: "POST",
-      body: { path: document.path, blockIndex: block.index, blockId: block.id, groupIndex: 0, action: "accept" },
+      body: {
+        path: document.path, blockIndex: block.index, blockId: block.id,
+        start: group.start, end: group.end, text: block.raw.slice(group.start, group.end), action: "accept",
+      },
     });
     assert.equal(result.status, 409);
     assert.match(result.value.error, NOT_UTF8);
@@ -579,5 +584,242 @@ describe("reverting a structure plan across several files", () => {
     const reverted = await apiOk(server, "/api/structure/revert", { method: "POST", body: { force: true } });
     assert.equal(reverted.status, "reverted");
     assert.equal(await fs.readFile(path.join(project.root, "sections/method.tex"), "utf8"), METHOD_TEXT);
+  });
+});
+
+// Named top-level functions and constants of public/app.js, copied unchanged
+// into a node:vm context whose globals are `globals`. The page is a script with
+// no exports, so the pieces are cut out by name: a definition starts at column
+// 0 with "function name(", "async function name(" or "const name =", and runs
+// to the next line that is exactly "}" (a constant: to the first line at
+// column 0 ending in ";"). A missing or doubled name throws. Same rules as
+// loadAppFunctions in the front-end tests; use that once it is in helpers.mjs.
+function appFunctions(names, globals = {}) {
+  const lines = readFileSync(path.join(appRoot, "public", "app.js"), "utf8").split("\n");
+  const pieces = names.map((name) => {
+    const heads = [`function ${name}(`, `async function ${name}(`, `const ${name} =`];
+    const found = lines.flatMap((line, index) => (heads.some((head) => line.startsWith(head)) ? [index] : []));
+    if (found.length !== 1) throw new Error(`public/app.js: expected one top-level definition of ${name}, found ${found.length}`);
+    const isFunction = !lines[found[0]].startsWith("const ");
+    let end = found[0];
+    while (end < lines.length && !(isFunction ? lines[end] === "}" : /^\S.*;$/.test(lines[end]))) end += 1;
+    if (end === lines.length) throw new Error(`public/app.js: could not find where ${name} ends`);
+    return lines.slice(found[0], end + 1).join("\n");
+  });
+  const context = vm.createContext({ ...globals });
+  vm.runInContext(pieces.join("\n\n"), context, { filename: "public/app.js" });
+  return context;
+}
+
+describe("tracked changes: ✓/✕ resolves the change that was clicked", () => {
+  const PARAGRAPHS = [
+    "Tilde \\chdel{old}~\\chadd{new} and later \\chadd{more}.",
+    "Comment \\chdel{x}%\n\\chadd{y} then \\chadd{z}.",
+    "Hidden results % was: \\chdel{draft} numbers\nfor \\chadd{all three} datasets.",
+    "Break \\chadd{line one\\\\} middle \\chdel{gone} end.",
+    "Typed \\chadd{new} results here.",
+    "Caret \\chadd{b} c d e.",
+    "Macro \\pt{\\chadd{x}} end.",
+    "Body \\added{} then \\chadd{real} end.",
+  ];
+  // \pt has math in its body, so its argument is substituted as text; \added
+  // has a tracked change in its body, which is not in the paragraph's source.
+  const PREAMBLE = "\\documentclass{article}\n\\newcommand{\\pt}[1]{#1 $\\star$}\n\\newcommand{\\added}{\\chadd{zz}}\n\\begin{document}\n\n";
+  const sourceOf = (paragraphs) => `${PREAMBLE}${paragraphs.join("\n\n")}\n\n\\end{document}\n`;
+  const MAIN = sourceOf(PARAGRAPHS);
+  let project;
+  let server;
+  let file;
+
+  before(async () => {
+    project = await makeProject({ files: { "main.tex": MAIN } });
+    server = await startServer(project.root);
+    file = path.join(project.root, "main.tex");
+  });
+
+  async function paragraph(prefix) {
+    await fs.writeFile(file, MAIN, "utf8");
+    const document = await getDocument(server, "main.tex");
+    const block = document.blocks.find((item) => item.raw.startsWith(prefix));
+    const groups = block.trackedChanges.map((group) => block.raw.slice(group.start, group.end));
+    return { document, block, groups };
+  }
+
+  function resolve(document, block, group, action = "accept", text = block.raw.slice(group.start, group.end)) {
+    return api(server, "/api/tracked-change/resolve", {
+      method: "POST",
+      body: { path: document.path, etag: document.etag, blockIndex: block.index, blockId: block.id, start: group.start, end: group.end, text, action },
+    });
+  }
+
+  async function paragraphOnDisk(prefix) {
+    const source = await fs.readFile(file, "utf8");
+    return source.split("\n\n").find((item) => item.startsWith(prefix));
+  }
+
+  it("groups across ~ and a comment line, and resolves the later group, not the one before it", async () => {
+    for (const [prefix, expectedGroups, expected] of [
+      ["Tilde", ["\\chdel{old}~\\chadd{new}", "\\chadd{more}"], "Tilde \\chdel{old}~\\chadd{new} and later more."],
+      ["Comment", ["\\chdel{x}%\n\\chadd{y}", "\\chadd{z}"], "Comment \\chdel{x}%\n\\chadd{y} then z."],
+    ]) {
+      const { document, block, groups } = await paragraph(prefix);
+      assert.deepEqual(groups, expectedGroups);
+      const result = await resolve(document, block, block.trackedChanges[1]);
+      assert.equal(result.status, 200, result.value.error);
+      assert.equal(await paragraphOnDisk(prefix), expected);
+    }
+  });
+
+  it("resolves a group joined by ~ without leaving a double gap", async () => {
+    for (const [action, expected] of [
+      ["accept", "Tilde new and later \\chadd{more}."],
+      ["reject", "Tilde old and later \\chadd{more}."],
+    ]) {
+      const { document, block } = await paragraph("Tilde");
+      const result = await resolve(document, block, block.trackedChanges[0], action);
+      assert.equal(result.status, 200, result.value.error);
+      assert.equal(await paragraphOnDisk("Tilde"), expected);
+    }
+  });
+
+  it("offers a change inside an argument of a macro with math in its body, but not one from a macro body", async () => {
+    for (const [prefix, expectedGroups, expected] of [
+      ["Macro", ["\\chadd{x}"], "Macro \\pt{x} end."],
+      ["Body", ["\\chadd{real}"], "Body \\added{} then real end."],
+    ]) {
+      const { document, block, groups } = await paragraph(prefix);
+      assert.deepEqual(groups, expectedGroups);
+      const result = await resolve(document, block, block.trackedChanges[0]);
+      assert.equal(result.status, 200, result.value.error);
+      assert.equal(await paragraphOnDisk(prefix), expected);
+    }
+  });
+
+  it("refuses a stale page when the clicked paragraph has identical copies, and resolves the right copy otherwise", async () => {
+    const same = "Same \\chadd{x} text.";
+    await fs.writeFile(file, sourceOf(["A.", "B.", same, same, same]), "utf8");
+    const stale = await getDocument(server, "main.tex");
+    const middle = stale.blocks.filter((item) => item.raw === same)[1];
+    // A co-author removes a paragraph above; the middle copy's id now names the third.
+    const shifted = sourceOf(["B.", same, same, same, "C."]);
+    await fs.writeFile(file, shifted, "utf8");
+    const refused = await resolve(stale, middle, middle.trackedChanges[0]);
+    assert.equal(refused.status, 409);
+    assert.match(refused.value.error, /changed on disk\. Reload/);
+    assert.equal(await fs.readFile(file, "utf8"), shifted);
+
+    const current = await getDocument(server, "main.tex");
+    const copy = current.blocks.filter((item) => item.raw === same)[1];
+    const accepted = await resolve(current, copy, copy.trackedChanges[0]);
+    assert.equal(accepted.status, 200, accepted.value.error);
+    assert.equal(await fs.readFile(file, "utf8"), sourceOf(["B.", same, "Same x text.", same, "C."]));
+
+    // A unique paragraph still resolves from a stale page.
+    const { document, block } = await paragraph("Tilde");
+    await fs.writeFile(file, MAIN.replace("Caret", "Caret, edited,"), "utf8");
+    const result = await resolve(document, block, block.trackedChanges[1]);
+    assert.equal(result.status, 200, result.value.error);
+    assert.equal(await paragraphOnDisk("Tilde"), "Tilde \\chdel{old}~\\chadd{new} and later more.");
+  });
+
+  it("never offers or resolves a tracked change inside a % comment", async () => {
+    const { document, block, groups } = await paragraph("Hidden");
+    assert.deepEqual(groups, ["\\chadd{all three}"]);
+    const result = await resolve(document, block, block.trackedChanges[0]);
+    assert.equal(result.status, 200, result.value.error);
+    assert.equal(await paragraphOnDisk("Hidden"), "Hidden results % was: \\chdel{draft} numbers\nfor all three datasets.");
+  });
+
+  it("closes a tracked change that ends in \\\\ and keeps the later ones", async () => {
+    const { document, block, groups } = await paragraph("Break");
+    assert.deepEqual(groups, ["\\chadd{line one\\\\}", "\\chdel{gone}"]);
+    const result = await resolve(document, block, block.trackedChanges[1]);
+    assert.equal(result.status, 200, result.value.error);
+    assert.equal(await paragraphOnDisk("Break"), "Break \\chadd{line one\\\\} middle end.");
+  });
+
+  it("refuses (409) a range whose text differs or that is not a whole group, and an old index-only request (400)", async () => {
+    const { document, block } = await paragraph("Tilde");
+    const [first] = block.trackedChanges;
+    const refusals = [
+      await resolve(document, block, first, "accept", "\\chdel{older}~\\chadd{new}"),
+      // Only the \chdel of the "old new" group.
+      await resolve(document, block, { start: first.start, end: first.start + "\\chdel{old}".length }),
+    ];
+    for (const result of refusals) assert.equal(result.status, 409, result.value.error);
+    const legacy = await api(server, "/api/tracked-change/resolve", {
+      method: "POST",
+      body: { path: document.path, blockIndex: block.index, blockId: block.id, groupIndex: 1, action: "accept" },
+    });
+    assert.equal(legacy.status, 400);
+    assert.equal(await fs.readFile(file, "utf8"), MAIN);
+  });
+
+  it("page: places one ✓/✕ after each server group", async () => {
+    const { block } = await paragraph("Tilde");
+    const app = appFunctions(["trackedChangeControlsByEnd"]);
+    const ends = [...app.trackedChangeControlsByEnd(block).keys()];
+    assert.deepEqual(ends.map((end) => block.display.slice(0, end)), ["Tilde old new", "Tilde old new and later more"]);
+  });
+
+  it("page: saves typing in the paragraph first, then resolves the change in the saved text", async () => {
+    const { document, block } = await paragraph("Typed");
+    const sent = [];
+    let savedEtag = null;
+    const app = appFunctions(["currentTrackedChangeTarget", "resolveTrackedChangeGroup"], {
+      state: { document },
+      // The author typed at the start of the paragraph, which moves the change.
+      settlePendingEdits: async () => {
+        await saveBlock(server, document, block, block.raw.replace("Typed ", "Typed, indeed, "));
+        app.state.document = await getDocument(server, "main.tex");
+        savedEtag = app.state.document.etag;
+        return true;
+      },
+      api: async (url, options) => {
+        sent.push(JSON.parse(options.body));
+        return apiOk(server, url, { method: options.method, body: JSON.parse(options.body) });
+      },
+      renderDocument() {},
+      refreshCompiledOutline: async () => {},
+      showToast() {},
+    });
+    await app.resolveTrackedChangeGroup(block, block.trackedChanges[0], "accept");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].text, "\\chadd{new}");
+    assert.equal(sent[0].etag, savedEtag);
+    assert.equal(await paragraphOnDisk("Typed"), "Typed, indeed, new results here.");
+
+    const skipped = appFunctions(["currentTrackedChangeTarget", "resolveTrackedChangeGroup"], {
+      state: { document },
+      settlePendingEdits: async () => false,
+      api: async () => assert.fail("no resolve while the edit is unsaved"),
+      showToast() {},
+    });
+    await skipped.resolveTrackedChangeGroup(block, block.trackedChanges[0], "accept");
+  });
+
+  it("page: puts the caret where the author clicked, not counting the ✓/✕ text", () => {
+    // "Caret b c d e." rendered as text, the \chadd span, its ✓ and ✕, text.
+    const textNode = (text, classes = []) => ({
+      textContent: text,
+      parentElement: { closest: (selector) => selector.split(",").some((part) => classes.includes(part.trim().slice(1))) },
+    });
+    const root = { nodes: [textNode("Caret "), textNode("b", ["latex-chadd"]), textNode("✓", ["tracked-change-actions"]), textNode("✕", ["tracked-change-actions"]), textNode(" c d e.")] };
+    let placed = null;
+    const app = appFunctions(["NON_SOURCE_NODE_SELECTOR", "restoreEditableCaret"], {
+      NodeFilter: { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 },
+      window: { getSelection: () => ({ removeAllRanges() {}, addRange(range) { placed = range; } }) },
+      document: {
+        createTreeWalker: (walkRoot, _what, filter) => {
+          const accepted = walkRoot.nodes.filter((node) => filter.acceptNode(node) === 1);
+          return { nextNode: () => accepted.shift() || null };
+        },
+        createRange: () => ({ setStart(node, offset) { this.node = node; this.offset = offset; }, collapse() {}, selectNodeContents() {} }),
+      },
+    });
+    // Between "d" and " e." in the display text "Caret b c d e.".
+    app.restoreEditableCaret(root, "Caret b c d".length);
+    assert.equal(placed.node.textContent, " c d e.");
+    assert.equal(placed.offset, " c d".length);
   });
 });

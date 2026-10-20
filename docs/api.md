@@ -120,14 +120,14 @@ and `capabilities: { readRepo }`.
 
 | Method | Path | Purpose | Notes |
 |---|---|---|---|
-| GET | `/api/document?path=` | One parsed file: `source`, `etag`, `blocks` (kind, raw text, display text, offsets, inline `styles`, list and environment hints, review status), `mathMacros` (the author's macros for KaTeX), `frontMatter`, `references` (labels, citations, unresolved keys), `encoding` (`{ valid: true }`, or `{ valid: false, reason, message }`), `readOnly`; each block has `editable` (`false` when the file is read-only). | `path` must be a `.tex`, `.md` or `.bib` file inside `sourceRoot`. |
+| GET | `/api/document?path=` | One parsed file: `source`, `etag`, `blocks` (kind, raw text, display text, offsets, inline `styles`, list and environment hints, review status, `trackedChanges`: one `{ start, end, displayEnd }` per `\chadd`/`\chdel` group, `start`/`end` in the block's raw text), `mathMacros` (the author's macros for KaTeX), `frontMatter`, `references` (labels, citations, unresolved keys), `encoding` (`{ valid: true }`, or `{ valid: false, reason, message }`), `readOnly`; each block has `editable` (`false` when the file is read-only). | `path` must be a `.tex`, `.md` or `.bib` file inside `sourceRoot`. |
 | GET | `/api/outline` | Outline compiled from the main file through `\input`/`\include`, with numbering and review progress. | |
 | GET | `/api/structure` | Section tree with source ranges and snapshot hashes. | |
 | GET | `/api/pdf` | The compiled PDF (`pdf` in the configuration). | |
 | GET | `/api/asset?path=` | An image or PDF inside `sourceRoot` (`pdf png jpg jpeg gif webp svg`). | Sandboxed by CSP. |
 | GET | `/api/asset-preview?path=` | PNG rendering of a PDF figure, cached in the state folder. | Needs `pdftoppm` or macOS `sips`; else `422`. |
 | POST | `/api/save` | Save the author's edit of one block. **Writes source.** | `path`, `etag`, `blockIndex`, `blockId`, `blockKind`, `baseText`, `text`, `force`. Three-way merge when the file changed elsewhere. |
-| POST | `/api/tracked-change/resolve` | Accept or reject one `\chadd`/`\chdel` group. **Writes source.** | `path`, `blockIndex`, `blockId`, `groupIndex`, `action` (`"accept"`; anything else rejects). |
+| POST | `/api/tracked-change/resolve` | Accept or reject one `\chadd`/`\chdel` group. **Writes source.** | `path`, `etag`, `blockIndex`, `blockId`, `start`, `end` (a group from the block's `trackedChanges`), `text` (the raw text in that range), `action` (`"accept"`; anything else rejects). `409` when the range is not a group of the current source or its text differs, or when `etag` is stale and the file has another block with the same text. |
 | POST | `/api/confirm` | Mark a selection as confirmed. State only. | `path`, `etag`, and `segments: [{ blockIndex, blockId, start, end }]` or the same four fields at top level. Offsets index the block's raw text. |
 | POST | `/api/unconfirm` | Remove confirmation. State only. | Same body. |
 | GET | `/api/undo` | Undo status: `available`, `label`, `kind`, `path`, `createdAt`, `depth`. | |

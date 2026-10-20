@@ -14,6 +14,25 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- **✓/✕ on a tracked change could resolve a different change than the one
+  clicked.** This happened when changes were joined by `~` or a comment line,
+  or when a commented-out `\chadd`/`\chdel` stood earlier in the paragraph,
+  which was then edited instead. The server now sends each group's
+  source range with the document, the page sends it back with the group's
+  text, and the server refuses (409) a range that is not a current group.
+- A `\\` at the end of a `\chadd{...}` or `\chdel{...}` made that change and
+  every later one in the paragraph impossible to resolve ("This tracked change
+  no longer exists"). Such a change now closes at its brace.
+- Accept or Reject on a tracked change while typing in the same paragraph
+  dropped the typing or brought the resolved macro back after a save
+  conflict. The typing is now saved first, then the change is resolved.
+- Clicking into a paragraph with tracked changes put the caret two characters
+  early for each change before the click point. The ✓/✕ buttons no longer
+  count as text.
+- With the page out of date and a paragraph that appears more than once in
+  the file, ✓/✕ could change another copy after a paragraph above was removed
+  on disk. The page now sends the document's etag, and the server refuses
+  (409) when it is stale and the paragraph's text is not unique.
 - **A follow-up sent while the agent was still answering a comment was
   dropped**, and the answer to the earlier instruction was shown as if it
   replied to the follow-up. The comment now runs again with the follow-up once
@@ -319,6 +338,10 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Changed
 
+- `POST /api/tracked-change/resolve` takes `etag`, `start`, `end` and `text`
+  instead of `groupIndex`. `start` and `end` come from the block's new
+  `trackedChanges` list in `/api/document`, and `text` is the raw text in that
+  range. A request with only `groupIndex` gets 400.
 - When the open file changes on disk and the tab has no unsaved edit, open
   comment, selection or proposal edit, the page reloads it quietly and keeps
   the scroll position. The banner and the merge/conflict flow are unchanged
