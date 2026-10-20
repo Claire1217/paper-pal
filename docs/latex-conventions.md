@@ -222,7 +222,9 @@ Nothing here is required. Paper Pal never adds these macros to your files.
 If your source contains `\chadd{new text}` and `\chdel{old text}`, for example
 from a co-author who marks edits by hand, Paper Pal shows additions in green
 and deletions in red struck through. Adjacent macros separated only by white
-space form one change group with an Accept and a Reject button:
+space (including `~` or a comment line) form one change group with an Accept
+and a Reject button. Macros inside a `%` comment are not shown and never
+changed:
 
 | Button | `\chadd{X}` becomes | `\chdel{Y}` becomes |
 |---|---|---|

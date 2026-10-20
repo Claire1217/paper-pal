@@ -40,6 +40,21 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   removed when a chat is selected, and is not listed.
 - An agent run that failed before the agent started (for example because the
   commented passage was gone) left a temporary folder behind.
+- **✓/✕ on a tracked change could resolve a different change than the one
+  clicked.** This happened when changes were joined by `~` or a comment line,
+  or when a commented-out `\chadd`/`\chdel` stood earlier in the paragraph,
+  which was then edited instead. The server now sends each group's
+  source range with the document, the page sends it back with the group's
+  text, and the server refuses (409) a range that is not a current group.
+- A `\\` at the end of a `\chadd{...}` or `\chdel{...}` made that change and
+  every later one in the paragraph impossible to resolve ("This tracked change
+  no longer exists"). Such a change now closes at its brace.
+- Accept or Reject on a tracked change while typing in the same paragraph
+  dropped the typing or brought the resolved macro back after a save
+  conflict. The typing is now saved first, then the change is resolved.
+- Clicking into a paragraph with tracked changes put the caret two characters
+  early for each change before the click point. The ✓/✕ buttons no longer
+  count as text.
 - **A heading whose title ends in `\\` swallowed the paragraph below it**
   (`\section{Results\\}`), and the section was missing from the outline. The
   `}` after `\\` is no longer read as an escaped brace.

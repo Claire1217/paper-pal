@@ -1347,7 +1347,21 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
       displayEnds.push(displayRange ? displayRange[1] : offsetOf + nested.displayEnds[cursor]);
     }
     for (const annotation of nested.annotations || []) {
-      annotations.push({ ...annotation, start: displayOffset + annotation.start, end: displayOffset + annotation.end });
+      const shifted = { ...annotation, start: displayOffset + annotation.start, end: displayOffset + annotation.end };
+      // A tracked change's source range is relative to the nested text. Text
+      // from a macro body is not in this source at all, so it has none.
+      if (Number.isInteger(annotation.rawStart)) {
+        if (displayRange) {
+          delete shifted.rawStart;
+          delete shifted.rawInnerStart;
+          delete shifted.rawEnd;
+        } else {
+          shifted.rawStart += offsetOf;
+          shifted.rawInnerStart += offsetOf;
+          shifted.rawEnd += offsetOf;
+        }
+      }
+      annotations.push(shifted);
     }
     for (const style of nested.styles || []) {
       styles.push({ ...style, start: displayOffset + style.start, end: displayOffset + style.end });
@@ -1633,7 +1647,9 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
     if (["chadd", "chdel"].includes(command) && raw[argumentStart] === "{") {
       const close = findClosingBrace(argumentStart);
       if (close >= 0) {
-        const annotation = { type: command, start: display.length, end: display.length };
+        // The source range goes with the annotation, so the page's ✓/✕ names
+        // this macro and not "the n-th one" (see trackedChangeGroups).
+        const annotation = { type: command, start: display.length, end: display.length, rawStart: cursor, rawInnerStart: argumentStart + 1, rawEnd: close + 1 };
         annotations.push(annotation);
         appendInner(argumentStart + 1, close);
         annotation.end = display.length;
@@ -3502,6 +3518,9 @@ async function documentPayload(relativePath) {
         hidden: false,
       };
     }
+    // Source range of each ✓/✕ group; the page posts it back to resolve one.
+    const trackedChanges = trackedChangeGroups(rendered)
+      .map((group) => ({ start: group.start, end: group.end, displayEnd: group.displayEnd }));
     // "Theorem 2": the number LaTeX gave the environment, when it has a label.
     const environmentNumber = block.environmentLabel ? references.labels[block.environmentLabel]?.number : null;
     return {
@@ -3510,6 +3529,7 @@ async function documentPayload(relativePath) {
       ...(environmentNumber && environmentNumber !== "?" ? { environmentNumber } : {}),
       ...(block.environmentTitle ? { environmentTitle: stripTex(block.environmentTitle, macros, references) } : {}),
       semantic,
+      trackedChanges,
       // False for every block of a file that Paper Pal will not write.
       editable: encoding.valid,
       status: paragraphStates[block.id]?.status || (approvedByDefault ? "accepted" : "draft"),
@@ -6865,34 +6885,26 @@ function rebaseDocumentReviewSelections(state, relativePath, oldBlocks, newBlock
 // Tracked changes: \chadd{...} (green addition) and \chdel{...} (red deletion)
 // already present in the LaTeX source (for example written by a co-author or
 // an external revision tool; the project must define both macros). Adjacent
-// macros separated only by whitespace form one reviewable group.
-function scanTrackedChangeGroups(raw) {
-  const macros = [];
-  const pattern = /\\ch(add|del)\s*\{/g;
-  let match;
-  while ((match = pattern.exec(raw))) {
-    const open = match.index + match[0].length - 1;
-    let depth = 0;
-    let close = -1;
-    for (let cursor = open; cursor < raw.length; cursor += 1) {
-      if (raw[cursor] === "{" && raw[cursor - 1] !== "\\") depth += 1;
-      if (raw[cursor] === "}" && raw[cursor - 1] !== "\\") {
-        depth -= 1;
-        if (depth === 0) { close = cursor; break; }
-      }
-    }
-    if (close < 0) break;
-    macros.push({ command: `ch${match[1]}`, start: match.index, end: close + 1, inner: raw.slice(open + 1, close) });
-    pattern.lastIndex = close + 1;
-  }
+// macros with only blank display text between them (spaces, "~", a comment
+// line) form one reviewable group. The groups come from the display
+// annotations, so the page's ✓/✕ buttons and the resolve use the same list:
+// a macro inside a comment is never shown and never resolved, and one that
+// comes from a macro body has no source range and gets no buttons.
+function trackedChangeGroups(rendered) {
   const groups = [];
-  for (const macro of macros) {
+  for (const annotation of rendered.annotations || []) {
+    if (annotation.type !== "chadd" && annotation.type !== "chdel") continue;
+    if (!Number.isInteger(annotation.rawStart)) continue;
     const previous = groups.at(-1);
-    if (previous && /^\s*$/.test(raw.slice(previous.end, macro.start))) {
+    // A tracked change nested in the previous one is resolved with it.
+    if (previous && annotation.rawStart >= previous.macros.at(-1).start && annotation.rawEnd <= previous.end) continue;
+    const macro = { command: annotation.type, start: annotation.rawStart, innerStart: annotation.rawInnerStart, end: annotation.rawEnd };
+    if (previous && macro.start >= previous.end && /^\s*$/.test(String(rendered.display || "").slice(previous.displayEnd, annotation.start))) {
       previous.macros.push(macro);
       previous.end = macro.end;
+      previous.displayEnd = annotation.end;
     } else {
-      groups.push({ start: macro.start, end: macro.end, macros: [macro] });
+      groups.push({ start: macro.start, end: macro.end, displayEnd: annotation.end, macros: [macro] });
     }
   }
   return groups;
@@ -6900,20 +6912,30 @@ function scanTrackedChangeGroups(raw) {
 
 async function resolveTrackedChange(body) {
   const absolutePath = resolveDocument(body.path);
+  await assertSourcesWritable([body.path]);
   const currentSource = await fs.readFile(absolutePath, "utf8");
   const blocks = parseBlocks(currentSource);
   let block = blocks[body.blockIndex];
   if (!block || block.id !== body.blockId) block = blocks.find((candidate) => candidate.id === body.blockId);
   if (!block) throw new Error("The paragraph changed. Reload the document and try again.");
-  const groups = scanTrackedChangeGroups(block.raw);
-  const group = groups[Number(body.groupIndex)];
+  // The page names the group by its source range and text. Anything that does
+  // not match a group of the current source is refused, never mapped onto
+  // another change.
+  const { start, end } = body;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || typeof body.text !== "string") {
+    throw new HttpError(400, "Reload the page to resolve this tracked change: the request has no source range.");
+  }
+  if (block.raw.slice(start, end) !== body.text) throw new Error("This tracked change changed on disk. Reload the document.");
+  const references = await cachedProjectReferences();
+  const rendered = latexToDisplay(block.raw, block.kind, documentMacros(currentSource, references), references);
+  const group = trackedChangeGroups(rendered).find((candidate) => candidate.start === start && candidate.end === end);
   if (!group) throw new Error("This tracked change no longer exists. Reload the document.");
   const accept = body.action === "accept";
   let resolved = "";
   let cursor = group.start;
   for (const macro of group.macros) {
     resolved += block.raw.slice(cursor, macro.start);
-    resolved += (accept ? macro.command === "chadd" : macro.command === "chdel") ? macro.inner : "";
+    resolved += (accept ? macro.command === "chadd" : macro.command === "chdel") ? block.raw.slice(macro.innerStart, macro.end - 1) : "";
     cursor = macro.end;
   }
   const before = block.raw.slice(0, group.start);

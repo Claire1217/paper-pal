@@ -1590,7 +1590,7 @@ async function flushProposalUnitSave() {
   }
 }
 
-function createTrackedChangeControl(block, groupIndex) {
+function createTrackedChangeControl(block, group) {
   const wrap = document.createElement("span");
   wrap.className = "tracked-change-actions";
   wrap.contentEditable = "false";
@@ -1612,22 +1612,52 @@ function createTrackedChangeControl(block, groupIndex) {
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      resolveTrackedChangeGroup(block, groupIndex, action);
+      resolveTrackedChangeGroup(block, group, action);
     });
   }
   wrap.append(accept, reject);
   return wrap;
 }
 
-async function resolveTrackedChangeGroup(block, groupIndex, action) {
+// The ✓/✕ group in `blocks`, the current document. A save that just settled
+// may have moved the paragraph (an earlier one split) or rewritten it (new
+// id, shifted offsets); the group is then the one with the same source text,
+// counted in the same order. The server checks the range and the text again
+// before it writes.
+function currentTrackedChangeTarget(block, group, blocks) {
+  const current = blocks.find((candidate) => candidate.id === block.id)
+    || blocks.filter((candidate) => candidate.raw === block.raw)
+      .sort((a, b) => Math.abs(a.index - block.index) - Math.abs(b.index - block.index))[0]
+    || blocks[block.index];
+  if (!current) return null;
+  const textOf = (owner, item) => String(owner.raw || "").slice(item.start, item.end);
+  const text = textOf(block, group);
+  const ordinal = (block.trackedChanges || [])
+    .filter((item) => textOf(block, item) === text)
+    .findIndex((item) => item.start === group.start && item.end === group.end);
+  const match = (current.trackedChanges || []).filter((item) => textOf(current, item) === text)[ordinal];
+  return match ? { block: current, start: match.start, end: match.end, text } : null;
+}
+
+async function resolveTrackedChangeGroup(block, group, action) {
+  // Typing in this paragraph is saved first; otherwise the resolve rewrites
+  // the paragraph under it and the save that follows conflicts.
+  if (!(await settlePendingEdits())) return;
+  const target = currentTrackedChangeTarget(block, group, state.document?.blocks || []);
+  if (!target) {
+    showToast("This tracked change changed. Reload the document and try again.", 5200);
+    return;
+  }
   try {
     const nextDocument = await api("/api/tracked-change/resolve", {
       method: "POST",
       body: JSON.stringify({
         path: state.document.path,
-        blockIndex: block.index,
-        blockId: block.id,
-        groupIndex,
+        blockIndex: target.block.index,
+        blockId: target.block.id,
+        start: target.start,
+        end: target.end,
+        text: target.text,
         action,
       }),
     });
@@ -1638,6 +1668,19 @@ async function resolveTrackedChangeGroup(block, groupIndex, action) {
   } catch (error) {
     showToast(error.message, 5200);
   }
+}
+
+// Tracked changes (\chadd/\chdel): a ✓/✕ control renders after each group,
+// keyed by the display offset where the group ends. The groups and their
+// source ranges come from the server (block.trackedChanges), which resolves
+// by the same list; the page never regroups them.
+function trackedChangeControlsByEnd(block) {
+  const ends = new Map();
+  for (const group of block.trackedChanges || []) {
+    if (!ends.has(group.displayEnd)) ends.set(group.displayEnd, []);
+    ends.get(group.displayEnd).push(group);
+  }
+  return ends;
 }
 
 function renderReviewText(container, block, { showProposals = true } = {}) {
@@ -1755,24 +1798,7 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
     }
   }
 
-  // Tracked changes (\chadd/\chdel): adjacent annotations separated only by
-  // whitespace form one group; a ✓/✕ control renders after each group. Group
-  // order matches the server's raw-source scan.
-  const trackedGroupEnds = new Map();
-  {
-    let groupIndex = -1;
-    let lastEnd = null;
-    for (const annotation of block.annotations || []) {
-      if (annotation.type !== "chadd" && annotation.type !== "chdel") continue;
-      if (lastEnd !== null && /^\s*$/.test(block.display.slice(lastEnd, annotation.start))) {
-        trackedGroupEnds.delete(lastEnd);
-      } else {
-        groupIndex += 1;
-      }
-      lastEnd = annotation.end;
-      trackedGroupEnds.set(lastEnd, groupIndex);
-    }
-  }
+  const trackedGroupEnds = trackedChangeControlsByEnd(block);
 
   // A replacement renders as <deleted><inserted> with nothing between them.
   // Mark the insertion so CSS opens a gap and the two never read as one word.
@@ -1858,7 +1884,7 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
     }
     cursor = end;
     if (trackedGroupEnds.has(cursor)) {
-      container.append(createTrackedChangeControl(block, trackedGroupEnds.get(cursor)));
+      for (const group of trackedGroupEnds.get(cursor)) container.append(createTrackedChangeControl(block, group));
     }
     if (additions.has(cursor)) {
       const request = additions.get(cursor);
@@ -3321,8 +3347,10 @@ function restoreEditableCaret(root, requestedOffset) {
   if (!Number.isInteger(requestedOffset)) return;
   const selection = window.getSelection();
   if (!selection) return;
+  // The offset counts source text only, as canonicalCaretOffset does: the ✓/✕
+  // of a tracked change and other added nodes are skipped.
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: (node) => node.parentElement?.closest(".review-number")
+    acceptNode: (node) => node.parentElement?.closest(NON_SOURCE_NODE_SELECTOR)
       ? NodeFilter.FILTER_REJECT
       : NodeFilter.FILTER_ACCEPT,
   });
