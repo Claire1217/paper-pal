@@ -124,8 +124,24 @@ Inside a paragraph:
   (with `[n]` and an optional default), `\def\name#1#2{...}`,
   `\DeclareMathOperator`, and `\NewDocumentCommand` with `m`, `o`, `O{...}`
   arguments. In prose a macro is expanded **for display only**: the source is
-  never rewritten. The text of an argument stays editable in place; a macro
-  without arguments, and one whose body contains math, is one read-only unit.
+  never rewritten. The arguments are put into the body and the result is
+  shown, so `\newcommand{\figref}[1]{Figure~\ref{#1}}` shows "Figure 3" and a
+  macro around `\citet` shows the citation.
+  - Argument text that the body shows as written (`\textcolor{red}{#1}`, the
+    link text of `\href{#1}{#2}`, the `#1` of `(#1)`) stays editable in place.
+    An edit there changes only the argument.
+  - Text that a call with arguments adds itself or builds from a key ("Figure
+    3", the ", " of `(#1, #2)`, the "TODO: " of
+    `\textcolor{blue}{TODO: #1}`) is one unit. It is shown but cannot be
+    typed in, in the manuscript and in a proposal unit, and edits next to it
+    keep the call. Deleting all the text of a call removes the call.
+  - An edit that removes or changes part of that text while an argument the
+    call shows stays (deleting only the ")" of `\paren{word}`) is not saved:
+    in LaTeX it could only delete the argument as well. Undo it, or change the
+    call in the source.
+  - A macro without arguments is not locked. A macro whose body calls itself
+    is shown like a command the parser does not know.
+
   In math the definitions are handed to KaTeX, so `$\norm{x}$` renders.
 - A command the parser does not know: with arguments, the text of the
   arguments is shown and the name is not; without arguments, the command is

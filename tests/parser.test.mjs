@@ -708,3 +708,93 @@ c & d \\
     }
   });
 });
+
+describe("user macros that pass an argument to another command", () => {
+  const source = String.raw`\documentclass{article}
+\newcommand{\figref}[1]{Figure~\ref{#1}}
+\newcommand{\secref}[1]{Section~\ref{sec:#1}}
+\newcommand{\citeA}[1]{\citet{#1}}
+\newcommand{\pcite}[1]{\cite[p.~#1]{doe}}
+\newcommand{\link}[2]{\href{#1}{#2}}
+\newcommand{\mail}[1]{\href{mailto:#1}{#1}}
+\newcommand{\lbl}[2]{\textbf{#2}\label{#1}}
+\newcommand{\note}[1]{\textcolor{red}{#1}}
+\newcommand{\twoarg}[2]{\textit{#1} and #2}
+\newcommand{\paren}[1]{(#1)}
+\newcommand{\dbl}[1]{\textbf{\dbl{#1}\dbl{#1}}}
+\newcommand{\many}{\many\many\many\many}
+\newcommand{\pA}[1]{\pB{#1}x}
+\newcommand{\pB}[1]{\pA{#1}x}
+\begin{document}
+\section{Intro}\label{sec:intro}
+
+See \figref{fig:a} and \secref{intro} here.
+
+As \citeA{smith} says, and \pcite{5} too.
+
+Visit \link{https://example.org}{our site} or write to \mail{a@b.c} now.
+
+A \lbl{l:a}{bold words} and \note{red words} and \twoarg{first}{second} and \paren{term}.
+
+Self \dbl{x} and \many{} and \pA{y} end.
+
+\begin{figure}\caption{A}\label{fig:a}\end{figure}
+\end{document}
+`;
+  const bib = "@article{smith, author={Smith, John}, title={T}, year={2020}}\n@article{doe, author={Doe, Jane}, title={U}, year={2021}}\n";
+  let document;
+
+  before(async () => {
+    const project = await makeProject({ files: { "main.tex": source, "refs.bib": bib } });
+    const server = await startServer(project.root);
+    document = await getDocument(server, "main.tex");
+  });
+  after(cleanupAll);
+
+  // The source text that display character `index` of a block maps to.
+  const sourceOf = (block, index) => block.raw.slice(block.displayStarts[index], block.displayEnds[index]);
+
+  it("keeps \\ref and \\cite together with the argument a macro passes them", () => {
+    const refs = findBlock(document, "\\figref{fig:a}");
+    assert.match(refs.display, /^See Figure \S+ and Section \S+ here\.$/);
+    assert.deepEqual(refs.annotations.filter((item) => item.type === "reference").map((item) => item.key), ["fig:a", "sec:intro"]);
+    const cites = findBlock(document, "\\citeA{smith}");
+    assert.equal(cites.display, "As Smith (2020) says, and (Doe, 2021, p. 5) too.");
+    assert.deepEqual(cites.annotations.filter((item) => item.type === "citation").map((item) => item.keys), [["smith"], ["doe"]]);
+    // Built from a key, so it maps to the whole call.
+    const at = refs.display.indexOf("Figure");
+    assert.equal(sourceOf(refs, at), "\\figref{fig:a}");
+    assert.equal(sourceOf(refs, at + "Figure ".length), "\\figref{fig:a}");
+  });
+
+  it("shows the link text of an \\href macro, editable in place, and hides its address", () => {
+    const block = findBlock(document, "\\link{");
+    assert.equal(block.display, "Visit our site or write to a@b.c now.");
+    for (const word of ["our site", "a@b.c"]) {
+      const at = block.display.indexOf(word);
+      for (let index = at; index < at + word.length; index += 1) assert.equal(sourceOf(block, index), block.display[index]);
+    }
+  });
+
+  it("keeps each argument a macro shows mapped to its own source", () => {
+    const block = findBlock(document, "\\lbl{");
+    assert.equal(block.display, "A bold words and red words and first and second and (term).");
+    for (const word of ["bold words", "red words", "first", "second", "term"]) {
+      const at = block.display.indexOf(word);
+      const sourceAt = block.raw.indexOf(`{${word}}`) + 1;
+      for (let index = at; index < at + word.length; index += 1) {
+        assert.equal(block.displayStarts[index], sourceAt + index - at, `${word} must map to its argument`);
+      }
+    }
+    // The text the body adds maps to the whole call.
+    assert.equal(sourceOf(block, block.display.indexOf(" and second")), "\\twoarg{first}{second}");
+    assert.equal(sourceOf(block, block.display.indexOf("(")), "\\paren{term}");
+  });
+
+  it("shows a macro that calls itself like an unknown command", () => {
+    const block = findBlock(document, "Self ");
+    assert.match(block.display, /^Self x and \\many and y/);
+    // Two macros that call each other stop at the depth limit.
+    assert.ok(block.display.length < 60, block.display);
+  });
+});

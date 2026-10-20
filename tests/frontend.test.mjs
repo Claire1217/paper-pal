@@ -2,8 +2,12 @@
 // place of the DOM (see loadAppFunctions in helpers.mjs). Documents come from
 // the real server where block ids and display mappings matter.
 import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { cleanupAll, getDocument, loadAppFunctions, makeProject, saveBlock, startServer, waitFor } from "./helpers.mjs";
+import {
+  apiOk, cleanupAll, commentOn, getDocument, loadAppFunctions, makeProject, saveBlock, startServer, stateDirectory, waitFor, waitForRequest,
+} from "./helpers.mjs";
 
 // Values made inside the vm context have that context's prototypes, which
 // deepStrictEqual rejects; compare their JSON instead.
@@ -23,7 +27,7 @@ const SAVE_MAPPING = [
   "escapeTypedText",
   "insideLiteralText",
   "displayEditKeepingMarkup",
-  "isVerbatimUnit",
+  "isLockedUnit",
   "TEXT_STYLE_COMMAND",
   "tidyEditedSource",
   "spliceEdited",
@@ -204,8 +208,8 @@ describe("front end", () => {
       const at = block.display.indexOf("a%b");
       assert.ok(at >= 0);
       // The page shows it but does not let the author type in it.
-      assert.ok(app.isVerbatimUnit(block, at));
-      assert.ok(!app.isVerbatimUnit(block, 0));
+      assert.ok(app.isLockedUnit(block, at));
+      assert.ok(!app.isLockedUnit(block, 0));
       // An edit next to it keeps it.
       const next = await editAndSave("verb|a%b", "here", "there");
       assert.match(next.source, /\nCode \\verb\|a%b\| there\./);
@@ -827,6 +831,221 @@ describe("front end", () => {
       first.resolve({});
       await saving;
       assert.equal(app.state.proposalEditing.unit.raw, "new a");
+    });
+  });
+});
+
+// A macro call is edited through the text the page shows for it. Each case
+// saves through the real server, in the manuscript and in a proposal unit,
+// and checks the source and that the display is what the author typed.
+describe("editing macro calls", () => {
+  const PREAMBLE = String.raw`\documentclass{article}
+\newcommand{\figref}[1]{Figure~\ref{#1}}
+\newcommand{\citeA}[1]{\citet{#1}}
+\newcommand{\note}[1]{\textcolor{red}{#1}}
+\newcommand{\bfit}[1]{\textbf{\textit{#1}}}
+\newcommand{\twoarg}[2]{\textit{#1} and #2}
+\newcommand{\hili}[1]{\colorbox{yellow}{#1}}
+\newcommand{\paren}[1]{(#1)}
+\newcommand{\pair}[2]{(#1, #2)}
+\newcommand{\fixme}[1]{\textcolor{blue}{TODO: #1}}
+\newcommand{\link}[2]{\href{#1}{#2}}
+\newcommand{\lbl}[2]{\textbf{#2}\label{#1}}
+\newcommand{\term}[1]{\textbf{#1}\index{#1}}
+\newcommand{\dbl}[1]{\textbf{\dbl{#1}\dbl{#1}}}
+\begin{document}
+`;
+  const PARAGRAPHS = [
+    String.raw`A \note{fix this sentence} here.`,
+    String.raw`Bfit \bfit{word here} end.`,
+    String.raw`Two \twoarg{first}{second} end.`,
+    String.raw`High \hili{marked words} end.`,
+    String.raw`See \figref{fig:a} now.`,
+    String.raw`Typo F\figref{fig:a} now.`,
+    String.raw`As \citeA{smith} says.`,
+    String.raw`X \paren{word} end.`,
+    String.raw`P \pair{a}{b} end.`,
+    String.raw`T \fixme{check the numbers} end.`,
+    String.raw`D \link{https://example.org}{our site} now.`,
+    String.raw`L \lbl{l:a}{bold words} end.`,
+    String.raw`Idx \term{entropy} is.`,
+    String.raw`Self \dbl{x} end.`,
+    "Plain words for a comment.",
+  ];
+  const MAIN = `${PREAMBLE}\n${PARAGRAPHS.join("\n\n")}\n\n\\begin{figure}\\caption{A}\\label{fig:a}\\end{figure}\n\\end{document}\n`;
+  const BIB = "@article{smith, author={Smith, John}, title={T}, year={2020}}\n";
+  const REFUSED = /text that a macro adds around its arguments/;
+  // [paragraph, display text to replace, what the author types, source afterwards]
+  // Formatting macros: every argument is edited in place, as before.
+  const FORMATTING = [
+    [0, "this", "that", String.raw`A \note{fix that sentence} here.`],
+    [1, "word", "term", String.raw`Bfit \bfit{term here} end.`],
+    [2, "first", "1st", String.raw`Two \twoarg{1st}{second} end.`],
+    [2, "second", "2nd", String.raw`Two \twoarg{first}{2nd} end.`],
+    [3, "marked", "noted", String.raw`High \hili{noted words} end.`],
+    // Typed right inside the ")" or after the "(": into the argument.
+    [7, "word)", "words)", String.raw`X \paren{words} end.`],
+    [7, "(word", "(sword", String.raw`X \paren{sword} end.`],
+    [8, "b", "c", String.raw`P \pair{a}{c} end.`],
+    [9, "numbers", "values", String.raw`T \fixme{check the values} end.`],
+    [13, "x", "y", String.raw`Self \dbl{y} end.`],
+  ];
+  // Text built from a key is one locked unit; edits next to it keep the call.
+  const UNITS = [
+    [4, "now", "then", String.raw`See \figref{fig:a} then.`],
+    [4, "See Figure", "SeeFigure", String.raw`See\figref{fig:a} now.`],
+    [4, "? now", "?s now", String.raw`See \figref{fig:a}s now.`],
+    [4, " Figure", " FFigure", String.raw`See F\figref{fig:a} now.`],
+    // The stray "F" goes, not the unit's own first letter.
+    [5, "FFigure", "Figure", String.raw`Typo \figref{fig:a} now.`],
+    [4, " Figure ?", "", "See now."],
+    [6, "says", "writes", String.raw`As \citeA{smith} writes.`],
+    [7, " (word)", "", "X end."],
+  ];
+  // \href-style macros: the link text is edited in place, the address stays.
+  const LINKS = [
+    [10, "site", "page", String.raw`D \link{https://example.org}{our page} now.`],
+    [11, "words", "terms", String.raw`L \lbl{l:a}{bold terms} end.`],
+    [12, "entropy", "energy", String.raw`Idx \term{energy} is.`],
+  ];
+  // Removing a macro's own text while its argument stays would delete the argument.
+  const REFUSALS = [
+    [7, "word)", "word"],
+    [7, "(word", "word"],
+    [8, "(a, b)", "(a)"],
+    [9, "TODO: ", ""],
+  ];
+  const app = loadAppFunctions(SAVE_MAPPING);
+  let project;
+  let server;
+
+  before(async () => {
+    project = await makeProject({ files: { "main.tex": MAIN, "refs.bib": BIB }, fakeAgent: true });
+    server = await startServer(project.root);
+  });
+  after(cleanupAll);
+
+  describe("in the manuscript", () => {
+    async function blockOf(paragraph) {
+      const document = await getDocument(server, "main.tex");
+      return { document, block: document.blocks.find((item) => item.raw.trim() === PARAGRAPHS[paragraph]) };
+    }
+
+    async function editAndSave(paragraph, from, to) {
+      const { document, block } = await blockOf(paragraph);
+      const typed = block.display.replace(from, to);
+      assert.notEqual(typed, block.display);
+      const raw = app.rawTextForDisplayEdit(block, typed);
+      await saveBlock(server, document, block, raw);
+      const saved = await getDocument(server, "main.tex");
+      const result = { raw: saved.blocks[block.index].raw.trim(), display: saved.blocks[block.index].display, typed };
+      await saveBlock(server, saved, saved.blocks[block.index], block.raw);
+      return result;
+    }
+
+    for (const [label, cases] of [["formatting", FORMATTING], ["unit", UNITS], ["link", LINKS]]) {
+      it(`writes only the edited text of a ${label} macro`, async () => {
+        for (const [paragraph, from, to, expected] of cases) {
+          const result = await editAndSave(paragraph, from, to);
+          assert.equal(result.raw, expected, `${from} -> ${to}`);
+          assert.equal(result.display, result.typed);
+        }
+      });
+    }
+
+    it("locks text a macro builds from a key, and leaves shown arguments editable", async () => {
+      const lockedText = (block) => [...block.display].filter((_, index) => app.isLockedUnit(block, index)).join("");
+      assert.equal(lockedText((await blockOf(4)).block), "Figure ?");
+      assert.equal(lockedText((await blockOf(6)).block), "Smith (2020)");
+      assert.equal(lockedText((await blockOf(8)).block), ", ");
+      assert.equal(lockedText((await blockOf(9)).block), "TODO: ");
+      assert.equal(lockedText((await blockOf(2)).block), " and ");
+      for (const paragraph of [0, 1, 3, 7, 10, 11, 12, 13]) assert.equal(lockedText((await blockOf(paragraph)).block), "");
+    });
+
+    it("refuses an edit that removes a macro's own text but leaves its argument", async () => {
+      for (const [paragraph, from, to] of REFUSALS) {
+        const { block } = await blockOf(paragraph);
+        assert.throws(() => app.rawTextForDisplayEdit(block, block.display.replace(from, to)), REFUSED, `${from} -> ${to}`);
+      }
+    });
+  });
+
+  describe("in a structure proposal", () => {
+    let requestFile;
+    let request;
+
+    before(async () => {
+      const created = await commentOn(server, "main.tex", "Plain words", "Rewrite.");
+      await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+      await waitForRequest(server, created.id, (item) => item.status === "proposed" && item.agentStatus !== "running", "proposal");
+      requestFile = path.join(project.root, stateDirectory, "requests", `${created.id}.json`);
+      request = created;
+    });
+
+    // Turns the proposal into a one-unit structure proposal of `paragraph`
+    // and edits that unit the way the page does.
+    async function editUnit(paragraph, from, to) {
+      const stored = JSON.parse(await fs.readFile(requestFile, "utf8"));
+      stored.origin = { type: "structure" };
+      stored.proposal.replacementText = PARAGRAPHS[paragraph];
+      delete stored.proposalUnitReviews;
+      await fs.writeFile(requestFile, `${JSON.stringify(stored, null, 2)}\n`);
+      const unitOf = async () => (await apiOk(server, "/api/requests")).find((item) => item.id === request.id).proposal.reviewUnits[0];
+      const unit = await unitOf();
+      const toasts = [];
+      const page = loadAppFunctions([...SAVE_MAPPING, "flushProposalUnitSave"], {
+        state: { proposalEditing: null, proposalSaving: false, proposalRetries: [], requests: [] },
+        api: (url, options) => apiOk(server, url, { method: options.method, body: JSON.parse(options.body) }),
+        canonicalEditableText: (target) => target.text,
+        refreshRequests: async () => {},
+        setSaveState() {},
+        showToast: (message) => toasts.push(message),
+        flushPendingRender() {},
+        setTimeout,
+      });
+      const typed = unit.display.replace(from, to);
+      assert.notEqual(typed, unit.display);
+      const element = { text: typed, isConnected: false, matches: () => false, classList: { add() {}, remove() {} } };
+      page.state.proposalEditing = { element, request: { id: request.id }, unit };
+      const saved = await page.flushProposalUnitSave();
+      const after = JSON.parse(await fs.readFile(requestFile, "utf8"));
+      return { saved, toasts, text: after.proposal.replacementText, display: (await unitOf()).display, typed, unit };
+    }
+
+    for (const [label, cases] of [["formatting", FORMATTING], ["unit", UNITS], ["link", LINKS]]) {
+      it(`saves only the edited text of a ${label} macro`, async () => {
+        for (const [paragraph, from, to, expected] of cases) {
+          const result = await editUnit(paragraph, from, to);
+          assert.equal(result.saved, true, `${from} -> ${to}: ${result.toasts.join(" ")}`);
+          assert.equal(result.text, expected, `${from} -> ${to}`);
+          assert.equal(result.display, result.typed);
+        }
+      });
+    }
+
+    it("refuses an edit that removes a macro's own text but leaves its argument", async () => {
+      for (const [paragraph, from, to] of REFUSALS) {
+        const result = await editUnit(paragraph, from, to);
+        assert.equal(result.saved, false);
+        assert.match(result.toasts.join(" "), REFUSED);
+        assert.equal(result.text, PARAGRAPHS[paragraph]);
+      }
+    });
+
+    it("shows a macro's locked text as not editable in the unit", async () => {
+      const unit = (await editUnit(4, "now", "then")).unit;
+      const nodes = [];
+      const page = loadAppFunctions(["isLockedUnit", "appendProposalUnitText"], {
+        document: {
+          createElement: () => ({ dataset: {} }),
+          createTextNode: (text) => ({ textContent: text }),
+        },
+      });
+      page.appendProposalUnitText({ append: (node) => nodes.push(node) }, unit);
+      assert.equal(nodes.map((node) => node.textContent).join(""), unit.display);
+      assert.equal(nodes.filter((node) => node.contentEditable === "false").map((node) => node.textContent).join(""), "Figure ?");
+      assert.ok(nodes.some((node) => node.contentEditable === undefined && node.textContent.includes("now")));
     });
   });
 });

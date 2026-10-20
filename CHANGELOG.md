@@ -36,6 +36,19 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   save only moves keep their id and the time they were made.
 - A merge with two or more conflicting places failed with "Automatic merge is
   unavailable." It is now reported as a conflict, like a single one.
+- **A macro that passes an argument to `\ref` or `\cite` was shown garbled,
+  and deleting text a macro adds could delete its argument.**
+  `\newcommand{\figref}[1]{Figure~\ref{#1}}` showed `\figref{fig:a}` as
+  "Figure \reffig:a", a macro around `\citet` showed `\citetacl`, and one
+  around `\href{#1}{#2}` ran the address into the link text. Paper Pal now puts
+  the arguments into the macro's body and shows the result: "Figure 3", the
+  citation, the link text. Argument text that is shown as written stays
+  editable in place, as before. Text that the macro adds or builds from a key
+  ("Figure 3", "TODO: ") is shown but not editable, in the manuscript and in a
+  proposal unit, and edits next to it keep the call. Deleting only the ")" of
+  `\paren{word}` used to delete "word" from the source too; such an edit is
+  now refused with a message. A macro whose body calls itself is shown like
+  an unknown command instead of repeating.
 - **Editing words across inline formatting could delete a closing brace.**
   Changing "big dog" to "small cat" in `The \textbf{big} dog` saved
   `The \textbf{small cat`, whose open group ran to the end of the file. Markup

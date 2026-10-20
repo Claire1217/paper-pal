@@ -1441,11 +1441,29 @@ function resolvedRequestEndBlockIndex(request) {
 
 function appendProposalUnitText(container, unit) {
   const annotations = Array.isArray(unit.annotations) ? unit.annotations : [];
+  // Locked units (isLockedUnit) are shown but not editable, as in the
+  // manuscript, because the unit's save goes through the same mapping.
+  const mapped = Array.isArray(unit.displayStarts) && Array.isArray(unit.displayEnds) && typeof unit.raw === "string";
+  const appendText = (start, end) => {
+    for (let at = start; at < end;) {
+      const locked = mapped && isLockedUnit(unit, at);
+      let next = at + 1;
+      while (next < end && (mapped && isLockedUnit(unit, next)) === locked
+        && (!locked || unit.displayStarts[next] === unit.displayStarts[at])) next += 1;
+      if (locked) {
+        const span = document.createElement("span");
+        span.textContent = unit.display.slice(at, next);
+        span.contentEditable = "false";
+        container.append(span);
+      } else container.append(document.createTextNode(unit.display.slice(at, next)));
+      at = next;
+    }
+  };
   let cursor = 0;
   for (const annotation of annotations) {
     const start = Math.max(cursor, Number(annotation.start) || 0);
     const end = Math.max(start, Number(annotation.end) || start);
-    if (start > cursor) container.append(document.createTextNode(unit.display.slice(cursor, start)));
+    if (start > cursor) appendText(cursor, start);
     const span = document.createElement("span");
     span.className = `latex-${annotation.type || "source"}`;
     span.textContent = annotation.type === "math" ? annotation.latex : unit.display.slice(start, end);
@@ -1457,7 +1475,7 @@ function appendProposalUnitText(container, unit) {
     container.append(span);
     cursor = end;
   }
-  if (cursor < unit.display.length) container.append(document.createTextNode(unit.display.slice(cursor)));
+  if (cursor < unit.display.length) appendText(cursor, unit.display.length);
 }
 
 function createProposalAddition(request) {
@@ -1823,11 +1841,12 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
       if (!styleAt[index].includes(name)) styleAt[index] = styleAt[index] ? `${styleAt[index]} ${name}` : name;
     }
   }
-  // \verb text is one source unit: typing in it could only replace the whole
-  // command, so, like math and citations, it is shown but not editable.
-  const verbatimAt = Array(block.display.length).fill(null);
+  // \verb text and a macro's text are source units: typing in them could only
+  // replace the whole command, so, like math and citations, they are shown
+  // but not editable.
+  const lockedAt = Array(block.display.length).fill(null);
   for (let index = 0; index < block.display.length; index += 1) {
-    if (isVerbatimUnit(block, index)) verbatimAt[index] = block.displayStarts[index];
+    if (isLockedUnit(block, index)) lockedAt[index] = block.displayStarts[index];
   }
 
   const trackedGroupEnds = trackedChangeControlsByEnd(block);
@@ -1875,14 +1894,14 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
       requestIdsAt[end].join(" ") === requestIdKey &&
       annotationAt[end] === annotationIndex &&
       styleAt[end] === styleAt[cursor] &&
-      verbatimAt[end] === verbatimAt[cursor] &&
+      lockedAt[end] === lockedAt[cursor] &&
       listMarkerAt[end] === listMarker &&
       !inlineAdditions.has(end) &&
       !additions.has(end)
     ) end += 1;
     const value = block.display.slice(cursor, end);
     const annotation = annotationIndex === null ? null : block.annotations[annotationIndex];
-    if (!className && !annotation && !listMarker && !styleAt[cursor] && verbatimAt[cursor] === null) container.append(document.createTextNode(value));
+    if (!className && !annotation && !listMarker && !styleAt[cursor] && lockedAt[cursor] === null) container.append(document.createTextNode(value));
     else {
       const span = document.createElement("span");
       span.className = [
@@ -1907,7 +1926,7 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
         span.title = `Go to ${annotation.key}`;
         span.addEventListener("click", () => openReferenceAnnotation(annotation));
       }
-      if (verbatimAt[cursor] !== null) span.contentEditable = "false";
+      if (lockedAt[cursor] !== null) span.contentEditable = "false";
       if (annotation?.type === "math") {
         span.contentEditable = "false";
         span.dataset.latex = annotation.latex;
@@ -3608,26 +3627,81 @@ function rawTextForDisplayEdit(source, nextDisplay) {
     oldDisplay[oldDisplay.length - 1 - suffix] === nextDisplay[nextDisplay.length - 1 - suffix]
   ) suffix += 1;
   let oldEnd = oldDisplay.length - suffix;
-  // \verb text is one unit that the page does not let the author edit. An
-  // edit that still reaches into it takes in the whole unit, which stays only
-  // if its text survives unchanged.
-  const sameVerbatim = (left, right) => left >= 0 && right < oldDisplay.length && isVerbatimUnit(source, left)
-    && source.displayStarts[left] === source.displayStarts[right] && source.displayEnds[left] === source.displayEnds[right];
-  while (sameVerbatim(prefix - 1, prefix)) prefix -= 1;
-  while (sameVerbatim(oldEnd - 1, oldEnd)) oldEnd += 1;
+  const { displayStarts: starts, displayEnds: ends } = source;
+  // \verb text and a macro's text are units that the page does not let the
+  // author edit. An edit that still reaches into one takes in the whole unit,
+  // which stays only if its text survives unchanged.
+  const sameLockedUnit = (left, right) => left >= 0 && right < oldDisplay.length && isLockedUnit(source, left)
+    && starts[left] === starts[right] && ends[left] === ends[right];
+  // A pure deletion or insertion next to a repeated letter fits in more than
+  // one place, and the prefix match puts it as far right as it goes: deleting
+  // a stray "F" typed before "Figure 3" lands on the unit's own "F". Move it
+  // left past the repeated letters when that keeps it out of a locked unit.
+  const newEnd = () => nextDisplay.length - (oldDisplay.length - oldEnd);
+  const touchesLockedUnit = (from, to) => {
+    if (from === to) return sameLockedUnit(from - 1, from);
+    for (let index = from; index < to; index += 1) if (isLockedUnit(source, index)) return true;
+    return false;
+  };
+  if ((prefix === oldEnd) !== (prefix === newEnd()) && touchesLockedUnit(prefix, oldEnd)) {
+    let from = prefix;
+    let to = oldEnd;
+    const lastNew = () => nextDisplay[nextDisplay.length - (oldDisplay.length - to) - 1];
+    while (from > 0 && (from === to ? lastNew() : oldDisplay[to - 1]) === oldDisplay[from - 1] && touchesLockedUnit(from, to)) {
+      from -= 1;
+      to -= 1;
+    }
+    if (!touchesLockedUnit(from, to)) [prefix, oldEnd] = [from, to];
+  }
+  while (sameLockedUnit(prefix - 1, prefix)) prefix -= 1;
+  while (sameLockedUnit(oldEnd - 1, oldEnd)) oldEnd += 1;
   const attempt = (from, to) => {
+    // The stretch takes in every character whose source lies inside the
+    // source it rewrites: the rest of a unit it cuts into, which then stays
+    // only if all of it survives. Text that the page shows on its own inside
+    // that source is another matter. The ")" of \paren{word} maps to the
+    // whole call, so deleting it would also delete "word", which the author
+    // left standing; such an edit is refused (`takesInOtherText`).
+    const edited = new Set();
+    for (let index = from; index < to; index += 1) edited.add(`${starts[index]}:${ends[index]}`);
+    let takesInOtherText = false;
+    let rawFrom = Infinity;
+    let rawTo = -Infinity;
+    for (let grown = from < to; grown;) {
+      grown = false;
+      for (let index = from; index < to; index += 1) {
+        rawFrom = Math.min(rawFrom, starts[index]);
+        rawTo = Math.max(rawTo, ends[index]);
+      }
+      const inside = (index) => starts[index] >= rawFrom && ends[index] <= rawTo && ends[index] > starts[index];
+      const takeIn = (index) => {
+        if (!edited.has(`${starts[index]}:${ends[index]}`)) takesInOtherText = true;
+        grown = true;
+      };
+      while (from > 0 && inside(from - 1)) takeIn((from -= 1));
+      while (to < oldDisplay.length && inside(to)) takeIn((to += 1) - 1);
+    }
     let rawStart = from < oldDisplay.length
-      ? source.displayStarts[from]
-      : (source.displayEnds.at(-1) ?? source.raw.length);
+      ? Math.min(starts[from], rawFrom)
+      : (ends.at(-1) ?? source.raw.length);
+    // Text typed between the last letter of an argument and the ")" of
+    // \paren{word}, whose source is the whole call, goes after the letter,
+    // inside the argument, not in front of the call.
+    const previous = from - 1;
+    if (from === to && previous >= 0 && from < oldDisplay.length
+      && starts[from] <= starts[previous] && ends[previous] <= ends[from]
+      && ends[from] - starts[from] > ends[previous] - starts[previous]) {
+      rawStart = ends[previous];
+    }
     // Never start between a "% comment" and the line break that ends it: the
     // new text would be written into the comment. Start before the comment.
     if (from < oldDisplay.length && endsSourceComment(source, from)) {
       rawStart = from > 0 ? source.displayEnds[from - 1] : 0;
     }
-    const rawEnd = to > from ? source.displayEnds[to - 1] : rawStart;
+    const rawEnd = to > from ? Math.max(ends[to - 1], rawTo) : rawStart;
     const replacement = nextDisplay.slice(from, nextDisplay.length - (oldDisplay.length - to));
     const changed = displayEditKeepingMarkup(source, rawStart, from, to, replacement);
-    return { rawStart, rawEnd, replacement, changed };
+    return { rawStart, rawEnd, replacement, changed, takesInOtherText };
   };
   let edit = attempt(prefix, oldEnd);
   if (edit.changed) {
@@ -3643,6 +3717,9 @@ function rawTextForDisplayEdit(source, nextDisplay) {
       if (widened.changed) edit = widened;
     }
   }
+  if (edit.takesInOtherText) {
+    throw new Error("This edit changes text that a macro adds around its arguments. Undo it, or change that macro call in the LaTeX source.");
+  }
   const changed = edit.changed ?? [{ text: edit.replacement, typed: true }];
   const pieces = [{ text: source.raw.slice(0, edit.rawStart) }, ...changed, { text: source.raw.slice(edit.rawEnd) }];
   let before = "";
@@ -3653,10 +3730,22 @@ function rawTextForDisplayEdit(source, nextDisplay) {
   return tidyEditedSource(pieces);
 }
 
-// The display character at `index` is the text of \verb (or \lstinline,
-// \mintinline): one source unit, shown but not editable.
-function isVerbatimUnit(source, index) {
-  return /^\\(?:verb|lstinline|mintinline)(?![A-Za-z])/.test(source.raw.slice(source.displayStarts[index], source.displayEnds[index]));
+// The display character at `index` belongs to one source unit that the page
+// shows but does not let the author type in: the text of \verb (or
+// \lstinline, \mintinline), or text that a command call with arguments
+// produces as a whole, together with the character next to it ("Figure 3"
+// from \figref{fig:a}, the ", " of \pair{a}{b}). Typing inside such text could
+// only replace the whole call, with the keys and arguments it hides.
+function isLockedUnit(source, index) {
+  const start = source.displayStarts[index];
+  const end = source.displayEnds[index];
+  if (source.raw[start] !== "\\") return false;
+  // Only the head of the range is read: it may be a whole code block.
+  const head = source.raw.slice(start, Math.min(end, start + 120));
+  if (/^\\(?:verb|lstinline|mintinline)(?![A-Za-z])/.test(head)) return true;
+  if (!/^\\[A-Za-z@]+\*?\s*[[{]/.test(head) || !"]}".includes(source.raw[end - 1])) return false;
+  const sameRange = (other) => source.displayStarts[other] === start && source.displayEnds[other] === end;
+  return sameRange(index - 1) || sameRange(index + 1);
 }
 
 // The display character at `index` is the line break that ends a "% comment":
@@ -3718,7 +3807,7 @@ function displayEditKeepingMarkup(source, rawFrom, from, to, replacement) {
   let hasMarkup = from < to && rawFrom < starts[from];
   for (let index = from; index < to; index += 1) {
     if (!(ends[index] >= starts[index])) return null;
-    if (endsComment(index) || isVerbatimUnit(source, index)) hasMarkup = true;
+    if (endsComment(index) || isLockedUnit(source, index)) hasMarkup = true;
     if (index === from || sameUnit(index)) continue;
     if (starts[index] < ends[index - 1]) return null;
     if (starts[index] > ends[index - 1]) hasMarkup = true;

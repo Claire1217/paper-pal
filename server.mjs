@@ -1341,10 +1341,21 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
   };
   const appendNested = (nested, offsetOf, displayRange = null, landings = []) => {
     const displayOffset = display.length;
+    // Text from a macro body maps to the whole call (displayRange), except a
+    // character that lies wholly inside an argument substituted into the body
+    // (`landings`): it maps back into that argument, so it stays editable in
+    // place.
+    const landingOf = (start, end) => landings.find((item) => start >= item.at && end <= item.at + item.length);
     for (let cursor = 0; cursor < nested.display.length; cursor += 1) {
       display.push(nested.display[cursor]);
-      displayStarts.push(displayRange ? displayRange[0] : offsetOf + nested.displayStarts[cursor]);
-      displayEnds.push(displayRange ? displayRange[1] : offsetOf + nested.displayEnds[cursor]);
+      const landing = displayRange ? landingOf(nested.displayStarts[cursor], nested.displayEnds[cursor]) : null;
+      if (landing) {
+        displayStarts.push(landing.source - landing.at + nested.displayStarts[cursor]);
+        displayEnds.push(landing.source - landing.at + nested.displayEnds[cursor]);
+      } else {
+        displayStarts.push(displayRange ? displayRange[0] : offsetOf + nested.displayStarts[cursor]);
+        displayEnds.push(displayRange ? displayRange[1] : offsetOf + nested.displayEnds[cursor]);
+      }
     }
     for (const annotation of nested.annotations || []) {
       const shifted = { ...annotation, start: displayOffset + annotation.start, end: displayOffset + annotation.end };
@@ -1917,9 +1928,13 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
       cursor = parsed.end;
       continue;
     }
-    if (macros.has(command) && depth < MAX_MACRO_DEPTH) {
-      const macro = macros.get(command);
-      const body = typeof macro === "string" ? macro : String(macro?.body ?? "");
+    // A macro is expanded while the depth and expansion limits allow. One
+    // whose body calls itself would only repeat itself until they stop it, so
+    // it is shown like a command this parser does not know, as is any macro
+    // once the limits are reached.
+    const macro = macros.has(command) && depth < MAX_MACRO_DEPTH && macroExpansionsLeft > 0 ? macros.get(command) : null;
+    const body = macro === null ? "" : typeof macro === "string" ? macro : String(macro?.body ?? "");
+    if (macro !== null && !new RegExp(`\\\\${command}(?![A-Za-z@])`).test(body)) {
       const params = typeof macro === "string" ? 0 : macro.params || 0;
       const optional = typeof macro === "string" ? null : macro.optional ?? null;
       // An operator or a bare math macro used in prose shows its name.
@@ -1939,10 +1954,13 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
         } else if (alias && values.length === 1 && values[0].range && TEXT_COMMANDS.get(alias[1])?.show?.length === 1 && TEXT_COMMANDS.get(alias[1]).sig === "m") {
           // \newcommand{\term}[1]{\emph{#1}}: the argument stays editable and keeps the style.
           appendStyled(TEXT_COMMANDS.get(alias[1]).style, () => appendInner(values[0].range.start, values[0].range.end));
-        } else if (/[$]|\\\(|\\\[|\\ensuremath|\\begin\b|\\verb/.test(body)) {
-          // Arguments may sit inside math: substitute as text, show as one unit.
-          // Where each argument lands is kept, so a tracked change inside one
-          // still names its own source range.
+        } else {
+          // The arguments are substituted into the body and the result is
+          // converted as a whole, so a command in the body keeps its argument:
+          // Figure~\ref{#1} shows "Figure 3", not "\ref" and a bare key.
+          // Text the body adds, and text built from an argument that is not
+          // shown as it is (a \ref key, a \cite key), map to the whole call.
+          // Text of an argument that is shown maps to its own source range.
           const landings = [];
           let substituted = "";
           let last = 0;
@@ -1953,17 +1971,8 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
             substituted += value?.text ?? "";
             last = placeholder.index + placeholder[0].length;
           }
-          appendExpanded(`${substituted}${body.slice(last)}`, cursor, parsed.end, false, landings);
-        } else {
-          // Literal pieces map to the command; each argument keeps its own range.
-          for (const piece of body.split(/(#[1-9])/)) {
-            const value = /^#[1-9]$/.test(piece) ? values[Number(piece[1]) - 1] : null;
-            if (!value) {
-              // The blanks of "[#1: #2]" are part of the text.
-              if (!/^#[1-9]$/.test(piece)) appendExpanded(piece, cursor, parsed.end, true);
-            } else if (value.range) appendInner(value.range.start, value.range.end);
-            else appendExpanded(value.text, cursor, parsed.end);
-          }
+          // The blanks of "[#1: #2]" are part of the text.
+          appendExpanded(`${substituted}${body.slice(last)}`, cursor, parsed.end, true, landings);
         }
         cursor = parsed.end;
         continue;
