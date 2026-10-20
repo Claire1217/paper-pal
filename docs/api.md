@@ -170,7 +170,7 @@ A "request" is one comment with its conversation, proposal and history.
 | POST | `/api/structure/confirm` | Confirm a structure proposal from chat as the plan; snapshots sources and review state. `201`. | `sessionId`, `proposal`, `force` |
 | POST | `/api/structure/section-rewrite` | Create rewrite requests for one section of the plan. `202`. | `sectionId`, `autoProcess` |
 | POST | `/api/structure/mark-applied` | Mark plan sections as applied. | `sectionIds` |
-| POST | `/api/structure/revert` | Restore every source file and the review state captured by the plan, and push an undo entry. `409` when a file changed after the plan was approved (or, once applied, after it was applied), unless `force` is `true`. **Writes source.** | `force` |
+| POST | `/api/structure/revert` | Restore every source file and the review state captured by the plan. Pushes an undo entry when a file or its review state changed. `409` when a file's text or confirmations changed after the plan was approved (or, once applied, its text changed after it was applied), unless `force` is `true`. A write that fails partway restores the files already written. **Writes source.** | `force` |
 
 ### Chat
 

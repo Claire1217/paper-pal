@@ -47,6 +47,17 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   `token`, `secret`, `password` and similar (singular or plural) now stops
   start-up when it holds a value; names that end in `Env` (`apiKeyEnv`) and
   counts such as `maxTokens` are still allowed.
+- **Reverting a structure plan discarded every edit made after the plan was
+  approved, and Undo could not bring them back.** Paper Pal now asks the author
+  to confirm when a file's text or confirmations changed after the plan was
+  approved (or its text changed after it was applied), and names the files. A
+  confirmed revert is an undo entry: Undo restores the text and confirmations
+  from before the revert and makes the plan active again. A revert that fails
+  partway, for example on a read-only folder, puts back the files it already
+  wrote.
+- A `null` entry in `proposal.sections` (`/api/structure/confirm`) or in
+  `segments` (`/api/confirm`, `/api/unconfirm`, `/api/rewrite`) answered 500
+  "Internal error". It now answers 400.
 - **A caption edit could be written into a commented-out caption.** With
   `% \caption{Old}` above the real `\caption` of a table, the page showed the
   old caption, and an accepted caption rewrite changed the comment line while

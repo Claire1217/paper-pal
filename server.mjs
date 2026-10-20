@@ -5716,46 +5716,81 @@ async function revertStructurePlan(body = {}) {
     if (current === snapshot.source) unchanged.add(snapshot.path);
   }
   await assertSourcesWritable((plan.sourceSnapshots || []).map((snapshot) => snapshot.path).filter((item) => !unchanged.has(item)));
-  // Edits made after the plan was applied (or, for a file the plan has not
-  // touched yet, after it was approved) would be overwritten by the snapshot,
-  // so the author has to confirm that explicitly.
+  const reviewState = await readState();
+  // Edits and confirmations made after the plan was applied (or, for a file
+  // the plan has not touched yet, after it was approved) would be replaced by
+  // the snapshot, so the author has to confirm that explicitly. A file that is
+  // back at its snapshot loses no text. Review state is compared only before
+  // the plan touched the file: accepting its proposals changes review state.
   if (body.force !== true) {
+    const editedPaths = [];
+    const reviewedPaths = [];
+    let sinceApplied = true;
     for (const snapshot of plan.sourceSnapshots || []) {
-      const current = currentSources.get(snapshot.path);
       const expected = plan.appliedEtags?.[snapshot.path];
-      if (expected ? sha(current) !== expected : current !== snapshot.source) {
-        throw new HttpError(409, `${snapshot.path} changed after this structure plan was approved, and reverting would discard those edits. Confirm the revert to replace them; Undo can bring them back.`);
-      }
+      const edited = !unchanged.has(snapshot.path) && (!expected || sha(currentSources.get(snapshot.path)) !== expected);
+      const reviewed = !expected && !sameSnapshot(
+        reviewStateSnapshot(reviewState, snapshot.path),
+        plan.reviewSnapshots?.[snapshot.path] || { selections: [], paragraphs: {} },
+      );
+      if (edited) editedPaths.push(snapshot.path);
+      if (reviewed) reviewedPaths.push(snapshot.path);
+      if ((edited || reviewed) && !expected) sinceApplied = false;
+    }
+    const changedPaths = [...new Set([...editedPaths, ...reviewedPaths])];
+    if (changedPaths.length) {
+      const names = changedPaths.length === 1 ? changedPaths[0]
+        : changedPaths.length === 2 ? `${changedPaths[0]} and ${changedPaths[1]}`
+          : `${changedPaths[0]} and ${changedPaths.length - 1} more files`;
+      const when = `after this structure plan was ${sinceApplied ? "applied" : "approved"}`;
+      const lead = editedPaths.length
+        ? `${names} changed ${when}, and reverting would discard those ${reviewedPaths.length ? "edits and confirmations" : "edits"}.`
+        : `Confirmations in ${names} changed ${when}, and reverting would discard them.`;
+      throw new HttpError(409, `${lead} Confirm the revert to replace them; Undo can bring them back.`);
     }
   }
-  const reviewState = await readState();
+  const beforeState = structuredClone(reviewState);
   const undoFiles = [];
-  for (const snapshot of plan.sourceSnapshots || []) {
-    const beforeReview = reviewStateSnapshot(reviewState, snapshot.path);
-    if (!unchanged.has(snapshot.path)) await writeSource(snapshot.path, snapshot.source);
-    restoreReviewStateSnapshot(reviewState, snapshot.path, plan.reviewSnapshots?.[snapshot.path]);
-    const afterReview = reviewStateSnapshot(reviewState, snapshot.path);
-    if (unchanged.has(snapshot.path) && sameSnapshot(beforeReview, afterReview)) continue;
-    undoFiles.push({
-      path: snapshot.path,
-      ...(unchanged.has(snapshot.path) ? {} : { beforeSource: currentSources.get(snapshot.path), afterSource: snapshot.source }),
-      afterEtag: sha(snapshot.source),
-      beforeReview,
-      afterReview,
-    });
-  }
-  await writeState(reviewState);
-  // The revert replaces whole files, so it must be undoable like every other
-  // source write; Undo also makes the plan active again.
-  if (undoFiles.length) {
-    await pushUndoAction({
-      kind: "structure-revert",
-      label: "Revert structure plan",
-      path: undoFiles[0].path,
-      files: undoFiles,
-      structurePlanId: plan.id,
-      beforePlan,
-    });
+  const written = [];
+  try {
+    for (const snapshot of plan.sourceSnapshots || []) {
+      const beforeReview = reviewStateSnapshot(reviewState, snapshot.path);
+      if (!unchanged.has(snapshot.path)) {
+        await writeSource(snapshot.path, snapshot.source);
+        written.push(snapshot.path);
+      }
+      restoreReviewStateSnapshot(reviewState, snapshot.path, plan.reviewSnapshots?.[snapshot.path]);
+      const afterReview = reviewStateSnapshot(reviewState, snapshot.path);
+      if (unchanged.has(snapshot.path) && sameSnapshot(beforeReview, afterReview)) continue;
+      undoFiles.push({
+        path: snapshot.path,
+        ...(unchanged.has(snapshot.path) ? {} : { beforeSource: currentSources.get(snapshot.path), afterSource: snapshot.source }),
+        afterEtag: sha(snapshot.source),
+        beforeReview,
+        afterReview,
+      });
+    }
+    await writeState(reviewState);
+    // The revert replaces whole files, so it must be undoable like every other
+    // source write; Undo also makes the plan active again.
+    if (undoFiles.length) {
+      await pushUndoAction({
+        kind: "structure-revert",
+        label: "Revert structure plan",
+        path: undoFiles[0].path,
+        files: undoFiles,
+        structurePlanId: plan.id,
+        beforePlan,
+      });
+    }
+  } catch (error) {
+    // All files or none: a write that fails partway (a read-only folder, a
+    // full disk) must not leave some files reverted with no undo entry.
+    for (const sourcePath of [...written].reverse()) {
+      await writeSource(sourcePath, currentSources.get(sourcePath)).catch(() => {});
+    }
+    await writeState(beforeState).catch(() => {});
+    throw error;
   }
   plan.status = "reverted";
   plan.revertedAt = new Date().toISOString();
