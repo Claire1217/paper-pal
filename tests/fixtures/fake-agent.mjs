@@ -13,7 +13,28 @@ const option = (name) => {
   return index >= 0 ? argv[index + 1] : null;
 };
 
+// FAKE_AGENT_STARTUP_DELAY_MS imitates a slow start (a loaded machine) before
+// any of the setup below has run.
+if (process.env.FAKE_AGENT_STARTUP_DELAY_MS) {
+  await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_AGENT_STARTUP_DELAY_MS)));
+}
+
 if (process.env.FAKE_AGENT_IGNORE_SIGTERM) process.on("SIGTERM", () => {});
+
+// Stands in for the helper processes a real agent CLI starts (shells, MCP
+// servers): a long sleep that survives unless the whole process group is killed.
+let grandchildPid = null;
+if (process.env.FAKE_AGENT_GRANDCHILD) {
+  const grandchild = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setTimeout(() => {}, 120000)"], { stdio: "ignore" });
+  grandchildPid = grandchild.pid;
+}
+
+// Written as soon as the SIGTERM handler and the helper exist, before stdin is
+// read: a test that times the run out early still learns which processes to
+// check, even if the kill arrives before last-run.json is written.
+const logRoot = path.join(process.cwd(), ".fake-agent");
+mkdirSync(logRoot, { recursive: true });
+writeFileSync(path.join(logRoot, "started.json"), JSON.stringify({ pid: process.pid, grandchildPid }));
 
 const chunks = [];
 for await (const chunk of process.stdin) chunks.push(chunk);
@@ -28,16 +49,6 @@ try {
   // Chat prompts do not end in a task object.
 }
 
-// Stands in for the helper processes a real agent CLI starts (shells, MCP
-// servers): a long sleep that survives unless the whole process group is killed.
-let grandchildPid = null;
-if (process.env.FAKE_AGENT_GRANDCHILD) {
-  const grandchild = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setTimeout(() => {}, 120000)"], { stdio: "ignore" });
-  grandchildPid = grandchild.pid;
-}
-
-const logRoot = path.join(process.cwd(), ".fake-agent");
-mkdirSync(logRoot, { recursive: true });
 writeFileSync(path.join(logRoot, "last-run.json"), JSON.stringify({
   stdinChars: prompt.length,
   stdinBytes: Buffer.byteLength(prompt),

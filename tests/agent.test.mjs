@@ -10,6 +10,12 @@ async function lastRun(project) {
   return JSON.parse(await fs.readFile(path.join(project.root, ".fake-agent", "last-run.json"), "utf8"));
 }
 
+// The pids the fake agent records before it reads stdin. Tests that time a run
+// out use this, not last-run.json, which a slow start may never reach.
+async function startedRun(project) {
+  return JSON.parse(await fs.readFile(path.join(project.root, ".fake-agent", "started.json"), "utf8"));
+}
+
 describe("comment → proposal → accept with a fake agent CLI", () => {
   let project;
   let server;
@@ -311,7 +317,9 @@ describe("agent timeouts", () => {
   });
 
   it("names the provider, fails the run, and kills a child that ignores SIGTERM", async () => {
-    const project = await makeProject({ fakeAgent: true, config: { agent: { timeoutMs: 600 } } });
+    // The timeout leaves a loaded machine time to start Node and install the
+    // SIGTERM handler; the 60 s sleep stays far above it.
+    const project = await makeProject({ fakeAgent: true, config: { agent: { timeoutMs: 2000 } } });
     const server = await startServer(project.root, { env: { FAKE_AGENT_SLEEP_MS: "60000", FAKE_AGENT_IGNORE_SIGTERM: "1" } });
     const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Tighten.");
     await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
@@ -319,8 +327,8 @@ describe("agent timeouts", () => {
       const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
       return request?.agentStatus === "failed" ? request : null;
     }, { label: "timeout" });
-    assert.match(failed.agentError, /Codex rewrite timed out after 600 ms/);
-    const { pid } = await lastRun(project);
+    assert.match(failed.agentError, /Codex rewrite timed out after 2 s/);
+    const { pid } = await startedRun(project);
     const isAlive = () => {
       try {
         process.kill(pid, 0);
@@ -351,7 +359,7 @@ describe("agent process groups", { skip: process.platform === "win32" }, () => {
   after(cleanupAll);
 
   it("kills the helpers an agent started when the run times out", async () => {
-    const project = await makeProject({ fakeAgent: true, config: { agent: { timeoutMs: 800 } } });
+    const project = await makeProject({ fakeAgent: true, config: { agent: { timeoutMs: 2000 } } });
     const server = await startServer(project.root, { env: { FAKE_AGENT_SLEEP_MS: "60000", FAKE_AGENT_GRANDCHILD: "1" } });
     const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Tighten.");
     await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
@@ -359,7 +367,7 @@ describe("agent process groups", { skip: process.platform === "win32" }, () => {
       const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
       return request?.agentStatus === "failed" ? request : null;
     }, { label: "timeout" });
-    const { pid, grandchildPid } = await lastRun(project);
+    const { pid, grandchildPid } = await startedRun(project);
     assert.ok(Number.isInteger(grandchildPid) && grandchildPid !== pid);
     const isAlive = (target) => {
       try {
