@@ -127,9 +127,15 @@ Inside a paragraph:
   arguments. In prose a macro is expanded **for display only**: the source is
   never rewritten. The arguments are put into the body and the result is
   shown, so `\newcommand{\figref}[1]{Figure~\ref{#1}}` shows "Figure 3" and a
-  macro around `\citet` shows the citation. Your definition of a command
-  Paper Pal also knows (`\todo`, `\hl`) is used instead of Paper Pal's,
-  except one made with `\providecommand`.
+  macro around `\citet` shows the citation. Your definition of a text or
+  formatting command Paper Pal also knows (`\todo`, `\hl`, `\footnote`,
+  `\textbf`) is used instead of Paper Pal's, except one made with
+  `\providecommand`, so `\renewcommand{\todo}[1]{}` hides every `\todo`, as
+  in the PDF. Redefinitions of `\cite`, `\ref`, `\eqref` and the other
+  citation and reference commands, `\verb`, `\item`, `\frac` and accents are
+  not used. A copy made with `\let\oldfootnote\footnote` (or
+  `\let\x=\y`, `\LetLtxMacro`) works like the original, so a redefinition
+  that calls the copy still shows a footnote.
   - Argument text that the body shows as written (`\textcolor{red}{#1}`, the
     link text of `\href{#1}{#2}`, the `#1` of `(#1)`) stays editable in place.
     An edit there changes only the argument.

@@ -29,9 +29,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   "[" or "]" of a `\footnote` or the "TODO: " of `\todo`, which left an
   unbalanced brace. A letter typed right after a macro without arguments
   joined its name (`\eg` plus "s" saved `\egs`); it now follows an empty
-  group. A command you define yourself, such as `\newcommand{\todo}`, is now
-  shown with your definition instead of the built-in one. A macro whose body
-  calls itself is shown like an unknown command instead of repeating.
+  group. A text or formatting command you define yourself, such as
+  `\newcommand{\todo}`, is now shown with your definition instead of the
+  built-in one; `\renewcommand{\todo}[1]{}` therefore hides every `\todo`
+  from the page, as from the PDF. A copy made with `\let` (`\let\x\y`,
+  `\let\x=\y`, `\LetLtxMacro`) works like the command it copies, so
+  redefining `\footnote` to call `\oldfootnote` still shows the footnote. A
+  macro whose body calls itself is shown like an unknown command instead of
+  repeating.
 - **"Keep my edit" could overwrite a different paragraph.** After a co-author
   added or removed a paragraph above the one being edited, the forced save
   replaced whatever paragraph now sat at the old position. It now finds the

@@ -728,6 +728,13 @@ describe("user macros that pass an argument to another command", () => {
 \newcommand{\todo}[1]{\textcolor{red}{TODO: #1}}
 \providecommand{\hl}[1]{X#1X}
 \newcommand{\sq}[1]{[#1]}
+\let\oldfootnote\footnote
+\renewcommand{\footnote}[1]{\oldfootnote{\small #1}}
+\let\oldtextbf=\textbf
+\renewcommand{\textbf}[1]{\oldtextbf{\textsc{#1}}}
+\global\let\oldsq\sq
+\renewcommand{\sq}[1]{\oldsq{\oldsq{#1}}}
+\renewcommand{\underline}[1]{\underline{#1}}
 \begin{document}
 \section{Intro}\label{sec:intro}
 
@@ -743,7 +750,9 @@ Self \dbl{x} and \many{} and \pA{y} end.
 
 Own \todo{check this} and \hl{marked} here.
 
-Deep \sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{y}}}}}}}}}}}} end.
+Deep \oldsq{\oldsq{\oldsq{\oldsq{\oldsq{\oldsq{\oldsq{\oldsq{\oldsq{\oldsq{\oldsq{\oldsq{y}}}}}}}}}}}} end.
+
+Copies \sq{s}, a\footnote{a note here} and \textbf{bold} and \underline{u}.
 
 \begin{figure}\caption{A}\label{fig:a}\end{figure}
 \end{document}
@@ -812,5 +821,18 @@ Deep \sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{y}}}}}}}}}}}} end.
 
   it("counts only macro bodies, not arguments, toward the nesting limit", () => {
     assert.equal(findBlock(document, "Deep ").display, `Deep ${"[".repeat(12)}y${"]".repeat(12)} end.`);
+  });
+
+  it("keeps the old behaviour of a command copied with \\let before it is redefined", () => {
+    const block = findBlock(document, "Copies ");
+    assert.equal(block.display, "Copies [[s]], a [a note here] and bold and u.");
+    const styled = (word, type) => {
+      const at = block.display.indexOf(word);
+      return block.styles.some((style) => style.type === type && style.start <= at && style.end >= at + word.length);
+    };
+    assert.ok(styled("[a note here]", "footnote"));
+    assert.ok(styled("bold", "strong") && styled("bold", "smallcaps"));
+    // A redefinition that calls itself, with no copy, does not loop.
+    assert.ok(!styled("u.", "underline"));
   });
 });

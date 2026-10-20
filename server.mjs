@@ -1044,18 +1044,37 @@ function bracketEnd(value, openAt) {
 // \renewcommand, \providecommand, \DeclareRobustCommand (with or without
 // braces around the name, with [n] and [default]), \def\name#1#2{...},
 // \DeclareMathOperator and simple \NewDocumentCommand signatures. Anything
-// cleverer is left alone.
-function collectMacros(source) {
+// cleverer is left alone. \let\copy\name (also \let\copy=\name and
+// \LetLtxMacro) copies a macro defined before it in this source, records
+// { let: "name" } for a command latexToDisplay knows, or else copies the
+// macro from `known`, so a later \renewcommand{\name}{... \copy ...} keeps
+// the old behaviour.
+function collectMacros(source, known = null) {
   const macros = new Map();
-  if (!/\\(?:newcommand|renewcommand|providecommand|DeclareRobustCommand|DeclareMathOperator|def|gdef|NewDocumentCommand|RenewDocumentCommand|ProvideDocumentCommand)/.test(source)) return macros;
+  if (!/\\(?:newcommand|renewcommand|providecommand|DeclareRobustCommand|DeclareMathOperator|def|gdef|NewDocumentCommand|RenewDocumentCommand|ProvideDocumentCommand|let|LetLtxMacro)/.test(source)) return macros;
   const text = maskLatex(source);
-  const pattern = /\\(newcommand|renewcommand|providecommand|DeclareRobustCommand|DeclareMathOperator|def|gdef|NewDocumentCommand|RenewDocumentCommand|ProvideDocumentCommand)(\*?)(?![A-Za-z@])/g;
+  const pattern = /\\(newcommand|renewcommand|providecommand|DeclareRobustCommand|DeclareMathOperator|def|gdef|NewDocumentCommand|RenewDocumentCommand|ProvideDocumentCommand|let|LetLtxMacro)(\*?)(?![A-Za-z@])/g;
   const skipSpace = (at) => {
     while (/[ \t\r\n]/.test(text[at] || "")) at += 1;
     return at;
   };
   let match;
   while ((match = pattern.exec(text)) !== null) {
+    if (match[1] === "let" || match[1] === "LetLtxMacro") {
+      const pair = /^\s*\{?\s*\\([A-Za-z@]+)\s*\}?\s*=?\s*\{?\s*\\([A-Za-z@]+)/.exec(text.slice(pattern.lastIndex, pattern.lastIndex + 160));
+      if (!pair) continue;
+      const [, name, original] = pair;
+      // `known` holds the project's definitions as they end up, not as they
+      // were at this point, so a built-in is taken as built in: the file may
+      // redefine it later to call this copy.
+      const copied = macros.get(original) ?? (displayedCommand(original) ? { let: original } : known?.get(original));
+      if (copied !== undefined) {
+        const { provide, ...definition } = typeof copied === "string" ? { body: copied, params: 0, optional: null } : copied;
+        macros.set(name, definition);
+      }
+      pattern.lastIndex += pair[0].length;
+      continue;
+    }
     let at = skipSpace(match.index + match[0].length);
     const braced = text[at] === "{";
     if (braced) at = skipSpace(at + 1);
@@ -1144,7 +1163,9 @@ function katexMacros(macros) {
   let count = 0;
   for (const [name, macro] of macros) {
     if (count >= 400) break;
-    if (!macro || /[$]|\\\(|\\\[|\\begin\{(?:equation|align|gather|multline)/.test(macro.body)) continue;
+    // A \let copy of a built-in is left out: KaTeX knows the original, and the
+    // original may be redefined to call the copy.
+    if (!macro || macro.let || /[$]|\\\(|\\\[|\\begin\{(?:equation|align|gather|multline)/.test(macro.body)) continue;
     result[`\\${name}`] = macro.body || "{}";
     count += 1;
   }
@@ -1269,6 +1290,12 @@ const LABEL_PREFIX_TYPES = {
   fig: "figure", tab: "table", tbl: "table", eq: "equation", eqn: "equation", sec: "section", subsec: "section", ssec: "section", app: "appendix",
   thm: "theorem", lem: "lemma", prop: "proposition", cor: "corollary", def: "definition", alg: "algorithm", lst: "listing", ch: "chapter", chap: "chapter",
 };
+// Commands that latexToDisplay handles itself, which a \let copy can stand for.
+const SPECIAL_COMMANDS = new Set(["verb", "lstinline", "mintinline", "ensuremath", "frac", "chadd", "chdel", "item", "captionof", "iffalse"]);
+function displayedCommand(name) {
+  return TEXT_COMMANDS.has(name) || Object.hasOwn(CITE_MODES, name) || REFERENCE_COMMANDS.has(name)
+    || Object.hasOwn(ACCENT_MARKS, name) || SPECIAL_COMMANDS.has(name);
+}
 const MAX_MACRO_DEPTH = 6;
 // Macro expansions left for the block being converted. Together with the
 // depth limit this stops \newcommand{\a}{\a\a\a} from running away.
@@ -1600,7 +1627,10 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
       cursor += escaped === undefined ? 1 : 2;
       continue;
     }
-    const command = commandMatch[1];
+    // A \let copy (\let\oldfootnote\footnote) works like the command it was
+    // made from, even after that command is redefined to call the copy.
+    const letOf = macros.get(commandMatch[1])?.let;
+    const command = letOf ?? commandMatch[1];
     const commandEnd = cursor + commandMatch[0].length;
     let argumentStart = skipBlanks(commandEnd);
 
@@ -1894,7 +1924,7 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
     }
     // A command the author defined (\newcommand{\P}{\mathbb{P}}, their own
     // \todo) is theirs; \providecommand does not replace a package's.
-    const own = macros.get(command);
+    const own = letOf === undefined ? macros.get(command) : undefined;
     const spec = own !== undefined && !own?.provide ? null : TEXT_COMMANDS.get(command);
     if (spec) {
       if (spec.text !== undefined) {
@@ -2035,7 +2065,7 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
     }
     const filled = groups.filter((group) => raw.slice(group.start, group.end).trim());
     if (!filled.length) {
-      appendStyled("command", () => appendReplacement(`\\${command}`, cursor, commandEnd));
+      appendStyled("command", () => appendReplacement(`\\${commandMatch[1]}`, cursor, commandEnd));
       cursor = commandEnd;
       continue;
     }
@@ -2505,7 +2535,7 @@ async function projectMacros() {
     // Definitions and included files in source order: a later one wins.
     let cursor = 0;
     for (const event of events) {
-      for (const [name, macro] of collectMacros(source.slice(cursor, event.index))) {
+      for (const [name, macro] of collectMacros(source.slice(cursor, event.index), macros)) {
         if (!(macro.provide && macros.has(name))) macros.set(name, macro);
       }
       cursor = event.index;
@@ -2513,7 +2543,7 @@ async function projectMacros() {
         for (const base of [compileRoot, path.dirname(normalized)]) await visit(path.resolve(base, target), depth + 1);
       }
     }
-    for (const [name, macro] of collectMacros(source.slice(cursor))) {
+    for (const [name, macro] of collectMacros(source.slice(cursor), macros)) {
       if (!(macro.provide && macros.has(name))) macros.set(name, macro);
     }
   }
@@ -2524,7 +2554,7 @@ async function projectMacros() {
 // The macros that apply to one file: the project's, then the file's own.
 function documentMacros(source, references) {
   const macros = new Map(references?.macros || []);
-  for (const [name, macro] of collectMacros(source)) {
+  for (const [name, macro] of collectMacros(source, macros)) {
     if (!(macro.provide && macros.has(name))) macros.set(name, macro);
   }
   return macros;
@@ -2758,7 +2788,7 @@ async function resolveIncludedArtifact(relativePath, target, macros, references,
     // Without a telling file name, only a file that holds nothing but the
     // float counts: a section file that happens to contain a figure does not.
     if (onlyArtifacts && includedBlocks.some((item) => !["table", "figure", "structure"].includes(item.kind))) continue;
-    const includedMacros = new Map([...macros, ...collectMacros(includedSource)]);
+    const includedMacros = new Map([...macros, ...collectMacros(includedSource, macros)]);
     const includedPath = relativeRepo(candidate);
     const semantic = await semanticBlock(artifact, includedPath, includedMacros, references);
     if (!semantic) continue;
