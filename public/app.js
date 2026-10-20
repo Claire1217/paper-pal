@@ -132,7 +132,7 @@ const state = {
   editing: null,
   proposalEditing: null,
   proposalSaving: false,
-  proposalRetry: null,
+  proposalRetries: [],
   saveTimer: null,
   saving: false,
   toastTimer: null,
@@ -1533,6 +1533,8 @@ function handleProposalUnitInput(event) {
   if (state.proposalEditing && state.proposalEditing.element !== element) flushProposalUnitSave();
   element.classList.add("unit-human-edited");
   element.classList.remove("unit-confirmed");
+  // A failed save of this unit waiting for a retry is superseded by this edit.
+  state.proposalRetries = state.proposalRetries.filter((item) => item.element !== element);
   state.proposalEditing = {
     element,
     request: element.proposalRequest,
@@ -1585,10 +1587,12 @@ async function flushProposalUnitSave() {
     return true;
   } catch (error) {
     // An edit made in another unit meanwhile stays the pending one; this one
-    // waits behind it and is tried again once that one is saved. Typing on in
-    // this same unit already holds all of its text.
+    // joins the failed edits that are tried again once a save succeeds.
+    // Typing on in this same unit already holds all of its text.
     if (!state.proposalEditing) state.proposalEditing = editing;
-    else if (state.proposalEditing.element !== editing.element) state.proposalRetry = editing;
+    else if (state.proposalEditing.element !== editing.element) {
+      state.proposalRetries = [...state.proposalRetries.filter((item) => item.element !== editing.element), editing];
+    }
     editing.element.classList.add("save-conflict");
     setSaveState("Proposal edit not saved", false);
     showToast(error.message, 5200);
@@ -1597,9 +1601,8 @@ async function flushProposalUnitSave() {
     state.proposalSaving = false;
     // An edit in another unit that was left while this save ran was turned
     // away by the guard at the top, and its blur will not come again.
-    if (!state.proposalEditing && state.proposalRetry && state.proposalRetry !== editing) {
-      state.proposalEditing = state.proposalRetry;
-      state.proposalRetry = null;
+    if (!state.proposalEditing && state.proposalRetries.length) {
+      state.proposalEditing = state.proposalRetries.shift();
     }
     const deferred = state.proposalEditing;
     if (deferred && deferred !== editing && !deferred.element.matches(":focus")) setTimeout(flushProposalUnitSave, 0);
@@ -1815,6 +1818,12 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
       if (!styleAt[index].includes(name)) styleAt[index] = styleAt[index] ? `${styleAt[index]} ${name}` : name;
     }
   }
+  // \verb text is one source unit: typing in it could only replace the whole
+  // command, so, like math and citations, it is shown but not editable.
+  const verbatimAt = Array(block.display.length).fill(null);
+  for (let index = 0; index < block.display.length; index += 1) {
+    if (isVerbatimUnit(block, index)) verbatimAt[index] = block.displayStarts[index];
+  }
 
   const trackedGroupEnds = trackedChangeControlsByEnd(block);
 
@@ -1861,13 +1870,14 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
       requestIdsAt[end].join(" ") === requestIdKey &&
       annotationAt[end] === annotationIndex &&
       styleAt[end] === styleAt[cursor] &&
+      verbatimAt[end] === verbatimAt[cursor] &&
       listMarkerAt[end] === listMarker &&
       !inlineAdditions.has(end) &&
       !additions.has(end)
     ) end += 1;
     const value = block.display.slice(cursor, end);
     const annotation = annotationIndex === null ? null : block.annotations[annotationIndex];
-    if (!className && !annotation && !listMarker && !styleAt[cursor]) container.append(document.createTextNode(value));
+    if (!className && !annotation && !listMarker && !styleAt[cursor] && verbatimAt[cursor] === null) container.append(document.createTextNode(value));
     else {
       const span = document.createElement("span");
       span.className = [
@@ -1892,6 +1902,7 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
         span.title = `Go to ${annotation.key}`;
         span.addEventListener("click", () => openReferenceAnnotation(annotation));
       }
+      if (verbatimAt[cursor] !== null) span.contentEditable = "false";
       if (annotation?.type === "math") {
         span.contentEditable = "false";
         span.dataset.latex = annotation.latex;
@@ -3542,26 +3553,55 @@ function rawTextForDisplayEdit(source, nextDisplay) {
     suffix < nextDisplay.length - prefix &&
     oldDisplay[oldDisplay.length - 1 - suffix] === nextDisplay[nextDisplay.length - 1 - suffix]
   ) suffix += 1;
-  const oldEnd = oldDisplay.length - suffix;
-  let rawStart = prefix < oldDisplay.length
-    ? source.displayStarts[prefix]
-    : (source.displayEnds.at(-1) ?? source.raw.length);
-  // Never start between a "% comment" and the line break that ends it: the
-  // new text would be written into the comment. Start before the comment.
-  if (prefix < oldDisplay.length && endsSourceComment(source, prefix)) {
-    rawStart = prefix > 0 ? source.displayEnds[prefix - 1] : 0;
+  let oldEnd = oldDisplay.length - suffix;
+  // \verb text is one unit that the page does not let the author edit. An
+  // edit that still reaches into it takes in the whole unit, which is kept.
+  const sameVerbatim = (left, right) => left >= 0 && right < oldDisplay.length && isVerbatimUnit(source, left)
+    && source.displayStarts[left] === source.displayStarts[right] && source.displayEnds[left] === source.displayEnds[right];
+  while (sameVerbatim(prefix - 1, prefix)) prefix -= 1;
+  while (sameVerbatim(oldEnd - 1, oldEnd)) oldEnd += 1;
+  const attempt = (from, to) => {
+    let rawStart = from < oldDisplay.length
+      ? source.displayStarts[from]
+      : (source.displayEnds.at(-1) ?? source.raw.length);
+    // Never start between a "% comment" and the line break that ends it: the
+    // new text would be written into the comment. Start before the comment.
+    if (from < oldDisplay.length && endsSourceComment(source, from)) {
+      rawStart = from > 0 ? source.displayEnds[from - 1] : 0;
+    }
+    const rawEnd = to > from ? source.displayEnds[to - 1] : rawStart;
+    const replacement = nextDisplay.slice(from, nextDisplay.length - (oldDisplay.length - to));
+    const changed = displayEditKeepingMarkup(source, rawStart, from, to, replacement);
+    return { rawStart, rawEnd, replacement, changed };
+  };
+  let edit = attempt(prefix, oldEnd);
+  if (edit.changed) {
+    // Across markup the stretch takes whole words: "use very bold" retyped as
+    // "need" must not keep the final "d" of "bold" as source and write "nee"
+    // outside the groups that "d" sits in.
+    const boundaries = [0];
+    for (const token of tokenizeDiffText(oldDisplay)) boundaries.push(boundaries.at(-1) + token.length);
+    const wordStart = boundaries.filter((at) => at <= prefix).at(-1) ?? prefix;
+    const wordEnd = boundaries.find((at) => at >= oldEnd) ?? oldEnd;
+    if (wordStart !== prefix || wordEnd !== oldEnd) {
+      const widened = attempt(wordStart, wordEnd);
+      if (widened.changed) edit = widened;
+    }
   }
-  const rawEnd = oldEnd > prefix ? source.displayEnds[oldEnd - 1] : rawStart;
-  const replacement = nextDisplay.slice(prefix, nextDisplay.length - suffix);
-  const changed = displayEditKeepingMarkup(source, rawStart, prefix, oldEnd, replacement)
-    ?? [{ text: replacement, typed: true }];
-  const pieces = [{ text: source.raw.slice(0, rawStart) }, ...changed, { text: source.raw.slice(rawEnd) }];
+  const changed = edit.changed ?? [{ text: edit.replacement, typed: true }];
+  const pieces = [{ text: source.raw.slice(0, edit.rawStart) }, ...changed, { text: source.raw.slice(edit.rawEnd) }];
   let before = "";
   for (const piece of pieces) {
     if (piece.typed && !insideLiteralText(before)) piece.text = escapeTypedText(piece.text);
     before += piece.text;
   }
-  return withoutEmptiedFormatting(pieces);
+  return tidyEditedSource(pieces);
+}
+
+// The display character at `index` is the text of \verb (or \lstinline,
+// \mintinline): one source unit, shown but not editable.
+function isVerbatimUnit(source, index) {
+  return /^\\(?:verb|lstinline|mintinline)(?![A-Za-z])/.test(source.raw.slice(source.displayStarts[index], source.displayEnds[index]));
 }
 
 // The display character at `index` is the line break that ends a "% comment":
@@ -3623,7 +3663,7 @@ function displayEditKeepingMarkup(source, rawFrom, from, to, replacement) {
   let hasMarkup = from < to && rawFrom < starts[from];
   for (let index = from; index < to; index += 1) {
     if (!(ends[index] >= starts[index])) return null;
-    if (endsComment(index)) hasMarkup = true;
+    if (endsComment(index) || isVerbatimUnit(source, index)) hasMarkup = true;
     if (index === from || sameUnit(index)) continue;
     if (starts[index] < ends[index - 1]) return null;
     if (starts[index] > ends[index - 1]) hasMarkup = true;
@@ -3665,7 +3705,8 @@ function displayEditKeepingMarkup(source, rawFrom, from, to, replacement) {
     let last = at;
     while (last + 1 < to && sameUnit(last + 1)) last += 1;
     const unitKept = kept.slice(at - from, last - from + 1);
-    if (endsComment(at) || unitKept.every(Boolean)) pieces.push({ text: raw.slice(starts[at], ends[at]) });
+    const keepUnit = endsComment(at) || unitKept.every(Boolean) || (isVerbatimUnit(source, at) && unitKept.some(Boolean));
+    if (keepUnit) pieces.push({ text: raw.slice(starts[at], ends[at]) });
     else {
       // Part of a citation label or a macro's text was deleted: the unit goes,
       // and the characters the author left standing stay as typed text.
@@ -3676,25 +3717,116 @@ function displayEditKeepingMarkup(source, rawFrom, from, to, replacement) {
   return pieces;
 }
 
-// Joins source pieces, dropping a formatting command whose text the edit
-// deleted entirely: "\textbf{}" keeps invisible formatting at that spot and
-// clutters the source. When the author's new text sits right before or after
-// it, the text moves inside instead, so it keeps the formatting the page showed
-// there. A command that was already empty in the source (both braces in one
-// piece) is left as it was.
-const EMPTIABLE_FORMATTING = /\\(?:textbf|textit|textsl|textsc|texttt|textsf|textrm|textup|textmd|textnormal|emph|underline)\{\}/g;
+// Formatting commands an edit may empty, split around a paragraph break, or
+// trim a leading space from.
+const TEXT_STYLE_COMMAND = /^\\(?:textbf|textit|textsl|textsc|texttt|textsf|textrm|textup|textmd|textnormal|emph|underline)$/;
 
-function withoutEmptiedFormatting(pieces) {
-  let text = "";
-  let origin = [];
+// Joins the pieces of an edited block into its new source and tidies what the
+// edit did to groups. Every character carries the piece it came from (negative
+// for text the author typed), so a group the source already had is told apart
+// from one this edit changed.
+function tidyEditedSource(pieces) {
+  const edited = { text: "", origin: [] };
   for (const [index, piece] of pieces.entries()) {
-    text += piece.text;
-    for (let count = 0; count < piece.text.length; count += 1) origin.push(piece.typed ? -1 - index : index);
+    edited.text += piece.text;
+    for (let count = 0; count < piece.text.length; count += 1) edited.origin.push(piece.typed ? -1 - index : index);
   }
-  const isTyped = (at) => origin[at] < 0;
+  dropEmptiedFormatting(edited);
+  // Moving a blank line out can empty a command again.
+  if (keepParagraphBreaksOutsideGroups(edited)) dropEmptiedFormatting(edited);
+  moveLeadingSpaceOutOfGroups(edited);
+  return edited.text;
+}
+
+// Replaces edited.text[start, end) with `text`, whose characters get `origin`.
+function spliceEdited(edited, start, end, text, origin) {
+  edited.text = `${edited.text.slice(0, start)}${text}${edited.text.slice(end)}`;
+  edited.origin = [...edited.origin.slice(0, start), ...origin, ...edited.origin.slice(end)];
+}
+
+// The groups open at `position`: [{ open, command }], innermost last. Escaped
+// characters, \verb text and % comments are skipped; in a URL a % is text.
+function openGroupsAt(text, position) {
+  const open = [];
+  for (let at = 0; at < position; at += 1) {
+    const character = text[at];
+    const verb = character === "\\" ? /^\\verb\*?([^a-zA-Z\s*])/.exec(text.slice(at, at + 7)) : null;
+    if (verb) {
+      const close = text.indexOf(verb[1], at + verb[0].length);
+      at = close < 0 ? at + verb[0].length - 1 : close;
+    } else if (character === "\\") at += 1;
+    else if (character === "%" && !/^\\(?:url|nolinkurl|path|href)/.test(open.at(-1)?.command || "")) {
+      const lineEnd = text.indexOf("\n", at);
+      if (lineEnd < 0 || lineEnd >= position) break;
+      at = lineEnd;
+    } else if (character === "{") {
+      open.push({ open: at, command: text.slice(0, at).match(/\\[A-Za-z]+\*?\s*$/)?.[0] || "" });
+    } else if (character === "}") open.pop();
+  }
+  return open;
+}
+
+function closingBrace(text, open) {
+  let depth = 0;
+  for (let at = open; at < text.length; at += 1) {
+    if (text[at] === "\\") at += 1;
+    else if (text[at] === "{") depth += 1;
+    else if (text[at] === "}" && (depth -= 1) === 0) return at;
+  }
+  return -1;
+}
+
+// A blank line the author typed never stays inside a group: the parser splits
+// paragraphs at blank lines, so "\textbf{b\n\n}here" became two blocks with an
+// unclosed brace each. The break moves after the group when nothing follows
+// it there, before the group when nothing precedes it, and otherwise splits a
+// formatting command in two ("\emph{one}\n\n\emph{two}"). Inside any other
+// group it becomes a plain line break. True when anything moved.
+function keepParagraphBreaksOutsideGroups(edited) {
+  // Each change moves one break out of one group; the bound is a safety net.
+  let changes = 0;
+  for (let from = 0; changes < 200;) {
+    const at = edited.text.indexOf("\n\n", from);
+    if (at < 0) break;
+    from = at + 1;
+    if (edited.origin[at] >= 0) continue;
+    const group = openGroupsAt(edited.text, at).at(-1);
+    if (!group) continue;
+    const close = closingBrace(edited.text, group.open);
+    if (close < at) continue;
+    changes += 1;
+    const breakOrigin = edited.origin.slice(at, at + 2);
+    const commandStart = group.open - group.command.length;
+    if (!edited.text.slice(at + 2, close).trim()) {
+      const moved = edited.text.slice(at + 2, close + 1);
+      spliceEdited(edited, at, close + 1, `${moved}\n\n`, [...edited.origin.slice(at + 2, close + 1), ...breakOrigin]);
+    } else if (!edited.text.slice(group.open + 1, at).trim() && group.command) {
+      const moved = edited.text.slice(commandStart, at);
+      spliceEdited(edited, commandStart, at + 2, `\n\n${moved}`, [...breakOrigin, ...edited.origin.slice(commandStart, at)]);
+    } else if (TEXT_STYLE_COMMAND.test(group.command.trim())) {
+      const command = group.command.trim();
+      const added = `}\n\n${command}{`;
+      spliceEdited(edited, at, at + 2, added, added.split("").map(() => breakOrigin[0]));
+    } else {
+      spliceEdited(edited, at, at + 2, "\n", [breakOrigin[0]]);
+    }
+    from = 0;
+  }
+  return changes > 0;
+}
+
+// Drops a formatting command whose text the edit deleted entirely:
+// "\textbf{}" keeps invisible formatting at that spot and clutters the source.
+// When the author's new text sits right before or after it, the text moves
+// inside instead, so it keeps the formatting the page showed there. A command
+// that was already empty in the source (both braces from one piece) stays.
+function dropEmptiedFormatting(edited) {
+  const isTyped = (at) => edited.origin[at] < 0;
   for (let changed = true; changed;) {
     changed = false;
-    for (const match of text.matchAll(EMPTIABLE_FORMATTING)) {
+    for (const match of edited.text.matchAll(/(\\[A-Za-z]+)\{\}/g)) {
+      if (!TEXT_STYLE_COMMAND.test(match[1])) continue;
+      const { text, origin } = edited;
       const start = match.index;
       const close = start + match[0].length - 1;
       if (origin[close - 1] === origin[close]) continue;
@@ -3708,18 +3840,32 @@ function withoutEmptiedFormatting(pieces) {
       }
       const moved = moveFrom < start ? text.slice(moveFrom, start) : text.slice(close + 1, moveTo);
       const movedOrigin = moveFrom < start ? origin.slice(moveFrom, start) : origin.slice(close + 1, moveTo);
-      const command = text.slice(start, close);
-      const commandOrigin = origin.slice(start, close);
-      const replacement = moved ? `${command}${moved}}` : "";
-      const replacementOrigin = moved ? [...commandOrigin, ...movedOrigin, origin[close]] : [];
       const end = moveFrom < start ? close + 1 : moveTo;
-      text = `${text.slice(0, moveFrom)}${replacement}${text.slice(end)}`;
-      origin = [...origin.slice(0, moveFrom), ...replacementOrigin, ...origin.slice(end)];
+      // Only words move in, never just spaces or a blank line.
+      if (/\S/.test(moved) && !moved.includes("\n\n")) {
+        spliceEdited(edited, moveFrom, end, `${text.slice(start, close)}${moved}}`, [...origin.slice(start, close), ...movedOrigin, origin[close]]);
+      } else {
+        spliceEdited(edited, start, close + 1, "", []);
+      }
       changed = true;
       break;
     }
   }
-  return text;
+}
+
+// "need\emph{ words}": the page does not show a space at the start of a group,
+// so where the edit put text right before such a group the space moves out in
+// front: "need \emph{words}". Groups the edit did not touch stay as they were.
+function moveLeadingSpaceOutOfGroups(edited) {
+  for (const match of [...edited.text.matchAll(/(\\[A-Za-z]+)\{ /g)].reverse()) {
+    const start = match.index;
+    const space = start + match[0].length - 1;
+    if (!TEXT_STYLE_COMMAND.test(match[1]) || start === 0 || /\s/.test(edited.text[start - 1])) continue;
+    if (edited.text[space + 1] === "}") continue;
+    const before = edited.origin[start - 1];
+    if (before >= 0 && before === edited.origin[start]) continue;
+    spliceEdited(edited, start, space + 1, ` ${edited.text.slice(start, space)}`, [edited.origin[space], ...edited.origin.slice(start, space)]);
+  }
 }
 
 async function performSave({ force = false } = {}) {

@@ -20,8 +20,15 @@ const SAVE_MAPPING = [
   "escapeTypedText",
   "insideLiteralText",
   "displayEditKeepingMarkup",
-  "EMPTIABLE_FORMATTING",
-  "withoutEmptiedFormatting",
+  "isVerbatimUnit",
+  "TEXT_STYLE_COMMAND",
+  "tidyEditedSource",
+  "spliceEdited",
+  "openGroupsAt",
+  "closingBrace",
+  "keepParagraphBreaksOutsideGroups",
+  "dropEmptiedFormatting",
+  "moveLeadingSpaceOutOfGroups",
 ];
 
 // A source whose display is its raw text, one character each.
@@ -59,6 +66,14 @@ Start \\emph{word} end.
 A \\textbf{b}\\emph{c} d.
 
 Cost 5\\% \\& more.
+
+We need \\emph{very \\textbf{bold} words} here.
+
+We use \\textbf{bold} here and more.
+
+The \\emph{first half second half} ends.
+
+Code \\verb|a%b| here.
 \\end{document}
 `;
 const NOTES = `\\section{First}
@@ -144,6 +159,47 @@ describe("front end", () => {
       const app2 = loadAppFunctions(SAVE_MAPPING);
       const source = { raw: "a \\emph{} b", display: "a  b", displayStarts: [0, 1, 9, 10], displayEnds: [1, 2, 10, 11] };
       assert.equal(app2.rawTextForDisplayEdit(source, "a  c"), "a \\emph{} c");
+    });
+
+    it("rewrites whole words when an edit crosses markup", async () => {
+      // The final "d" of "bold" matches the end of "need"; it must not stay in
+      // \\textbf while "nee" lands outside the groups.
+      const result = await editAndSave("We need", "need very bold", "use");
+      assert.match(result.source, /\nWe use \\emph\{words\} here\./);
+      assert.equal(result.display, result.typed);
+      const app2 = loadAppFunctions(SAVE_MAPPING);
+      const document = await getDocument(server, "main.tex");
+      const block = document.blocks.find((item) => item.raw.startsWith("Start"));
+      // "tart wor" over "Start word": the "S" and "d" kept as source would split
+      // the new word across \\emph.
+      assert.equal(app2.rawTextForDisplayEdit(block, block.display.replace("tart wor", "中文")), "\\emph{S中文d} end.");
+    });
+
+    it("never puts a typed paragraph break inside a group", async () => {
+      // Enter over the end of a bold word: the break goes after the group.
+      const atEnd = await editAndSave("bold} here and", "old ", "\n\n");
+      assert.match(atEnd.source, /\nWe use \\textbf\{b\}\n\nhere and more\./);
+      // Enter in the middle of a formatted run splits the command in two.
+      const inside = await editAndSave("first half", "half second", "half\n\nsecond");
+      assert.match(inside.source, /\nThe \\emph\{first half\}\n\n\\emph\{second half\} ends\./);
+      // Enter right after the opening of a group: the break goes before it.
+      const atStart = await editAndSave("bold} here and", "use b", "use\n\nb");
+      assert.match(atStart.source, /\nWe use\n\n\\textbf\{bold\} here and more\./);
+    });
+
+    it("keeps \\verb text whole: it is not editable, and an edit never deletes it", async () => {
+      const document = await getDocument(server, "main.tex");
+      const block = document.blocks.find((item) => item.raw.includes("\\verb"));
+      const at = block.display.indexOf("a%b");
+      assert.ok(at >= 0);
+      assert.ok(app.isVerbatimUnit(block, at));
+      assert.ok(!app.isVerbatimUnit(block, 0));
+      // The page does not let the author type in it; if a change still reaches
+      // into it, the \\verb stays as it was.
+      const inside = app.rawTextForDisplayEdit(block, block.display.replace("a%b", "a%c"));
+      assert.match(inside, /^Code \\verb\|a%b\|/);
+      const next = await editAndSave("verb", "here", "there");
+      assert.match(next.source, /\nCode \\verb\|a%b\| there\./);
     });
 
     it("escapes a %, & or # the author types", async () => {
@@ -494,7 +550,7 @@ describe("front end", () => {
       const first = {};
       const unitElement = (text) => ({ text, isConnected: connected, matches: () => false, classList: { add() {}, remove() {} } });
       const app = loadAppFunctions([...SAVE_MAPPING, "flushProposalUnitSave"], {
-        state: { proposalEditing: null, proposalSaving: false, proposalRetry: null, requests: [] },
+        state: { proposalEditing: null, proposalSaving: false, proposalRetries: [], requests: [] },
         api: (url, options) => {
           saved.push(JSON.parse(options.body).unitId);
           if (saved.length > 1) return Promise.resolve({});
@@ -535,7 +591,48 @@ describe("front end", () => {
       await tick();
       assert.deepEqual(saved, ["a", "b", "a"]);
       assert.equal(app.state.proposalEditing, null);
-      assert.equal(app.state.proposalRetry, null);
+      assert.equal(app.state.proposalRetries.length, 0);
+    });
+
+    it("keeps every failed edit when saves fail one after another", async () => {
+      const saved = [];
+      const pending = [];
+      const unitElement = (text) => ({ text, isConnected: false, matches: () => false, classList: { add() {}, remove() {} } });
+      const app = loadAppFunctions([...SAVE_MAPPING, "flushProposalUnitSave"], {
+        state: { proposalEditing: null, proposalSaving: false, proposalRetries: [], requests: [] },
+        api: (url, options) => {
+          saved.push(JSON.parse(options.body).unitId);
+          return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+        },
+        canonicalEditableText: (target) => target.text,
+        refreshRequests: async () => {},
+        setSaveState() {},
+        showToast() {},
+        flushPendingRender() {},
+        setTimeout,
+      });
+      const edit = (id) => ({ element: unitElement(`new ${id}`), request: { id: "r" }, unit: { id, ...plainSource(`old ${id}`) } });
+      // A fails while B is pending; B is retried and C is edited meanwhile;
+      // then B fails too.
+      app.state.proposalEditing = edit("a");
+      const first = app.flushProposalUnitSave();
+      app.state.proposalEditing = edit("b");
+      pending[0].reject(new Error("network"));
+      await first;
+      await tick();
+      app.state.proposalEditing = edit("c");
+      pending[1].reject(new Error("network"));
+      await tick();
+      // C's save succeeds, and the failed edits are tried again in turn.
+      pending[2].resolve({});
+      await tick();
+      pending[3].resolve({});
+      await tick();
+      pending[4]?.resolve({});
+      await tick();
+      assert.deepEqual(saved, ["a", "b", "c", "a", "b"]);
+      assert.equal(app.state.proposalEditing, null);
+      assert.equal(app.state.proposalRetries.length, 0);
     });
 
     it("continues from the saved unit when typing went on during its save", async () => {
