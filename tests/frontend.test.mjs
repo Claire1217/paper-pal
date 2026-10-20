@@ -525,9 +525,9 @@ describe("front end", () => {
       matches: () => true,
     };
     const requests = [];
-    const app = loadAppFunctions([...SAVE_MAPPING, "unwrapPastedHeadingCommand", "performSave", "handleBlockInput"], {
+    const app = loadAppFunctions([...SAVE_MAPPING, "unwrapPastedHeadingCommand", "editedRawText", "saveErrorKind", "performSave", "handleBlockInput"], {
       state: { document: { path: "main.tex", etag: "etag-1", blocks: [block] }, editing: { element, blockIndex: 0, blockId: "block-1", block } },
-      dom: { editor: { querySelectorAll: () => [element] }, externalChange: {}, externalKeep: {}, externalChangeMessage: {} },
+      dom: { editor: { querySelectorAll: () => [element] }, externalChange: {}, externalKeep: {}, externalCopy: {}, externalChangeMessage: {} },
       api: (url, options) => new Promise((resolve) => requests.push({ body: JSON.parse(options.body), resolve })),
       canonicalEditableText: (target) => target.text,
       refreshCompiledOutline: async () => {},
@@ -558,6 +558,149 @@ describe("front end", () => {
     assert.equal(requests[1].body.text, "Alpha text, edited again.");
     requests[1].resolve({ path: "main.tex", etag: "etag-3", blocks: [plainSource("Alpha text, edited again.", { id: "block-3", index: 0 })] });
     assert.equal(await second, true);
+  });
+
+  it("does not re-render the document while a save is on its way", () => {
+    const renders = [];
+    const app = loadAppFunctions(["flushPendingRender"], {
+      state: { renderPending: true, editing: null, savePromise: Promise.resolve(false) },
+      documentRenderBlocked: () => false,
+      renderDocument: () => renders.push("render"),
+    });
+    app.flushPendingRender();
+    assert.deepEqual(renders, [], "the typed text is still on screen until the save settles");
+    app.state.savePromise = null;
+    app.flushPendingRender();
+    assert.deepEqual(renders, ["render"]);
+  });
+
+  describe("a save the server refuses", () => {
+    function setup({ error = null, confirmAnswer = true } = {}) {
+      const before = plainSource("Before text.", { id: "block-0", index: 0, kind: "paragraph" });
+      const block = plainSource("Alpha text.", { id: "block-1", index: 1, kind: "paragraph" });
+      const after = plainSource("After text.", { id: "block-2", index: 2, kind: "paragraph" });
+      const element = { text: "Alpha text, edited.", dataset: { blockIndex: "1", blockId: "block-1" }, reviewBlock: block, classList: { add() {}, remove() {} }, matches: () => true };
+      const requests = [];
+      const calls = [];
+      const button = () => ({ hidden: true });
+      const app = loadAppFunctions([...SAVE_MAPPING, "unwrapPastedHeadingCommand", "performSave", "saveErrorKind", "mayReplaceDocument", "confirmDiscardEdit", "useDiskVersion", "copyEditedText", "editedRawText", "handleBlockBlur"], {
+        state: { document: { path: "main.tex", etag: "etag-1", blocks: [before, block, after] }, editing: { element, blockIndex: 1, blockId: "block-1", block } },
+        dom: { editor: { querySelectorAll: () => [element] }, externalChange: button(), externalKeep: button(), externalCopy: button(), externalChangeMessage: {} },
+        api: (url, options) => {
+          requests.push(JSON.parse(options.body));
+          return error ? Promise.reject(new Error(error)) : Promise.resolve({ path: "main.tex", etag: "etag-2", blocks: [before, block, after] });
+        },
+        window: {
+          confirm: (message) => {
+            calls.push(`confirm: ${message}`);
+            return confirmAnswer;
+          },
+          getSelection: () => ({ selectAllChildren: () => calls.push("select") }),
+        },
+        navigator: { clipboard: { writeText: async (text) => calls.push(`copy: ${text}`) } },
+        loadDocument: async (path, options) => calls.push(`load ${path} ${JSON.stringify(options)}`),
+        settlePendingEdits: async () => false,
+        canonicalEditableText: (target) => target.text,
+        refreshCompiledOutline: async () => {},
+        refreshRequests: async () => {},
+        updateDocumentHeader() {},
+        updateProgress() {},
+        renderDocument() {},
+        setSaveState() {},
+        showToast: (message) => calls.push(`toast: ${message}`),
+        refreshGit() {},
+        flushSave() {},
+        flushPendingRender() {},
+        setTimeout: () => 0,
+        clearTimeout() {},
+      });
+      return { app, requests, calls, element };
+    }
+    const gone = "The paragraph you were editing no longer exists on disk. Copy your text, then reload the document.";
+    const ambiguous = "The document changed and more than one paragraph on disk now looks like the one you were editing. Copy your text, then reload the document.";
+
+    it("sends the neighbouring paragraphs, so the server can tell them from the edited one", async () => {
+      const { app, requests } = setup();
+      assert.equal(await app.performSave(), true);
+      assert.equal(requests[0].previousText, "Before text.");
+      assert.equal(requests[0].nextText, "After text.");
+    });
+
+    for (const message of [gone, ambiguous]) {
+      it(`offers to copy the text, not "Keep my edit", when the server says: ${message.split(".")[0]}`, async () => {
+        const { app } = setup({ error: message });
+        assert.equal(await app.performSave(), false);
+        assert.equal(app.state.saveConflict, "gone");
+        assert.ok(app.state.editing, "the typed text is still the open edit");
+        assert.equal(app.dom.externalChange.hidden, false);
+        assert.equal(app.dom.externalKeep.hidden, true);
+        assert.equal(app.dom.externalCopy.hidden, false);
+        assert.match(app.dom.externalChangeMessage.textContent, /removed or rewritten on disk/);
+        assert.match(app.dom.externalChangeMessage.textContent, /Copy my text/);
+      });
+    }
+
+    it("still offers Keep my edit when the paragraph changed in overlapping text", async () => {
+      const { app } = setup({ error: "The paragraph changed in overlapping text. Automatic merge could not safely combine both versions; choose which version to keep." });
+      assert.equal(await app.performSave(), false);
+      assert.equal(app.state.saveConflict, "conflict");
+      assert.equal(app.dom.externalKeep.hidden, false);
+      assert.equal(app.dom.externalCopy.hidden, false);
+    });
+
+    it("copies the LaTeX the save would have written", async () => {
+      const { app, calls } = setup({ error: gone });
+      await app.performSave();
+      await app.copyEditedText();
+      assert.ok(calls.includes("copy: Alpha text, edited."), calls.join("\n"));
+    });
+
+    it("lets Reload or another file replace the text only after the author agrees to discard it", async () => {
+      const { app, calls } = setup({ error: gone });
+      await app.performSave();
+      assert.equal(await app.mayReplaceDocument(false), false, "a background load never discards the text");
+      assert.equal(calls.filter((call) => call.startsWith("confirm")).length, 0);
+      assert.equal(await app.mayReplaceDocument(true), true);
+      assert.match(calls.find((call) => call.startsWith("confirm")), /discarded/);
+      assert.equal(app.state.editing, null);
+    });
+
+    it("keeps the text when the author declines to discard it", async () => {
+      const { app } = setup({ error: gone, confirmAnswer: false });
+      await app.performSave();
+      assert.equal(await app.mayReplaceDocument(true), false);
+      assert.ok(app.state.editing);
+      app.useDiskVersion();
+      assert.ok(app.state.editing);
+    });
+
+    it("does not send the refused save again when the author clicks a banner button", async () => {
+      const { app, requests, element } = setup({ error: gone });
+      await app.performSave();
+      const flushes = [];
+      app.flushSave = async () => flushes.push("flush");
+      app.deactivateBlockEditing = () => {};
+      app.flushPendingRender = () => {};
+      await app.handleBlockBlur({ currentTarget: element });
+      assert.deepEqual(flushes, []);
+      assert.equal(requests.length, 1);
+    });
+
+    it("copies the text even while a save is still on its way", async () => {
+      const { app, calls } = setup({ error: gone });
+      const saving = app.performSave();
+      app.state.savePromise = saving;
+      await app.copyEditedText();
+      assert.ok(calls.includes("copy: Alpha text, edited."), calls.join("\n"));
+    });
+
+    it("asks before Use disk version drops typed text", async () => {
+      const { app, calls } = setup({ error: gone });
+      await app.performSave();
+      app.useDiskVersion();
+      assert.deepEqual(calls.filter((call) => /^(confirm|load)/.test(call)).map((call) => call.split(":")[0].split(" ")[0]), ["confirm", "load"]);
+      assert.ok(calls.some((call) => call === 'load main.tex {"discardEditing":true}'), calls.join("\n"));
+    });
   });
 
   describe("saving proposal-unit edits", () => {

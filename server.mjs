@@ -6853,7 +6853,8 @@ function reviewSelection(relativePath, block, start, end, status, template = {})
     prefix: block.raw.slice(Math.max(0, start - 48), start),
     suffix: block.raw.slice(end, Math.min(block.raw.length, end + 48)),
     status,
-    ...(status === "human" ? { updatedAt: now } : { acceptedAt: now }),
+    // A rebased range keeps the time it was confirmed or written.
+    ...(status === "human" ? { updatedAt: template.updatedAt || now } : { acceptedAt: template.acceptedAt || now }),
   };
 }
 
@@ -6882,13 +6883,18 @@ function rebaseDocumentReviewSelections(state, relativePath, oldBlocks, newBlock
     }
     const selectionStart = oldBlock.start + selection.start;
     const selectionEnd = oldBlock.start + selection.end;
+    // A range outside the edit only moves. While it stays in one piece it is
+    // the same confirmation and keeps its id.
+    const moved = (pieces) => (pieces.length === 1 && pieces[0].end - pieces[0].start === selection.end - selection.start
+      ? [{ ...pieces[0], id: selection.id }]
+      : pieces);
     if (selectionEnd <= absoluteStart) {
-      next.push(...splitAbsoluteReviewRange(relativePath, newBlocks, selectionStart, selectionEnd, selection.status, selection));
+      next.push(...moved(splitAbsoluteReviewRange(relativePath, newBlocks, selectionStart, selectionEnd, selection.status, selection)));
       continue;
     }
     if (selectionStart >= absoluteEnd) {
       const delta = replacementEnd - absoluteEnd;
-      next.push(...splitAbsoluteReviewRange(relativePath, newBlocks, selectionStart + delta, selectionEnd + delta, selection.status, selection));
+      next.push(...moved(splitAbsoluteReviewRange(relativePath, newBlocks, selectionStart + delta, selectionEnd + delta, selection.status, selection)));
       continue;
     }
     if (selectionStart < absoluteStart) {
@@ -6988,6 +6994,12 @@ async function resolveTrackedChange(body) {
   });
 }
 
+// The page treats both messages as "the paragraph is gone": no save can place
+// the text, so they tell the author to copy it rather than to use the disk
+// version, which would drop it.
+const EDITED_PARAGRAPH_GONE = "The paragraph you were editing no longer exists on disk. Copy your text, then reload the document.";
+const EDITED_PARAGRAPH_AMBIGUOUS = "The document changed and more than one paragraph on disk now looks like the one you were editing. Copy your text, then reload the document.";
+
 // Where the edited paragraph sits now when its text is unchanged on disk: at
 // the editor's position if the text is still there, else the copy of that
 // text nearest the position, because paragraphs above it may have been added
@@ -6999,33 +7011,68 @@ function unchangedEditedBlock(blocks, body) {
   const copies = blocks.filter((block) => block.raw === body.baseText);
   if (!copies.length) return null;
   const nearest = nearestBlock(copies, body.blockIndex);
-  if (!nearest) {
-    throw new Error("The document changed and the paragraph you edited now appears more than once. Use the disk version and edit it again.");
-  }
+  if (!nearest) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
   return nearest;
 }
 
-// Share of words two versions of a paragraph have in common (Dice coefficient
-// over the word multisets). A co-author's edit keeps most of a paragraph; a
-// different paragraph that slid into the edited one's position shares few.
-function sharedWordRatio(left, right) {
-  const words = (text) => text.split(/\s+/).filter(Boolean);
-  const leftWords = words(left);
-  const rightWords = words(right);
-  if (!leftWords.length || !rightWords.length) return 0;
+// Tokens for telling whether two texts are versions of one paragraph: runs of
+// letters and digits, case-folded, with punctuation dropped, and every Han,
+// kana or Hangul character on its own, because those scripts do not put
+// spaces between words.
+const SPACELESS_SCRIPTS = "\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}";
+const PARAGRAPH_TOKEN_PATTERN = new RegExp(`[${SPACELESS_SCRIPTS}]|(?:(?![${SPACELESS_SCRIPTS}])[\\p{L}\\p{N}\\p{M}])+`, "gu");
+
+// Dice coefficient over the token multisets: 1 for the same words, 0 for none
+// in common. A co-author's edit keeps most of a paragraph; a different
+// paragraph shares few of its tokens.
+function paragraphSimilarity(left, right) {
+  const leftTokens = left.toLowerCase().match(PARAGRAPH_TOKEN_PATTERN) || [];
+  const rightTokens = right.toLowerCase().match(PARAGRAPH_TOKEN_PATTERN) || [];
+  if (!leftTokens.length || !rightTokens.length) return 0;
   const counts = new Map();
-  for (const word of leftWords) counts.set(word, (counts.get(word) || 0) + 1);
+  for (const token of leftTokens) counts.set(token, (counts.get(token) || 0) + 1);
   let shared = 0;
-  for (const word of rightWords) {
-    const count = counts.get(word);
+  for (const token of rightTokens) {
+    const count = counts.get(token);
     if (!count) continue;
     shared += 1;
-    counts.set(word, count - 1);
+    counts.set(token, count - 1);
   }
-  return (2 * shared) / (leftWords.length + rightWords.length);
+  return (2 * shared) / (leftTokens.length + rightTokens.length);
 }
 
-const SAME_PARAGRAPH_MIN_SHARED_WORDS = 0.6;
+const SAME_PARAGRAPH_MIN_SIMILARITY = 0.6;
+// How far the best match must be ahead of the next one. Two near-identical
+// paragraphs (one setting changed, say) otherwise decide by a single token.
+const SAME_PARAGRAPH_MIN_LEAD = 0.05;
+// Blocks searched on each side of the old position. Wider than any realistic
+// number of paragraphs a co-author adds or removes above while one is open.
+const SAME_PARAGRAPH_SEARCH_RADIUS = 25;
+
+// The edited paragraph when a co-author changed it, perhaps after adding or
+// removing paragraphs above it: the block of the same kind near the old
+// position that is most like the text the author started from. Only a clear
+// winner counts. Merging or forcing the edit into a look-alike would
+// overwrite that paragraph, so a near tie is refused, and so is a position
+// where nothing is similar (the paragraph was deleted or rewritten). A block
+// whose text equals a neighbour the editor saw (previousText, nextText) is
+// that neighbour, unchanged, and never the edited paragraph.
+function changedEditedBlock(blocks, body) {
+  const baseText = String(body.baseText || "");
+  const position = Number(body.blockIndex);
+  const nearby = Number.isInteger(position)
+    ? blocks.slice(Math.max(0, position - SAME_PARAGRAPH_SEARCH_RADIUS), position + SAME_PARAGRAPH_SEARCH_RADIUS + 1)
+    : blocks;
+  const ranked = nearby
+    .filter((block) => !body.blockKind || block.kind === body.blockKind)
+    .filter((block) => block.raw !== body.previousText && block.raw !== body.nextText)
+    .map((block) => ({ block, similarity: paragraphSimilarity(baseText, block.raw) }))
+    .sort((left, right) => right.similarity - left.similarity);
+  const [best, next] = ranked;
+  if (!best || best.similarity < SAME_PARAGRAPH_MIN_SIMILARITY) throw new Error(EDITED_PARAGRAPH_GONE);
+  if (next && best.similarity - next.similarity < SAME_PARAGRAPH_MIN_LEAD) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
+  return best.block;
+}
 
 async function saveBlock(body) {
   const absolutePath = resolveDocument(body.path);
@@ -7045,16 +7092,7 @@ async function saveBlock(body) {
     const unchangedBlock = typeof body.baseText === "string" ? unchangedEditedBlock(blocks, body) : null;
     if (unchangedBlock) block = unchangedBlock;
     else {
-      if (!block || (body.blockKind && block.kind !== body.blockKind)) {
-        throw new Error("The document structure changed at this location. Use the disk version and edit it again.");
-      }
-      // The block at the old position is the edited paragraph, changed on
-      // disk, only if it still shares most of its words. Otherwise the
-      // paragraph was deleted or replaced, and merging into the block that
-      // took its place would rewrite that one.
-      if (sharedWordRatio(String(body.baseText || ""), block.raw) < SAME_PARAGRAPH_MIN_SHARED_WORDS) {
-        throw new Error("The paragraph no longer exists. Use the disk version and edit it again.");
-      }
+      block = changedEditedBlock(blocks, body);
       if (!body.force) {
         const merged = await mergeBlockText(String(body.baseText || ""), body.text, block.raw);
         if (!merged.clean) {
@@ -7065,7 +7103,7 @@ async function saveBlock(body) {
       }
     }
   }
-  if (!block) throw new Error("The paragraph no longer exists. Use the disk version and edit it again.");
+  if (!block) throw new Error(EDITED_PARAGRAPH_GONE);
   if (!body.force && !mergeApplied && block.id !== body.blockId && block.raw !== body.baseText) {
     throw new Error("The paragraph changed while you were editing. Choose which version to keep.");
   }

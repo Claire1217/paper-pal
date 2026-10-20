@@ -118,6 +118,7 @@ const dom = {
   externalChange: document.querySelector("#external-change"),
   externalChangeMessage: document.querySelector("#external-change-message"),
   externalKeep: document.querySelector("#external-keep"),
+  externalCopy: document.querySelector("#external-copy"),
   externalReload: document.querySelector("#external-reload"),
   toast: document.querySelector("#toast"),
 };
@@ -2590,8 +2591,11 @@ function renderDocumentWhenSafe() {
   renderDocument();
 }
 
+// A save in flight has taken the edit out of state.editing; rendering then
+// would paint the old text over what the author typed, and if the save fails
+// the text would vanish from the screen. The save renders when it settles.
 function flushPendingRender() {
-  if (!state.renderPending || state.editing || state.suppressRender || documentRenderBlocked()) return;
+  if (!state.renderPending || state.editing || state.savePromise || state.suppressRender || documentRenderBlocked()) return;
   renderDocument();
 }
 
@@ -2688,11 +2692,7 @@ function renderDocument() {
       section.addEventListener("input", handleBlockInput);
       section.addEventListener("keydown", handleBlockKeydown);
       section.addEventListener("pointerup", handleBlockPointerUp);
-      section.addEventListener("blur", async () => {
-        if (state.editing?.element === section) await flushSave();
-        else deactivateBlockEditing(section);
-        flushPendingRender();
-      });
+      section.addEventListener("blur", handleBlockBlur);
     }
     dom.editor.append(section);
   }
@@ -3199,8 +3199,8 @@ function updateProgress() {
   dom.sectionProgressValue.textContent = `${progress}%`;
 }
 
-async function loadDocument(relativePath, { quiet = false, discardEditing = false } = {}) {
-  if (!discardEditing && !(await settlePendingEdits())) {
+async function loadDocument(relativePath, { quiet = false, discardEditing = false, confirmDiscard = false } = {}) {
+  if (!discardEditing && !(await mayReplaceDocument(confirmDiscard))) {
     dom.documentSelect.value = state.document?.path || relativePath;
     return false;
   }
@@ -3237,6 +3237,7 @@ async function loadDocument(relativePath, { quiet = false, discardEditing = fals
     state.saveConflict = false;
     dom.externalChange.hidden = true;
     dom.externalKeep.hidden = true;
+    dom.externalCopy.hidden = true;
     dom.externalChangeMessage.textContent = "The source changed outside this editor.";
     renderDocument();
     renderRequestLists();
@@ -3468,6 +3469,17 @@ function activateBlockEditing(element) {
   restoreEditableCaret(element, caretOffset);
 }
 
+// Leaving a block saves it, except after a refused save: the same request
+// would be refused again, and while it is on its way the banner buttons the
+// author just clicked would find no edit to copy or keep.
+async function handleBlockBlur(event) {
+  const section = event.currentTarget;
+  if (state.editing?.element === section) {
+    if (!state.saveConflict) await flushSave();
+  } else deactivateBlockEditing(section);
+  flushPendingRender();
+}
+
 function deactivateBlockEditing(element) {
   if (!element) return;
   element.contentEditable = "false";
@@ -3538,6 +3550,44 @@ async function settlePendingEdits() {
   if (!state.editing && !state.savePromise) return true;
   const saved = await flushSave();
   return saved || !state.editing;
+}
+
+// Whether the open document may be replaced. Typed text is saved first. When a
+// save conflict keeps it from reaching disk, an action the author chose
+// (Reload, another file: confirmDiscard) may still go ahead, but only after
+// the author agrees to discard the text; background loads never discard it.
+async function mayReplaceDocument(confirmDiscard = false) {
+  if (await settlePendingEdits()) return true;
+  if (!confirmDiscard || !state.saveConflict || !confirmDiscardEdit()) return false;
+  clearTimeout(state.saveTimer);
+  state.editing = null;
+  return true;
+}
+
+function confirmDiscardEdit() {
+  if (!state.editing) return true;
+  return window.confirm("Your unsaved edit of this paragraph will be discarded. Use \"Copy my text\" first if you want to keep it.\n\nDiscard it?");
+}
+
+function useDiskVersion() {
+  if (!state.document?.path || !confirmDiscardEdit()) return;
+  loadDocument(state.document.path, { discardEditing: true });
+}
+
+// The edit as LaTeX source, so it survives a reload or the paragraph's
+// removal. Without clipboard access the text is selected for a manual copy.
+async function copyEditedText() {
+  // A save on its way holds the edit; a refused one gives it back.
+  if (state.savePromise) await state.savePromise;
+  const editing = state.editing;
+  if (!editing) return;
+  try {
+    await navigator.clipboard.writeText(editedRawText(editing));
+    showToast("Copied your text as LaTeX.");
+  } catch {
+    window.getSelection()?.selectAllChildren(editing.element);
+    showToast("Your text is selected. Copy it with Ctrl+C or Cmd+C.", 5000);
+  }
 }
 
 // The source of a block (or proposal unit) after the author turned its display
@@ -3899,6 +3949,26 @@ function moveLeadingSpaceOutOfGroups(edited) {
   }
 }
 
+// The source an edit of a block amounts to: what a save would write.
+function editedRawText(editing) {
+  const nextDisplay = unwrapPastedHeadingCommand(
+    canonicalEditableText(editing.element),
+    editing.block,
+  );
+  return rawTextForDisplayEdit(editing.block, nextDisplay);
+}
+
+// What a refused save means for the typed text. "conflict": the paragraph
+// also changed on disk, and "Keep my edit" can still write the text over it.
+// "gone": the paragraph was removed or rewritten on disk, or cannot be told
+// apart from another one, so no save can place the text; only copying it
+// keeps it. Anything else is worth retrying.
+function saveErrorKind(message) {
+  if (/\bparagraph you were editing no longer exists\b|\bmore than one paragraph\b/i.test(message)) return "gone";
+  if (/\b(?:file|paragraph|source) changed\b/i.test(message)) return "conflict";
+  return null;
+}
+
 async function performSave({ force = false } = {}) {
   const editing = state.editing;
   const documentAtStart = state.document;
@@ -3908,11 +3978,7 @@ async function performSave({ force = false } = {}) {
   let failed = false;
   setSaveState("Saving…", true);
   try {
-    const nextDisplay = unwrapPastedHeadingCommand(
-      canonicalEditableText(editing.element),
-      editing.block,
-    );
-    const nextRaw = rawTextForDisplayEdit(editing.block, nextDisplay);
+    const nextRaw = editedRawText(editing);
     const nextDocument = await api("/api/save", {
       method: "POST",
       body: JSON.stringify({
@@ -3922,6 +3988,10 @@ async function performSave({ force = false } = {}) {
         blockId: editing.blockId,
         blockKind: editing.block.kind,
         baseText: editing.block.raw,
+        // The server must never mistake an unchanged neighbour for this
+        // paragraph after a co-author edited it and moved it.
+        previousText: documentAtStart.blocks?.[editing.blockIndex - 1]?.raw,
+        nextText: documentAtStart.blocks?.[editing.blockIndex + 1]?.raw,
         text: nextRaw,
         force,
       }),
@@ -3970,6 +4040,7 @@ async function performSave({ force = false } = {}) {
     state.externalChange = false;
     dom.externalChange.hidden = true;
     dom.externalKeep.hidden = true;
+    dom.externalCopy.hidden = true;
     setSaveState("Saved", false);
     if (nextDocument.merge?.applied) showToast("Merged your edit with the newer disk version.", 4200);
     refreshGit();
@@ -3977,12 +4048,15 @@ async function performSave({ force = false } = {}) {
   } catch (error) {
     failed = true;
     if (!state.editing) state.editing = editing;
-    const conflict = /\b(?:file|paragraph|source) changed\b/i.test(error.message);
-    state.saveConflict = conflict;
-    if (conflict) {
+    const kind = saveErrorKind(error.message);
+    state.saveConflict = kind || false;
+    if (kind) {
       state.externalChange = true;
-      dom.externalChangeMessage.textContent = "The source changed while you were editing. Your text is still preserved here.";
-      dom.externalKeep.hidden = false;
+      dom.externalChangeMessage.textContent = kind === "gone"
+        ? "The paragraph you were editing was removed or rewritten on disk, so your edit cannot be saved. Your text is still here: use Copy my text before you use the disk version."
+        : "The source changed while you were editing. Your text is still preserved here.";
+      dom.externalKeep.hidden = kind === "gone";
+      dom.externalCopy.hidden = false;
       dom.externalChange.hidden = false;
       setSaveState("Resolve save", false);
     } else {
@@ -6516,10 +6590,17 @@ function hasLocalDocumentState() {
 
 function showExternalChangeBanner() {
   state.externalChange = true;
+  // A later change on disk does not bring back a paragraph that is gone;
+  // keep saying so, and do not offer "Keep my edit".
+  if (state.saveConflict === "gone") {
+    dom.externalChange.hidden = false;
+    return;
+  }
   dom.externalChangeMessage.textContent = state.editing
     ? "The source changed while you were editing. Your text is still preserved here."
     : "The source changed outside this editor.";
   dom.externalKeep.hidden = !state.editing;
+  dom.externalCopy.hidden = !state.editing;
   dom.externalChange.hidden = false;
 }
 
@@ -7082,7 +7163,7 @@ systemDarkQuery?.addEventListener?.("change", () => {
   if (currentThemeChoice() === "system") applyTheme("system");
 });
 
-dom.documentSelect.addEventListener("change", () => loadDocument(dom.documentSelect.value));
+dom.documentSelect.addEventListener("change", () => loadDocument(dom.documentSelect.value, { confirmDiscard: true }));
 dom.showTextWorkspace.addEventListener("click", () => setWorkspaceMode("text"));
 dom.showStructureWorkspace.addEventListener("click", () => setWorkspaceMode("structure"));
 dom.selectMainSections.addEventListener("click", () => {
@@ -7118,9 +7199,9 @@ dom.reloadButton.addEventListener("click", async () => {
     window.location.reload();
     return;
   }
-  // Pending edits are written first, so Reload can never lose typed text. If
-  // that save is blocked by a conflict the banner offers "Use disk version".
-  const loaded = await loadDocument(state.document.path, { quiet: true });
+  // Pending edits are written first. If a conflict blocks that save, typed
+  // text is discarded only after the author agrees.
+  const loaded = await loadDocument(state.document.path, { quiet: true, confirmDiscard: true });
   if (loaded) showToast("Reloaded from disk.");
   else if (state.saveConflict) dom.externalChange.hidden = false;
 });
@@ -7206,9 +7287,8 @@ dom.previewButton.addEventListener("click", () => {
   openCompiledPdfPreview();
 });
 dom.externalKeep.addEventListener("click", () => flushSave({ force: true }));
-dom.externalReload.addEventListener("click", () => {
-  if (state.document?.path) loadDocument(state.document.path, { discardEditing: true });
-});
+dom.externalCopy.addEventListener("click", copyEditedText);
+dom.externalReload.addEventListener("click", useDiskVersion);
 dom.referenceSearch.addEventListener("input", () => renderReferenceList(dom.referenceSearch.value));
 dom.paperPreviewSizeToggle.addEventListener("click", () => setPaperPreviewExpanded(!state.paperPreviewExpanded));
 dom.closePaperPreview.addEventListener("click", closePaperPreview);

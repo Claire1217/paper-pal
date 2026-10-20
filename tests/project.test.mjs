@@ -499,13 +499,14 @@ describe("running project", () => {
 
 describe("saving a paragraph after the file changed on disk", () => {
   const body = (paragraphs) => `\\documentclass{article}\n\\begin{document}\n\n${paragraphs.join("\n\n")}\n\n\\end{document}\n`;
-  // The editor sends the etag, position and text it loaded; a co-author's
-  // write in between makes that etag stale.
+  // The editor sends the etag, position, text and neighbours it loaded; a
+  // co-author's write in between makes that etag stale.
   const staleSave = (server, document, block, text, extra = {}) => api(server, "/api/save", {
     method: "POST",
     body: {
       path: document.path, etag: document.etag, blockIndex: block.index, blockId: block.id, blockKind: block.kind,
-      baseText: block.raw, text, ...extra,
+      baseText: block.raw, previousText: document.blocks[block.index - 1]?.raw, nextText: document.blocks[block.index + 1]?.raw,
+      text, ...extra,
     },
   });
   async function setUp(paragraphs) {
@@ -586,6 +587,107 @@ describe("saving a paragraph after the file changed on disk", () => {
     assert.equal(result.status, 409);
     assert.match(result.value.error, /overlapping text/);
   });
+
+  // A co-author both inserts a paragraph above and edits the target, so the
+  // target is neither at its old position nor still equal to the base text.
+  const experimentOne = "Experiment one used a learning rate of 0.1 with batch size 32.";
+  const experimentTwo = "Experiment two used a learning rate of 0.01 with batch size 32.";
+  const insertedAndEdited = () => body(["Intro.", "Inserted by co-author.", experimentOne, experimentTwo.replace("size 32", "size 64"), "End."]);
+
+  it("merges into the edited paragraph, not a similar neighbour, after an insertion above", async () => {
+    const { server, file, document } = await setUp(["Intro.", experimentOne, experimentTwo, "End."]);
+    const target = document.blocks.find((block) => block.raw === experimentTwo);
+    await fs.writeFile(file, insertedAndEdited());
+    const result = await staleSave(server, document, target, `${experimentTwo} Results in Table 2.`);
+    assert.equal(result.status, 200, result.value.error);
+    assert.equal(result.value.merge.applied, true);
+    assert.equal(await fs.readFile(file, "utf8"), body([
+      "Intro.", "Inserted by co-author.", experimentOne, `${experimentTwo.replace("size 32", "size 64")} Results in Table 2.`, "End.",
+    ]));
+  });
+
+  it("keeps my edit in the edited paragraph, not a similar neighbour, after an insertion above", async () => {
+    const { server, file, document } = await setUp(["Intro.", experimentOne, experimentTwo, "End."]);
+    const target = document.blocks.find((block) => block.raw === experimentTwo);
+    await fs.writeFile(file, insertedAndEdited());
+    const result = await staleSave(server, document, target, `${experimentTwo} Results in Table 2.`, { force: true });
+    assert.equal(result.status, 200, result.value.error);
+    assert.equal(await fs.readFile(file, "utf8"), body(["Intro.", "Inserted by co-author.", experimentOne, `${experimentTwo} Results in Table 2.`, "End."]));
+  });
+
+  it("finds an edited paragraph one block lower instead of calling it deleted", async () => {
+    const paragraphs = ["First paragraph is here.", "Second paragraph talks about things.", "Third paragraph closes."];
+    const disk = body(["New one.", ...paragraphs.slice(0, 2), "Third paragraph closes, tweaked."]);
+    for (const force of [false, true]) {
+      const { server, file, document } = await setUp(paragraphs);
+      const third = document.blocks.find((block) => block.raw === paragraphs[2]);
+      await fs.writeFile(file, disk);
+      const result = await staleSave(server, document, third, "Third paragraph closes the paper.", { force });
+      if (force) {
+        assert.equal(result.status, 200, result.value.error);
+        assert.equal(await fs.readFile(file, "utf8"), body(["New one.", ...paragraphs.slice(0, 2), "Third paragraph closes the paper."]));
+      } else {
+        // Both changed the end of the sentence: a conflict the author resolves, not a deleted paragraph.
+        assert.equal(result.status, 409);
+        assert.match(result.value.error, /overlapping text/);
+      }
+    }
+  });
+
+  it("never takes an unchanged neighbour for the edited paragraph", async () => {
+    const { server, file, document } = await setUp(["First thing.", "Second paragraph text.", "Third paragraph text."]);
+    const second = document.blocks.find((block) => block.raw === "Second paragraph text.");
+    const disk = body(["First thing.", "Unrelated replacement.", "Third paragraph text."]);
+    await fs.writeFile(file, disk);
+    for (const force of [false, true]) {
+      const result = await staleSave(server, document, second, "Second paragraph text, improved.", { force });
+      assert.equal(result.status, 409);
+      assert.match(result.value.error, /no longer exists/);
+    }
+    assert.equal(await fs.readFile(file, "utf8"), disk);
+  });
+
+  it("refuses to guess between two paragraphs that are equally like the edited one", async () => {
+    const { server, file, document } = await setUp(["Intro.", experimentTwo, "End."]);
+    const target = document.blocks.find((block) => block.raw === experimentTwo);
+    const disk = body(["Intro.", experimentTwo.replace("two", "one"), experimentTwo.replace("size 32", "size 64"), "End."]);
+    await fs.writeFile(file, disk);
+    for (const force of [false, true]) {
+      const result = await staleSave(server, document, target, `${experimentTwo} Results in Table 2.`, { force });
+      assert.equal(result.status, 409);
+      assert.match(result.value.error, /more than one paragraph/);
+    }
+    assert.equal(await fs.readFile(file, "utf8"), disk);
+  });
+
+  for (const [script, base, from, to, appended] of [
+    ["Chinese", "本文提出了一种新的方法来解决这个问题。我们在三个数据集上进行了实验，结果表明该方法有效。", "三个", "四个", "代码已开源。"],
+    ["Japanese", "提案手法を三つのデータセットで評価した。結果は良好であり、既存手法を上回った。", "三つ", "四つ", "コードは公開済みである。"],
+    ["mixed Chinese and English", "我们使用 BERT 模型，在 GLUE 基准上评估性能，并与 baseline 方法进行比较。", "评估性能", "评估了性能", "代码已开源。"],
+  ]) {
+    it(`merges and keeps my edit for ${script} text that a co-author edited lightly`, async () => {
+      const { server, file, document } = await setUp(["开头。", base, "结尾。"]);
+      const block = document.blocks.find((item) => item.raw === base);
+      await fs.writeFile(file, body(["开头。", base.replace(from, to), "结尾。"]));
+      const merged = await staleSave(server, document, block, `${base}${appended}`);
+      assert.equal(merged.status, 200, merged.value.error);
+      assert.equal(merged.value.merge.applied, true);
+      assert.equal(await fs.readFile(file, "utf8"), body(["开头。", `${base.replace(from, to)}${appended}`, "结尾。"]));
+      await fs.writeFile(file, body(["开头。", base.replace(from, to), "结尾。"]));
+      const forced = await staleSave(server, document, block, `${base}${appended}`, { force: true });
+      assert.equal(forced.status, 200, forced.value.error);
+      assert.equal(await fs.readFile(file, "utf8"), body(["开头。", `${base}${appended}`, "结尾。"]));
+    });
+  }
+
+  it("merges into a two-word paragraph whose punctuation a co-author changed", async () => {
+    const { server, file, document } = await setUp(["Intro.", "Results pending.", "End."]);
+    const block = document.blocks.find((item) => item.raw === "Results pending.");
+    await fs.writeFile(file, body(["Intro.", "Results pending!", "End."]));
+    const result = await staleSave(server, document, block, "Our results pending.");
+    assert.equal(result.status, 200, result.value.error);
+    assert.equal(await fs.readFile(file, "utf8"), body(["Intro.", "Our results pending!", "End."]));
+  });
 });
 
 describe("confirmations and repeated or split paragraphs", () => {
@@ -640,5 +742,22 @@ describe("confirmations and repeated or split paragraphs", () => {
     const after = document.blocks.find((item) => item.raw === "Beta sentence is confirmed.");
     assert.deepEqual(before.acceptedRanges, []);
     assert.deepEqual(after.acceptedRanges.map(({ start, end, quote }) => [start, end, quote]), [[0, after.raw.length, after.raw]]);
+  });
+
+  it("keeps the id and time of a confirmation that a save elsewhere only moved", async () => {
+    const project = await makeProject({ files: { "main.tex": body(["Edited paragraph.", "Confirmed paragraph."]) } });
+    const server = await startServer(project.root);
+    let document = await getDocument(server, "main.tex");
+    const confirmed = document.blocks.find((item) => item.raw === "Confirmed paragraph.");
+    await confirm(server, document, confirmed, 0, confirmed.raw.length);
+    const statePath = path.join(project.root, stateDirectory, "state.json");
+    const [before] = JSON.parse(await fs.readFile(statePath, "utf8")).selections;
+    document = await getDocument(server, "main.tex");
+    const edited = document.blocks.find((item) => item.raw === "Edited paragraph.");
+    await saveBlock(server, document, edited, "Edited paragraph.\n\nNow split in two.");
+    const after = JSON.parse(await fs.readFile(statePath, "utf8")).selections.find((item) => item.status === "accepted");
+    assert.equal(after.id, before.id);
+    assert.equal(after.acceptedAt, before.acceptedAt);
+    assert.equal(after.blockIndex, before.blockIndex + 1);
   });
 });
