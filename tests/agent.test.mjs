@@ -202,6 +202,19 @@ describe("agent answers that need care", () => {
     await apiOk(server, "/api/request/accept", { method: "POST", body: { id: created.id } });
     assert.equal(await fs.readFile(file, "utf8"), before.replace("are also loud streets.", "are also noisy streets."));
   });
+
+  it("keeps non-ASCII characters intact when the agent's output splits them across writes", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_STDOUT: "trace: Café résumé\n" } });
+    const created = await commentOn(server, "sections/01_introduction.tex", "loud streets", "Plainer.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    await waitForRequest(server, created.id, (request) => request.status === "proposed", "proposal");
+    const runsRoot = path.join(project.root, stateDirectory, "runs");
+    const [runDirectory] = await fs.readdir(runsRoot);
+    const trace = await fs.readFile(path.join(runsRoot, runDirectory, "TRACE.log"), "utf8");
+    assert.match(trace, /trace: Café résumé/);
+    assert.doesNotMatch(trace, /�/);
+  });
 });
 
 describe("review progress after an accepted proposal", () => {

@@ -63,6 +63,16 @@ process.stderr.write(`fake-agent instruction: ${task?.instruction ?? ""}\n`);
 // A real CLI traces on stderr: the echoed prompt, then timestamped log lines.
 if (process.env.FAKE_AGENT_STDERR) process.stderr.write(`${process.env.FAKE_AGENT_STDERR}\n`);
 
+// FAKE_AGENT_STDOUT is traced on stdout in two writes, cut inside its first
+// multi-byte character, so the server reads that character in two chunks.
+if (process.env.FAKE_AGENT_STDOUT) {
+  const bytes = Buffer.from(process.env.FAKE_AGENT_STDOUT, "utf8");
+  const cut = bytes.findIndex((byte) => byte >= 0x80) + 1 || 1;
+  process.stdout.write(bytes.subarray(0, cut));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  process.stdout.write(bytes.subarray(cut));
+}
+
 if (process.env.FAKE_AGENT_SLEEP_MS) {
   await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_AGENT_SLEEP_MS)));
 }

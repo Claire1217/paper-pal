@@ -3747,6 +3747,10 @@ function spawnCaptured(command, args, { cwd, env = childEnvironment(), input = n
     // Codex writes its answer to a file and only traces here, but the Claude
     // adapter carries the whole reply on stdout, so this cap has to be well
     // above any proposal or chat turn or the JSON arrives truncated.
+    // Decode per stream, not per chunk: a pipe read can end inside a UTF-8
+    // character, and decoding that chunk alone would give U+FFFD.
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk) => { stdout = `${stdout}${chunk}`.slice(-400000); });
     child.stderr?.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-32000); });
     child.on("error", (error) => {
@@ -6364,6 +6368,9 @@ async function compilePdf() {
     return compileState;
   }
   child.stdin?.end();
+  // Decode per stream so a character split across two reads stays intact.
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
   child.stdout?.on("data", (chunk) => { log = `${log}${chunk}`.slice(-24000); });
   child.stderr?.on("data", (chunk) => { log = `${log}${chunk}`.slice(-24000); });
   // "error" (for example ENOENT) is followed by "close"; the first one wins so
@@ -7924,6 +7931,10 @@ const server = createServer(async (request, response) => {
       throw new HttpError(400, "Malformed request URL.");
     }
     const readOnly = request.method === "GET" || request.method === "HEAD";
+    // HEAD (curl -I, uptime probes) is answered by the GET route. Node decided
+    // when it created `response` that a HEAD reply carries no body, so the
+    // route's body is dropped. The event stream is left out: it would stay open.
+    if (request.method === "HEAD" && url.pathname !== "/api/events") request.method = "GET";
     if (!readOnly) {
       assertLocalOrigin(request);
       const hasBody = Number(request.headers["content-length"]) > 0 || request.headers["transfer-encoding"];

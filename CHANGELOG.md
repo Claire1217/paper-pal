@@ -31,6 +31,12 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   `\rowcolor{..}`, `\cellcolor{..}` and `\arrayrulecolor{..}` showed as
   text, and a rule after the last row added an extra row. These commands and
   their arguments are now dropped.
+- `curl -I` and uptime probes got `404` from `/api/health` and every other
+  GET route, because `HEAD` matched no route. GET routes (except
+  `/api/events`) now answer `HEAD` with the same status and headers and no body.
+- An accented or other non-ASCII character in the compile log or an agent's
+  trace could show as two replacement characters when the program's output
+  arrived split inside that character. Output is now decoded per stream.
 - **Citations showed "key (n.d.)" for entries exported by the ACL Anthology,
   JabRef and many hand-kept `.bib` files.** Values in double quotes
   (`title = "..."`), bare numbers (`year = 2019`), `@string` names

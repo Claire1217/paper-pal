@@ -141,6 +141,23 @@ describe("HTTP hardening", () => {
     }
   });
 
+  it("answers HEAD on GET routes like GET, without a body", async () => {
+    const host = { Host: `127.0.0.1:${server.port}` };
+    for (const target of ["/api/health", "/api/document?path=main.tex", "/api/compile", "/", "/app.js", "/vendor/katex/katex.min.js"]) {
+      const get = await rawRequest(server, { path: target, headers: host });
+      const head = await rawRequest(server, { method: "HEAD", path: target, headers: host });
+      assert.equal(head.status, 200, target);
+      assert.equal(head.body, "", target);
+      assert.equal(head.headers["content-type"], get.headers["content-type"], target);
+      assert.equal(head.headers["x-content-type-options"], "nosniff", target);
+    }
+    // HEAD keeps the read-only checks: a foreign Host is still refused.
+    const evil = await rawRequest(server, { method: "HEAD", path: "/api/health", headers: { Host: `evil.example:${server.port}` } });
+    assert.equal(evil.status, 421);
+    const unknown = await rawRequest(server, { method: "HEAD", path: "/api/nope", headers: host });
+    assert.equal(unknown.status, 404);
+  });
+
   it("passes only http(s) links through from the bibliography", async () => {
     const document = await getDocument(server, "main.tex");
     const evil = document.references.citations.find((item) => item.key === "evil2024");

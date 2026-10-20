@@ -369,6 +369,30 @@ describe("running project", () => {
     assert.match(state.log, /Full compiler output:\nThis is pdfTeX/);
   });
 
+  it("keeps non-ASCII characters intact when LaTeX output splits them across writes", async () => {
+    const project = await makeProject();
+    const script = path.join(project.root, "fake-latex.mjs");
+    // Two writes with a pause, cut between the two bytes of the first "é", so
+    // the server receives them as separate chunks.
+    await fs.writeFile(script, [
+      "const bytes = Buffer.from('! Undefined control sequence.\\nl.3 Caf\\u00e9 r\\u00e9sum\\u00e9 \\\\foo\\n', 'utf8');",
+      "const cut = bytes.indexOf(0xc3) + 1;",
+      "process.stdout.write(bytes.subarray(0, cut));",
+      "setTimeout(() => { process.stdout.write(bytes.subarray(cut)); setTimeout(() => process.exit(1), 50); }, 150);",
+    ].join("\n"), "utf8");
+    const config = JSON.parse(await fs.readFile(project.configPath, "utf8"));
+    config.latex = { enabled: true, cwd: ".", command: process.execPath, args: [script] };
+    await fs.writeFile(project.configPath, JSON.stringify(config), "utf8");
+    const server = await startServer(project.root, { env: { PAPER_PAL_ALLOW_CUSTOM_LATEX: "1" } });
+    await apiOk(server, "/api/compile", { method: "POST" });
+    const state = await waitFor(async () => {
+      const value = await apiOk(server, "/api/compile");
+      return value.status === "failed" ? value : null;
+    }, { label: "compile failure" });
+    assert.doesNotMatch(state.log, /\uFFFD/);
+    assert.match(state.log, /l\.3 Caf\u00e9 r\u00e9sum\u00e9 \\foo/);
+  });
+
   it("compiles again when a compile was requested while one was running", async () => {
     const project = await makeProject();
     const script = path.join(project.root, "fake-latex.mjs");

@@ -56,7 +56,7 @@ plain text.
 | 400 | Invalid input: missing field, malformed JSON or URL, validation message. |
 | 403 | Origin not allowed, `X-Paper-Pal` header missing, or a path outside `sourceRoot` / the project. |
 | 404 | Unknown `/api/*` route, or the file does not exist. |
-| 405 | Non-GET request to a static path. |
+| 405 | Request to a static path that is not GET or HEAD. |
 | 409 | Conflict: the file or passage changed since it was read, something is already running, the backend is not ready, agents are disabled, or the target file is not UTF-8 (read-only). |
 | 413 | Body too large. |
 | 415 | Body is not `application/json`. |
@@ -81,7 +81,8 @@ newline and Unicode normalisation form are kept.
 ## Routes
 
 "Writes source" marks the only routes that can modify manuscript files.
-Relative paths are relative to the project folder.
+Relative paths are relative to the project folder. Every GET route except
+`/api/events` also answers `HEAD` with the same status and headers and no body.
 
 ### Status and project
 
