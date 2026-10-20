@@ -368,6 +368,123 @@ describe("real-world manuscript", () => {
   });
 });
 
+// Entry shapes as the ACL Anthology, DBLP, IEEE Xplore, JabRef and older
+// hand-kept files export them (content made up).
+const exportedBib = String.raw`@comment{jabref-meta: databaseType:bibtex;}
+@preamble{ "\newcommand{\noopsort}[1]{}" }
+@String{ajis = "Annals of Imaginary Sheep"}
+@inproceedings{lin-okafor-2021-flock,
+    title = "Counting {Flocks} at Dusk with Few Labels",
+    author = "Lin, Mei  and
+      Okafor, Chidi",
+    booktitle = "Proceedings of the Fictional Workshop on Pasture Counting",
+    month = nov,
+    year = "2021",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2021.fake-main.12/",
+    doi = "10.18653/v1/2021.fake-main.12",
+    pages = "101--112",
+    abstract = "We count sheep with a handful of labels.",
+}
+@inproceedings{DBLP:conf/fake/LeeC21,
+  author    = {Ann Lee and Bo Chen},
+  title     = {Herd Tracking from Above},
+  booktitle = {Proceedings of the Imaginary Conference on Drones},
+  pages     = {1--9},
+  publisher = {Invented Press},
+  year      = {2021},
+  biburl    = {https://dblp.org/rec/conf/fake/LeeC21.bib},
+  bibsource = {dblp computer science bibliography, https://dblp.org}
+}
+@INPROCEEDINGS{9000001,
+  author={Smith, John and Doe, Jane},
+  booktitle={2020 IEEE Conference on Invented Things},
+  title={Thermal Ear Tags for Sheep},
+  year={2020},
+  pages={1-6},
+  doi={10.1109/FAKE.2020.9000001}}
+@article{field2019wool,
+  author = {Field, Rhys},
+  title = {Wool Density by Season},
+  journal = ajis # " Letters",
+  % note = {draft},
+  YEAR = 2019,
+}
+@article(quoted2018,
+  author = "M{\"u}ller, Hans and {Open Pasture Collective}",
+  title = "A Title with a {"}Quote{"} Inside",
+  year = 2018
+)
+@misc{collective2023,
+  author = {{Open Pasture Collective}},
+  title = {Shared Count Sheets},
+  year = {2023}
+}
+`;
+
+describe("real-world manuscript: .bib exports", () => {
+  let server;
+  let citations;
+  let paragraph;
+
+  before(async () => {
+    const project = await makeProject({
+      files: {
+        "main.tex": [
+          "\\documentclass{article}",
+          "\\begin{document}",
+          "We cite \\citet{lin-okafor-2021-flock}, \\citet{DBLP:conf/fake/LeeC21}, \\citet{9000001}, \\citet{field2019wool}, \\citet{quoted2018} and \\citet{collective2023}.",
+          "",
+          "\\bibliography{refs}",
+          "\\end{document}",
+          "",
+        ].join("\n"),
+        "refs.bib": exportedBib,
+      },
+    });
+    server = await startServer(project.root);
+    const document = await getDocument(server, "main.tex");
+    citations = Object.fromEntries(document.references.citations.map((item) => [item.key, item]));
+    paragraph = document.blocks.find((block) => block.kind === "paragraph" && block.display.startsWith("We cite")).display;
+  });
+  after(cleanupAll);
+
+  it("reads quoted, numeric, @string and parenthesised values", () => {
+    const acl = citations["lin-okafor-2021-flock"];
+    assert.equal(acl.title, "Counting Flocks at Dusk with Few Labels");
+    assert.equal(acl.year, "2021");
+    assert.equal(acl.author, "Lin");
+    assert.equal(acl.authors, "Lin, Mei, Okafor, Chidi");
+    assert.equal(acl.venue, "Proceedings of the Fictional Workshop on Pasture Counting");
+    assert.equal(acl.doi, "10.18653/v1/2021.fake-main.12");
+    assert.equal(acl.pdfUrl, "https://aclanthology.org/2021.fake-main.12.pdf");
+    assert.equal(citations.field2019wool.year, "2019");
+    assert.equal(citations.field2019wool.venue, "Annals of Imaginary Sheep Letters");
+    assert.equal(citations.quoted2018.title, "A Title with a \"Quote\" Inside");
+    assert.equal(citations.quoted2018.year, "2018");
+    assert.equal(citations.quoted2018.author, "Müller");
+    assert.ok(!Object.keys(citations).some((key) => /jabref|noopsort|ajis/i.test(key)), "@comment, @preamble and @string are not entries");
+    assert.ok(paragraph.includes("Lin (2021)") && paragraph.includes("Field (2019)") && paragraph.includes("Müller (2018)"), paragraph);
+    assert.doesNotMatch(paragraph, /n\.d\./);
+  });
+
+  it("does not take title from booktitle or url from biburl", () => {
+    assert.equal(citations["9000001"].title, "Thermal Ear Tags for Sheep");
+    assert.equal(citations["9000001"].venue, "2020 IEEE Conference on Invented Things");
+    assert.equal(citations["9000001"].doi, "10.1109/FAKE.2020.9000001");
+    assert.equal(citations["DBLP:conf/fake/LeeC21"].url, "");
+    assert.equal(citations["DBLP:conf/fake/LeeC21"].title, "Herd Tracking from Above");
+    assert.ok(paragraph.includes("Lee (2021)") && paragraph.includes("Smith (2020)"), paragraph);
+  });
+
+  it("shows a wholly braced corporate author whole", () => {
+    assert.equal(citations.collective2023.author, "Open Pasture Collective");
+    assert.equal(citations.collective2023.authors, "Open Pasture Collective");
+    assert.equal(citations.quoted2018.authors, "Müller, Hans, Open Pasture Collective");
+    assert.ok(paragraph.includes("Open Pasture Collective (2023)"), paragraph);
+  });
+});
+
 describe("real-world manuscript: every editable block round-trips", () => {
   let project;
   let server;

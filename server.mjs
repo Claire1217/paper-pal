@@ -2014,6 +2014,125 @@ function auxGroups(value, startAt) {
   return groups;
 }
 
+// BibTeX predefines the month abbreviations (month = nov, jan # " 2020").
+const bibMonths = Object.assign(Object.create(null), Object.fromEntries(["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
+  .map((month) => [month.slice(0, 3), month[0].toUpperCase() + month.slice(1)])));
+
+// One field value at `at`: {braced}, "quoted" (ends at a " outside braces),
+// a number, or an @string name, joined with #. Returns the value with its
+// TeX braces kept, and where reading stopped.
+function readBibValue(bib, at, strings) {
+  let value = "";
+  let cursor = at;
+  for (;;) {
+    while (/\s/.test(bib[cursor] || "")) cursor += 1;
+    if (bib[cursor] === "{") {
+      const group = braceGroupAt(bib, cursor);
+      if (!group) return { value, end: bib.length };
+      value += group.value;
+      cursor = group.end;
+    } else if (bib[cursor] === "\"") {
+      let depth = 0;
+      let close = cursor + 1;
+      for (; close < bib.length; close += 1) {
+        if (bib[close] === "{" && bib[close - 1] !== "\\") depth += 1;
+        if (bib[close] === "}" && bib[close - 1] !== "\\") depth -= 1;
+        if (bib[close] === "\"" && depth <= 0) break;
+      }
+      value += bib.slice(cursor + 1, close);
+      cursor = close + 1;
+    } else {
+      const token = /^[^\s,#{}()"=]+/.exec(bib.slice(cursor, cursor + 200))?.[0] || "";
+      if (!token) return { value, end: cursor };
+      // An undefined name is empty, as in BibTeX.
+      const name = token.toLowerCase();
+      value += /^\d+$/.test(token) ? token : strings[name] ?? bibMonths[name] ?? "";
+      cursor += token.length;
+    }
+    while (/\s/.test(bib[cursor] || "")) cursor += 1;
+    if (bib[cursor] !== "#") return { value, end: cursor };
+    cursor += 1;
+  }
+}
+
+// Every entry of one .bib file as { key, fields } with lower-cased field
+// names, so a lookup of "title" never lands inside "booktitle". Entries may
+// use ( ) instead of { }; @string defines names for later values; @comment
+// and @preamble carry no reference.
+function parseBibEntries(bib) {
+  // No prototype: a field or macro named "constructor" is just a name.
+  const strings = Object.create(null);
+  const entries = [];
+  const entryPattern = /@\s*([A-Za-z]+)\s*([{(])/g;
+  let match;
+  while ((match = entryPattern.exec(bib)) !== null) {
+    const type = match[1].toLowerCase();
+    const closer = match[2] === "{" ? "}" : ")";
+    let cursor = entryPattern.lastIndex;
+    if (type === "comment" || type === "preamble") {
+      if (match[2] === "{") {
+        cursor = braceGroupAt(bib, cursor - 1)?.end ?? bib.length;
+      } else {
+        const close = bib.indexOf(")", cursor);
+        cursor = close < 0 ? bib.length : close + 1;
+      }
+      entryPattern.lastIndex = cursor;
+      continue;
+    }
+    let key = "";
+    if (type !== "string") {
+      const keyMatch = /^\s*([^,\s{}()]*)\s*/.exec(bib.slice(cursor, cursor + 500));
+      key = keyMatch[1];
+      cursor += keyMatch[0].length;
+    }
+    // A { } entry may hold something this reader gives up on; resume after
+    // its closing brace rather than inside it.
+    const braceEnd = match[2] === "{" ? braceGroupAt(bib, entryPattern.lastIndex - 1)?.end || 0 : 0;
+    const fields = Object.create(null);
+    for (;;) {
+      while (/[\s,]/.test(bib[cursor] || "")) cursor += 1;
+      // A commented-out field line, as biber reads it.
+      if (bib[cursor] === "%") {
+        const lineEnd = bib.indexOf("\n", cursor);
+        cursor = lineEnd < 0 ? bib.length : lineEnd;
+        continue;
+      }
+      if (cursor >= bib.length || bib[cursor] === closer) break;
+      const nameMatch = /^([^\s,=#{}()"]+)\s*=/.exec(bib.slice(cursor, cursor + 200));
+      if (!nameMatch) break;
+      const read = readBibValue(bib, cursor + nameMatch[0].length, strings);
+      fields[nameMatch[1].toLowerCase()] ??= read.value;
+      cursor = read.end;
+    }
+    if (bib[cursor] === closer) cursor += 1;
+    cursor = Math.max(cursor, braceEnd);
+    if (type === "string") Object.assign(strings, fields);
+    else if (key) entries.push({ key, fields });
+    entryPattern.lastIndex = Math.max(cursor, entryPattern.lastIndex);
+  }
+  return entries;
+}
+
+// Split at a pattern only outside braces: "and", spaces and commas inside
+// {Barnes and Noble} or {Open Pasture Collective} belong to one name.
+function splitBibTopLevel(value, separator) {
+  let depth = 0;
+  let masked = "";
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] === "{" && value[index - 1] !== "\\") depth += 1;
+    masked += depth > 0 ? "_" : value[index];
+    if (value[index] === "}" && value[index - 1] !== "\\") depth = Math.max(0, depth - 1);
+  }
+  const parts = [];
+  let start = 0;
+  for (const found of masked.matchAll(separator)) {
+    parts.push(value.slice(start, found.index));
+    start = found.index + found[0].length;
+  }
+  parts.push(value.slice(start));
+  return parts;
+}
+
 async function projectReferences() {
   const compileRoot = path.resolve(repoRoot, config.latex.cwd);
   const mainArgument = [...config.latex.args].reverse().find((value) => String(value).endsWith(".tex")) || "main.tex";
@@ -2085,49 +2204,39 @@ async function projectReferences() {
     } catch {
       continue;
     }
-    const entryPattern = /@[A-Za-z]+\s*\{\s*([^,\s]+)\s*,/g;
-    let match;
-    while ((match = entryPattern.exec(bib)) !== null) {
-      let depth = 1;
-      let cursor = entryPattern.lastIndex;
-      for (; cursor < bib.length && depth > 0; cursor += 1) {
-        if (bib[cursor] === "{" && bib[cursor - 1] !== "\\") depth += 1;
-        if (bib[cursor] === "}" && bib[cursor - 1] !== "\\") depth -= 1;
-      }
-      const body = bib.slice(entryPattern.lastIndex, cursor - 1);
-      const field = (name) => {
-        const fieldMatch = new RegExp(`${name}\\s*=\\s*\\{`, "i").exec(body);
-        if (!fieldMatch) return "";
-        return braceGroupAt(body, fieldMatch.index + fieldMatch[0].lastIndexOf("{"))?.value || "";
-      };
-      citations[match[1]] ||= { key: match[1] };
-      citations[match[1]].title = stripTex(field("title"));
-      citations[match[1]].year ||= stripTex(field("year"));
+    for (const { key, fields } of parseBibEntries(bib)) {
+      const field = (name) => fields[name] || "";
+      citations[key] ||= { key };
+      citations[key].title = stripTex(field("title"));
+      citations[key].year ||= stripTex(field("year"));
       const authorField = field("author");
-      citations[match[1]].authors = stripTex(authorField).replace(/\s+and\s+/gi, ", ");
-      citations[match[1]].venue = stripTex(field("journal") || field("booktitle"));
+      const authorNames = splitBibTopLevel(authorField, /\s+and\s+/gi).map((name) => name.trim()).filter(Boolean);
+      citations[key].authors = authorNames.map((name) => stripTex(name)).join(", ");
+      citations[key].venue = stripTex(field("journal") || field("booktitle"));
       // Only web links leave the server: a .bib pasted from elsewhere must not
       // be able to hand the browser a javascript: or data: URL.
-      citations[match[1]].url = safeHttpUrl(stripTex(field("url")));
-      citations[match[1]].doi = stripTex(field("doi")).replace(/^https?:\/\/(?:dx[.])?doi[.]org\//i, "");
-      if (!/^10[.]\d{4,9}\/\S+$/.test(citations[match[1]].doi)) citations[match[1]].doi = "";
-      citations[match[1]].abstract = stripTex(field("abstract"));
-      const paperUrl = citations[match[1]].url;
+      citations[key].url = safeHttpUrl(stripTex(field("url")));
+      citations[key].doi = stripTex(field("doi")).replace(/^https?:\/\/(?:dx[.])?doi[.]org\//i, "");
+      if (!/^10[.]\d{4,9}\/\S+$/.test(citations[key].doi)) citations[key].doi = "";
+      citations[key].abstract = stripTex(field("abstract"));
+      const paperUrl = citations[key].url;
       if (/^https?:\/\/arxiv[.]org\/abs\//i.test(paperUrl)) {
-        citations[match[1]].pdfUrl = `${paperUrl.replace(/\/abs\//i, "/pdf/").replace(/\/$/, "")}.pdf`;
+        citations[key].pdfUrl = `${paperUrl.replace(/\/abs\//i, "/pdf/").replace(/\/$/, "")}.pdf`;
       } else if (/^https?:\/\/openreview[.]net\/forum[?]/i.test(paperUrl)) {
-        citations[match[1]].pdfUrl = paperUrl.replace("/forum?", "/pdf?");
+        citations[key].pdfUrl = paperUrl.replace("/forum?", "/pdf?");
       } else if (/^https?:\/\/aclanthology[.]org\/[^/]+\/$/i.test(paperUrl)) {
-        citations[match[1]].pdfUrl = `${paperUrl.slice(0, -1)}.pdf`;
+        citations[key].pdfUrl = `${paperUrl.slice(0, -1)}.pdf`;
       } else if (/[.]pdf(?:[?#]|$)/i.test(paperUrl)) {
-        citations[match[1]].pdfUrl = paperUrl;
+        citations[key].pdfUrl = paperUrl;
       }
-      if (!citations[match[1]].author) {
-        const firstAuthor = authorField.split(/\s+and\s+/i)[0] || "";
-        const family = firstAuthor.includes(",") ? firstAuthor.split(",")[0] : firstAuthor.trim().split(/\s+/).at(-1);
-        citations[match[1]].author = stripTex(family || match[1]);
+      if (!citations[key].author) {
+        // "Family, Given" or "Given Family"; a wholly braced name such as
+        // {Open Pasture Collective} is one family name.
+        const firstAuthor = authorNames[0] || "";
+        const commaParts = splitBibTopLevel(firstAuthor, /,/g);
+        const family = commaParts.length > 1 ? commaParts[0] : splitBibTopLevel(firstAuthor, /\s+/g).at(-1);
+        citations[key].author = stripTex(family || key);
       }
-      entryPattern.lastIndex = cursor;
     }
   }
   for (const absolute of await walkSourceFiles((name) => name.toLowerCase().endsWith(".tex"))) {
