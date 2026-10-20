@@ -3508,7 +3508,9 @@ async function documentPayload(relativePath) {
   const approvedByDefault = config.approvedDocuments.includes(relativePath);
   const references = await cachedProjectReferences();
   const macros = documentMacros(source, references);
-  const blocks = await Promise.all(parseBlocks(source).map(async (block) => {
+  const parsedBlocks = parseBlocks(source);
+  const anchorIds = new Map(selections.map((item) => [item, selectionAnchorBlock(item, parsedBlocks)?.id]));
+  const blocks = await Promise.all(parsedBlocks.map(async (block) => {
     const rawSemantic = await semanticBlock(block, relativePath, macros, references);
     const semantic = rawSemantic?.captionSource && !rawSemantic.captionSource.etag
       ? { ...rawSemantic, captionSource: { ...rawSemantic.captionSource, etag: sha(source) } }
@@ -3552,10 +3554,10 @@ async function documentPayload(relativePath) {
       editable: encoding.valid,
       status: paragraphStates[block.id]?.status || (approvedByDefault ? "accepted" : "draft"),
       acceptedRanges: selections
-        .filter((item) => item.status === "accepted" && selectionAnchorsToBlock(item, block))
+        .filter((item) => item.status === "accepted" && anchorIds.get(item) === block.id)
         .map((item) => ({ id: item.id, start: item.start, end: item.end, quote: item.quote })),
       humanRanges: selections
-        .filter((item) => item.status === "human" && selectionAnchorsToBlock(item, block))
+        .filter((item) => item.status === "human" && anchorIds.get(item) === block.id)
         .map((item) => ({ id: item.id, start: item.start, end: item.end, quote: item.quote })),
     };
   }));
@@ -6766,7 +6768,10 @@ async function mergeBlockText(baseText, localText, diskText) {
     ]);
     const result = await execFilePromise("git", ["merge-file", "--stdout", localPath, basePath, diskPath], { cwd: mergeRoot });
     if (result.code === 0) return { clean: true, text: result.stdout };
-    if (Number(result.code) === 1) return { clean: false, text: result.stdout };
+    // git merge-file exits with the number of conflicts (capped at 127), so
+    // two conflicting hunks exit with 2; only a missing git or a crash is not
+    // a conflict.
+    if (Number.isInteger(result.code) && result.code > 0 && result.code < 128) return { clean: false, text: result.stdout };
     throw new Error((result.stderr || "Automatic merge is unavailable.").trim());
   } finally {
     await fs.rm(mergeRoot, { recursive: true, force: true });
@@ -6791,19 +6796,46 @@ function blockContentHash(blockId) {
   return hash || null;
 }
 
+// The candidate nearest to `index`; null when there is none, or when two are
+// equally near and picking either would be a guess.
+function nearestBlock(candidates, index) {
+  if (candidates.length === 1) return candidates[0];
+  const position = Number(index);
+  if (!candidates.length || !Number.isFinite(position)) return null;
+  let best = null;
+  let bestDistance = Infinity;
+  let tied = false;
+  for (const candidate of candidates) {
+    const distance = Math.abs(candidate.index - position);
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+      tied = false;
+    } else if (distance === bestDistance) tied = true;
+  }
+  return tied ? null : best;
+}
+
 // A block id is "<position>-<content hash>", so moving an untouched paragraph
 // changes its id and used to drop every confirmation on it. Fall back to the
 // content hash: identical text keeps its review state wherever it sits, while
-// genuinely edited text still lapses, which is the behaviour we want.
-function selectionAnchorsToBlock(selection, block) {
-  if (selection.blockId === block.id) return true;
-  if (!selection.blockId) return selection.blockIndex === block.index;
+// genuinely edited text still lapses, which is the behaviour we want. A
+// paragraph that appears more than once shares its hash with every copy, so
+// the fallback anchors to one block only, the copy nearest the recorded
+// position; otherwise confirming one copy would show all of them confirmed.
+function selectionAnchorBlock(selection, blocks) {
+  if (!selection.blockId) return Number.isInteger(selection.blockIndex) ? blocks[selection.blockIndex] || null : null;
+  const atIndex = blocks[selection.blockIndex];
+  if (atIndex?.id === selection.blockId) return atIndex;
+  const exact = blocks.find((block) => block.id === selection.blockId);
+  if (exact) return exact;
   const hash = blockContentHash(selection.blockId);
-  return Boolean(hash) && hash === blockContentHash(block.id);
+  if (!hash) return null;
+  return nearestBlock(blocks.filter((block) => blockContentHash(block.id) === hash), selection.blockIndex);
 }
 
-function selectionMatchesBlock(selection, relativePath, block) {
-  return selection.path === relativePath && selectionAnchorsToBlock(selection, block);
+function selectionMatchesBlock(selection, relativePath, block, blocks) {
+  return selection.path === relativePath && selectionAnchorBlock(selection, blocks)?.id === block.id;
 }
 
 function reviewSelection(relativePath, block, start, end, status, template = {}) {
@@ -6821,32 +6853,9 @@ function reviewSelection(relativePath, block, start, end, status, template = {})
     prefix: block.raw.slice(Math.max(0, start - 48), start),
     suffix: block.raw.slice(end, Math.min(block.raw.length, end + 48)),
     status,
-    ...(status === "human" ? { updatedAt: now } : { acceptedAt: now }),
+    // A rebased range keeps the time it was confirmed or written.
+    ...(status === "human" ? { updatedAt: template.updatedAt || now } : { acceptedAt: template.acceptedAt || now }),
   };
-}
-
-function rebaseReviewSelections(state, relativePath, oldBlock, newBlock, oldStart, oldEnd, newEnd) {
-  const next = [];
-  for (const selection of state.selections) {
-    if (!["accepted", "human"].includes(selection.status) || !selectionMatchesBlock(selection, relativePath, oldBlock)) {
-      next.push(selection);
-      continue;
-    }
-    const pieces = [];
-    const leftEnd = Math.min(selection.end, oldStart);
-    if (leftEnd > selection.start) pieces.push({ start: selection.start, end: leftEnd });
-    const rightStart = Math.max(selection.start, oldEnd);
-    if (selection.end > rightStart) {
-      pieces.push({
-        start: newEnd + (rightStart - oldEnd),
-        end: newEnd + (selection.end - oldEnd),
-      });
-    }
-    for (const piece of pieces) {
-      if (piece.end > piece.start) next.push(reviewSelection(relativePath, newBlock, piece.start, piece.end, selection.status, selection));
-    }
-  }
-  state.selections = next;
 }
 
 function splitAbsoluteReviewRange(relativePath, blocks, absoluteStart, absoluteEnd, status, template = {}) {
@@ -6867,20 +6876,25 @@ function rebaseDocumentReviewSelections(state, relativePath, oldBlocks, newBlock
       next.push(selection);
       continue;
     }
-    const oldBlock = oldBlocks.find((block) => selectionMatchesBlock(selection, relativePath, block));
+    const oldBlock = selectionAnchorBlock(selection, oldBlocks);
     if (!oldBlock) {
       next.push(selection);
       continue;
     }
     const selectionStart = oldBlock.start + selection.start;
     const selectionEnd = oldBlock.start + selection.end;
+    // A range outside the edit only moves. While it stays in one piece it is
+    // the same confirmation and keeps its id.
+    const moved = (pieces) => (pieces.length === 1 && pieces[0].end - pieces[0].start === selection.end - selection.start
+      ? [{ ...pieces[0], id: selection.id }]
+      : pieces);
     if (selectionEnd <= absoluteStart) {
-      next.push(...splitAbsoluteReviewRange(relativePath, newBlocks, selectionStart, selectionEnd, selection.status, selection));
+      next.push(...moved(splitAbsoluteReviewRange(relativePath, newBlocks, selectionStart, selectionEnd, selection.status, selection)));
       continue;
     }
     if (selectionStart >= absoluteEnd) {
       const delta = replacementEnd - absoluteEnd;
-      next.push(...splitAbsoluteReviewRange(relativePath, newBlocks, selectionStart + delta, selectionEnd + delta, selection.status, selection));
+      next.push(...moved(splitAbsoluteReviewRange(relativePath, newBlocks, selectionStart + delta, selectionEnd + delta, selection.status, selection)));
       continue;
     }
     if (selectionStart < absoluteStart) {
@@ -6980,6 +6994,128 @@ async function resolveTrackedChange(body) {
   });
 }
 
+// The page treats these messages as "the edit cannot be placed": no save can
+// put the text anywhere, so they tell the author to copy it rather than to use
+// the disk version, which would drop it.
+const EDITED_PARAGRAPH_GONE = "The paragraph you were editing no longer exists on disk. Copy your text, then reload the document.";
+const EDITED_PARAGRAPH_AMBIGUOUS = "The document changed and more than one paragraph on disk now looks like the one you were editing. Copy your text, then reload the document.";
+const EDITED_PARAGRAPH_UNPLACED = "The paragraph you were editing moved and changed on disk, so Keep my edit cannot tell which paragraph to replace. Copy your text, then reload the document.";
+
+// Tokens for telling whether two texts are versions of one paragraph: runs of
+// letters and digits, case-folded, with punctuation dropped, and every Han,
+// kana or Hangul character on its own, because those scripts do not put
+// spaces between words.
+const SPACELESS_SCRIPTS = "\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}";
+const PARAGRAPH_TOKEN_PATTERN = new RegExp(`[${SPACELESS_SCRIPTS}]|(?:(?![${SPACELESS_SCRIPTS}])[\\p{L}\\p{N}\\p{M}])+`, "gu");
+
+// Dice coefficient over the token multisets: 1 for the same words, 0 for none
+// in common. A co-author's edit keeps most of a paragraph; a different
+// paragraph shares few of its tokens.
+function paragraphSimilarity(left, right) {
+  const leftTokens = left.toLowerCase().match(PARAGRAPH_TOKEN_PATTERN) || [];
+  const rightTokens = right.toLowerCase().match(PARAGRAPH_TOKEN_PATTERN) || [];
+  if (!leftTokens.length || !rightTokens.length) return 0;
+  const counts = new Map();
+  for (const token of leftTokens) counts.set(token, (counts.get(token) || 0) + 1);
+  let shared = 0;
+  for (const token of rightTokens) {
+    const count = counts.get(token);
+    if (!count) continue;
+    shared += 1;
+    counts.set(token, count - 1);
+  }
+  return (2 * shared) / (leftTokens.length + rightTokens.length);
+}
+
+const SAME_PARAGRAPH_MIN_SIMILARITY = 0.6;
+// How far the best match must be ahead of the next one. Two near-identical
+// paragraphs (one setting changed, say) otherwise decide by a single token.
+const SAME_PARAGRAPH_MIN_LEAD = 0.05;
+// Blocks searched on each side of the old position. Wider than any realistic
+// number of paragraphs a co-author adds or removes above while one is open.
+const SAME_PARAGRAPH_SEARCH_RADIUS = 25;
+
+// The block with this exact text nearest `position`, within the search radius;
+// null when there is none or two are equally near.
+function nearbyBlockWithText(blocks, text, position) {
+  if (typeof text !== "string" || !Number.isFinite(position)) return null;
+  const matches = blocks.filter((block) => block.raw === text && Math.abs(block.index - position) <= SAME_PARAGRAPH_SEARCH_RADIUS);
+  return matches.length ? nearestBlock(matches, position) : null;
+}
+
+// Where the edited paragraph belongs now: between the neighbours the editor
+// saw (previousText, nextText), wherever they sit after paragraphs were added
+// or removed above. `located` when both were found, which pins the place. With
+// one neighbour the place is next to it; with none, the old position.
+function mappedEditedRegion(blocks, body) {
+  const position = Number.isInteger(Number(body.blockIndex)) ? Number(body.blockIndex) : NaN;
+  const previous = nearbyBlockWithText(blocks, body.previousText, position - 1);
+  const next = nearbyBlockWithText(blocks, body.nextText, position + 1);
+  if (previous && next && previous.index < next.index) {
+    return { region: blocks.slice(previous.index + 1, next.index), located: true, anchored: true, position: (previous.index + next.index) / 2 };
+  }
+  if (previous) return { region: blocks.slice(previous.index + 1, previous.index + 2), located: false, anchored: true, position: previous.index + 1 };
+  if (next) return { region: blocks.slice(Math.max(0, next.index - 1), next.index), located: false, anchored: true, position: next.index - 1 };
+  return { region: Number.isFinite(position) && blocks[position] ? [blocks[position]] : [], located: false, anchored: false, position };
+}
+
+function pickNearest(candidates, position) {
+  if (!candidates.length) return null;
+  const nearest = nearestBlock(candidates, position);
+  if (!nearest) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
+  return nearest;
+}
+
+function rankedBySimilarity(candidates, baseText) {
+  return candidates
+    .map((block) => ({ block, similarity: paragraphSimilarity(baseText, block.raw) }))
+    .sort((left, right) => right.similarity - left.similarity);
+}
+
+// The block the author edited, after the file changed on disk. Position comes
+// first, because a look-alike elsewhere (the same text, or a paragraph that
+// differs by one setting) can be closer to the old text than the edited
+// paragraph is after a co-author's change:
+// 1. where the paragraph belongs (mappedEditedRegion), its unchanged text;
+// 2. there, the block still similar to it (a co-author edited it);
+// 3. elsewhere, the nearest unchanged copy of it (it was moved);
+// 4. unless the neighbours pinned the place, the clearly most similar block
+//    nearby; "Keep my edit" never writes there, since it is a judgement.
+// Anything ambiguous is refused, never guessed. `placed` is false for 4.
+function locateEditedBlock(blocks, body) {
+  if (typeof body.baseText !== "string") throw new Error(EDITED_PARAGRAPH_GONE);
+  const baseText = body.baseText;
+  const sameKind = (block) => !body.blockKind || block.kind === body.blockKind;
+  const neighbour = (block) => block.raw === body.previousText || block.raw === body.nextText;
+  const { region, located, anchored, position } = mappedEditedRegion(blocks, body);
+  const inPlace = pickNearest(region.filter((block) => block.raw === baseText), position);
+  if (inPlace) return { block: inPlace, placed: true };
+  const [best, runnerUp] = rankedBySimilarity(region.filter(sameKind), baseText);
+  if (best && best.similarity >= SAME_PARAGRAPH_MIN_SIMILARITY) {
+    if (runnerUp && best.similarity - runnerUp.similarity < SAME_PARAGRAPH_MIN_LEAD) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
+    // Without either neighbour the old position is a guess (paragraphs may
+    // have been added above), so a closer match nearby makes it ambiguous.
+    if (!anchored && nearbyBlocks(blocks, position).some((block) =>
+      block !== best.block && sameKind(block) && paragraphSimilarity(baseText, block.raw) > best.similarity
+    )) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
+    return { block: best.block, placed: true };
+  }
+  const copy = pickNearest(blocks.filter((block) => block.raw === baseText), position);
+  if (copy) return { block: copy, placed: true };
+  // Both neighbours are where they were and the paragraph between them is
+  // gone or rewritten; a similar block elsewhere is some other paragraph.
+  if (located) throw new Error(EDITED_PARAGRAPH_GONE);
+  const [found, next] = rankedBySimilarity(nearbyBlocks(blocks, position).filter((block) => sameKind(block) && !neighbour(block)), baseText);
+  if (!found || found.similarity < SAME_PARAGRAPH_MIN_SIMILARITY) throw new Error(EDITED_PARAGRAPH_GONE);
+  if (next && found.similarity - next.similarity < SAME_PARAGRAPH_MIN_LEAD) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
+  return { block: found.block, placed: false };
+}
+
+function nearbyBlocks(blocks, position) {
+  if (!Number.isFinite(position)) return blocks;
+  return blocks.slice(Math.max(0, Math.floor(position) - SAME_PARAGRAPH_SEARCH_RADIUS), Math.ceil(position) + SAME_PARAGRAPH_SEARCH_RADIUS + 1);
+}
+
 async function saveBlock(body) {
   const absolutePath = resolveDocument(body.path);
   await assertSourcesWritable([body.path]);
@@ -6990,24 +7126,26 @@ async function saveBlock(body) {
   let block = blocks[body.blockIndex];
   let replacementText = body.text;
   let mergeApplied = false;
-  if (fileChanged && !body.force) {
-    const unchangedBlock = typeof body.baseText === "string"
-      ? blocks.find((candidate) => candidate.raw === body.baseText)
-      : null;
-    if (unchangedBlock) block = unchangedBlock;
-    else {
-      if (!block || (body.blockKind && block.kind !== body.blockKind)) {
-        throw new Error("The document structure changed at this location. Use the disk version and edit it again.");
+  if (fileChanged) {
+    // Paragraphs above the edited one may have been added or removed, so the
+    // old position alone does not say which block the author edited. This
+    // holds for "Keep my edit" (force) too: it overrides the co-author's
+    // version of this paragraph, never a different paragraph.
+    const located = locateEditedBlock(blocks, body);
+    block = located.block;
+    if (block.raw !== body.baseText) {
+      if (body.force && !located.placed) throw new Error(EDITED_PARAGRAPH_UNPLACED);
+      if (!body.force) {
+        const merged = await mergeBlockText(String(body.baseText || ""), body.text, block.raw);
+        if (!merged.clean) {
+          throw new Error("The paragraph changed in overlapping text. Automatic merge could not safely combine both versions; choose which version to keep.");
+        }
+        replacementText = merged.text;
+        mergeApplied = true;
       }
-      const merged = await mergeBlockText(String(body.baseText || ""), body.text, block.raw);
-      if (!merged.clean) {
-        throw new Error("The paragraph changed in overlapping text. Automatic merge could not safely combine both versions; choose which version to keep.");
-      }
-      replacementText = merged.text;
-      mergeApplied = true;
     }
   }
-  if (!block) throw new Error("The paragraph no longer exists. Use the disk version and edit it again.");
+  if (!block) throw new Error(EDITED_PARAGRAPH_GONE);
   if (!body.force && !mergeApplied && block.id !== body.blockId && block.raw !== body.baseText) {
     throw new Error("The paragraph changed while you were editing. Choose which version to keep.");
   }
@@ -7028,9 +7166,12 @@ async function saveBlock(body) {
   if (nextBlock) {
     const edit = contiguousEdit(savedBlock.raw, replacementText);
     if (edit) {
-      rebaseReviewSelections(state, body.path, savedBlock, nextBlock, edit.oldStart, edit.oldEnd, edit.newEnd);
+      // Rebase in file offsets: an edit that adds a blank line splits the
+      // paragraph, and text after the split belongs to the next block.
+      const offset = savedBlock.start;
+      rebaseDocumentReviewSelections(state, body.path, blocks, nextBlocks, offset + edit.oldStart, offset + edit.oldEnd, offset + edit.newEnd);
       if (edit.newEnd > edit.newStart) {
-        state.selections.push(reviewSelection(body.path, nextBlock, edit.newStart, edit.newEnd, "human"));
+        state.selections.push(...splitAbsoluteReviewRange(body.path, nextBlocks, offset + edit.newStart, offset + edit.newEnd, "human"));
       }
     }
     delete state.paragraphs[body.path][savedBlock.id];
@@ -7080,11 +7221,11 @@ function validatedSelectionSegments(payload, body, errorMessage) {
   return segments;
 }
 
-function acceptedRangesByBlock(state, relativePath, segments) {
+function acceptedRangesByBlock(state, relativePath, segments, blocks) {
   return Object.fromEntries(segments.map(({ block }) => [
     block.index,
     state.selections
-      .filter((item) => item.path === relativePath && item.status === "accepted" && selectionMatchesBlock(item, relativePath, block))
+      .filter((item) => item.path === relativePath && item.status === "accepted" && selectionMatchesBlock(item, relativePath, block, blocks))
       .map((item) => ({ id: item.id, start: item.start, end: item.end, quote: item.quote })),
   ]));
 }
@@ -7099,7 +7240,7 @@ async function confirmSelection(body) {
   for (const { block, start, end } of segments) {
     const quote = block.raw.slice(start, end);
     let selection = state.selections.find((item) =>
-      item.path === body.path && item.status === "accepted" && selectionMatchesBlock(item, body.path, block) &&
+      item.path === body.path && item.status === "accepted" && selectionMatchesBlock(item, body.path, block, payload.blocks) &&
       item.start === start && item.end === end && item.quote === quote
     );
     if (!selection) {
@@ -7126,7 +7267,7 @@ async function confirmSelection(body) {
   return {
     ...acceptedSelections[0],
     selections: acceptedSelections,
-    acceptedRangesByBlock: acceptedRangesByBlock(state, body.path, segments),
+    acceptedRangesByBlock: acceptedRangesByBlock(state, body.path, segments, payload.blocks),
   };
 }
 
@@ -7140,7 +7281,7 @@ async function unconfirmSelection(body) {
   const removedIds = [];
   let splitCounter = 0;
   for (const selection of state.selections) {
-    const segment = segments.find(({ block }) => selectionMatchesBlock(selection, body.path, block));
+    const segment = segments.find(({ block }) => selectionMatchesBlock(selection, body.path, block, payload.blocks));
     const sameBlock = selection.path === body.path && selection.status === "accepted" && segment;
     const overlaps = sameBlock && selection.end > segment.start && selection.start < segment.end;
     if (!overlaps) {
@@ -7181,7 +7322,7 @@ async function unconfirmSelection(body) {
     beforeReview,
     afterReview,
   });
-  const acceptedRangesByBlockValue = acceptedRangesByBlock(state, body.path, segments);
+  const acceptedRangesByBlockValue = acceptedRangesByBlock(state, body.path, segments, payload.blocks);
   const acceptedRanges = acceptedRangesByBlockValue[segments[0].block.index] || [];
   emit("state", { path: body.path, reason: "unconfirmed" });
   return { removedIds, acceptedRanges, acceptedRangesByBlock: acceptedRangesByBlockValue };
