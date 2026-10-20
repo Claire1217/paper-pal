@@ -132,12 +132,15 @@ const state = {
   editing: null,
   proposalEditing: null,
   proposalSaving: false,
+  proposalRetries: [],
   saveTimer: null,
   saving: false,
   toastTimer: null,
   externalChange: false,
   saveConflict: false,
   requests: [],
+  requestsToken: 0,
+  requestsShownToken: 0,
   compiledOutline: null,
   outlineScrollTimer: null,
   outlineSelectionLockUntil: 0,
@@ -1294,9 +1297,12 @@ function requestRangeForBlock(request, block) {
 function compareCurrentReviewRequests(left, right) {
   const leftLink = linkedChangeForCurrentDocument(left);
   const rightLink = linkedChangeForCurrentDocument(right);
-  const leftBlock = Number(leftLink?.resolvedBlockIndex ?? leftLink?.blockIndex ?? resolvedRequestBlockIndex(left));
-  const rightBlock = Number(rightLink?.resolvedBlockIndex ?? rightLink?.blockIndex ?? resolvedRequestBlockIndex(right));
-  if (Number.isFinite(leftBlock) && Number.isFinite(rightBlock) && leftBlock !== rightBlock) return leftBlock - rightBlock;
+  // A comment without a block (its anchor is gone) sorts after the others
+  // instead of as block 0, which is Number(null).
+  const blockOrder = (value) => (value === null || value === undefined ? Infinity : Number(value));
+  const leftBlock = blockOrder(leftLink?.resolvedBlockIndex ?? leftLink?.blockIndex ?? resolvedRequestBlockIndex(left));
+  const rightBlock = blockOrder(rightLink?.resolvedBlockIndex ?? rightLink?.blockIndex ?? resolvedRequestBlockIndex(right));
+  if (!Number.isNaN(leftBlock) && !Number.isNaN(rightBlock) && leftBlock !== rightBlock) return leftBlock < rightBlock ? -1 : 1;
   const leftRange = left.path === state.document?.path ? resolvedRequestAbsoluteRange(left) : null;
   const rightRange = right.path === state.document?.path ? resolvedRequestAbsoluteRange(right) : null;
   const leftStart = Number(leftRange?.start ?? left.absoluteStart ?? 0);
@@ -1500,8 +1506,16 @@ function createProposalAddition(request) {
   return addition;
 }
 
+// Enter (and other keys) during IME composition picks a Chinese or Japanese
+// candidate; it is not an edit. keyCode 229 covers Safari, which reports the
+// Enter that ends a composition with isComposing already false.
+function isImeComposing(event) {
+  return event.isComposing || event.keyCode === 229;
+}
+
 function handleProposalUnitKeydown(event) {
   event.stopPropagation();
+  if (isImeComposing(event)) return;
   if (event.key === "Enter") {
     event.preventDefault();
     showToast("Keep this as one review unit. Use the structure proposal to add another paragraph.", 3600);
@@ -1519,6 +1533,8 @@ function handleProposalUnitInput(event) {
   if (state.proposalEditing && state.proposalEditing.element !== element) flushProposalUnitSave();
   element.classList.add("unit-human-edited");
   element.classList.remove("unit-confirmed");
+  // A failed save of this unit waiting for a retry is superseded by this edit.
+  state.proposalRetries = state.proposalRetries.filter((item) => item.element !== element);
   state.proposalEditing = {
     element,
     request: element.proposalRequest,
@@ -1539,21 +1555,7 @@ async function flushProposalUnitSave() {
       setSaveState("Saved", false);
       return true;
     }
-    let prefix = 0;
-    while (prefix < oldDisplay.length && prefix < nextDisplay.length && oldDisplay[prefix] === nextDisplay[prefix]) prefix += 1;
-    let suffix = 0;
-    while (
-      suffix < oldDisplay.length - prefix &&
-      suffix < nextDisplay.length - prefix &&
-      oldDisplay[oldDisplay.length - 1 - suffix] === nextDisplay[nextDisplay.length - 1 - suffix]
-    ) suffix += 1;
-    const oldEnd = oldDisplay.length - suffix;
-    const rawStart = prefix < oldDisplay.length
-      ? editing.unit.displayStarts[prefix]
-      : (editing.unit.displayEnds.at(-1) ?? editing.unit.raw.length);
-    const rawEnd = oldEnd > prefix ? editing.unit.displayEnds[oldEnd - 1] : rawStart;
-    const replacement = nextDisplay.slice(prefix, nextDisplay.length - suffix);
-    const nextRaw = `${editing.unit.raw.slice(0, rawStart)}${replacement}${editing.unit.raw.slice(rawEnd)}`;
+    const nextRaw = rawTextForDisplayEdit(editing.unit, nextDisplay);
     await api("/api/request/edit-unit", {
       method: "POST",
       body: JSON.stringify({
@@ -1573,19 +1575,37 @@ async function flushProposalUnitSave() {
       if (savedRequest && savedUnit) {
         editing.element.proposalRequest = savedRequest;
         editing.element.proposalUnit = savedUnit;
+        // Typing that went on during the save was captured against the old unit.
+        if (state.proposalEditing?.element === editing.element) {
+          state.proposalEditing.request = savedRequest;
+          state.proposalEditing.unit = savedUnit;
+        }
       }
     }
     setSaveState("Saved", false);
     showToast("Your edit was saved to the proposal and this unit was confirmed. LaTeX is still unchanged.", 4400);
     return true;
   } catch (error) {
-    state.proposalEditing = editing;
+    // An edit made in another unit meanwhile stays the pending one; this one
+    // joins the failed edits that are tried again once a save succeeds.
+    // Typing on in this same unit already holds all of its text.
+    if (!state.proposalEditing) state.proposalEditing = editing;
+    else if (state.proposalEditing.element !== editing.element) {
+      state.proposalRetries = [...state.proposalRetries.filter((item) => item.element !== editing.element), editing];
+    }
     editing.element.classList.add("save-conflict");
     setSaveState("Proposal edit not saved", false);
     showToast(error.message, 5200);
     return false;
   } finally {
     state.proposalSaving = false;
+    // An edit in another unit that was left while this save ran was turned
+    // away by the guard at the top, and its blur will not come again.
+    if (!state.proposalEditing && state.proposalRetries.length) {
+      state.proposalEditing = state.proposalRetries.shift();
+    }
+    const deferred = state.proposalEditing;
+    if (deferred && deferred !== editing && !deferred.element.matches(":focus")) setTimeout(flushProposalUnitSave, 0);
     setTimeout(flushPendingRender, 0);
   }
 }
@@ -1798,6 +1818,12 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
       if (!styleAt[index].includes(name)) styleAt[index] = styleAt[index] ? `${styleAt[index]} ${name}` : name;
     }
   }
+  // \verb text is one source unit: typing in it could only replace the whole
+  // command, so, like math and citations, it is shown but not editable.
+  const verbatimAt = Array(block.display.length).fill(null);
+  for (let index = 0; index < block.display.length; index += 1) {
+    if (isVerbatimUnit(block, index)) verbatimAt[index] = block.displayStarts[index];
+  }
 
   const trackedGroupEnds = trackedChangeControlsByEnd(block);
 
@@ -1844,13 +1870,14 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
       requestIdsAt[end].join(" ") === requestIdKey &&
       annotationAt[end] === annotationIndex &&
       styleAt[end] === styleAt[cursor] &&
+      verbatimAt[end] === verbatimAt[cursor] &&
       listMarkerAt[end] === listMarker &&
       !inlineAdditions.has(end) &&
       !additions.has(end)
     ) end += 1;
     const value = block.display.slice(cursor, end);
     const annotation = annotationIndex === null ? null : block.annotations[annotationIndex];
-    if (!className && !annotation && !listMarker && !styleAt[cursor]) container.append(document.createTextNode(value));
+    if (!className && !annotation && !listMarker && !styleAt[cursor] && verbatimAt[cursor] === null) container.append(document.createTextNode(value));
     else {
       const span = document.createElement("span");
       span.className = [
@@ -1875,6 +1902,7 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
         span.title = `Go to ${annotation.key}`;
         span.addEventListener("click", () => openReferenceAnnotation(annotation));
       }
+      if (verbatimAt[cursor] !== null) span.contentEditable = "false";
       if (annotation?.type === "math") {
         span.contentEditable = "false";
         span.dataset.latex = annotation.latex;
@@ -3051,9 +3079,18 @@ function currentSectionReviewScope() {
   if (!payload || !item) return null;
   const start = Number(item.blockIndex);
   const level = Number(item.level || 1);
-  const next = (state.compiledOutline?.items || [])
+  // A file the compiled outline does not cover (not \input by the main file)
+  // is outlined by its own headings, as in currentSectionOutlineItem; the
+  // section has to end at the next of those, not at the end of the file.
+  const compiled = (state.compiledOutline?.items || [])
+    .filter((candidate) => candidate.path === payload.path && Number.isInteger(Number(candidate.blockIndex)));
+  const outline = compiled.length
+    ? compiled
+    : payload.blocks
+      .filter((block) => block.kind === "heading" && !block.hidden && block.display?.trim())
+      .map((block) => ({ blockIndex: block.index, level: outlineLevel(block.raw) }));
+  const next = outline
     .filter((candidate) =>
-      candidate.path === payload.path &&
       Number(candidate.blockIndex) > start &&
       Number(candidate.level || 1) <= level
     )
@@ -3222,6 +3259,7 @@ async function loadDocument(relativePath, { quiet = false, discardEditing = fals
 }
 
 function handleBlockKeydown(event) {
+  if (isImeComposing(event)) return;
   if (event.key === "Enter" && !event.metaKey && !event.ctrlKey) {
     event.preventDefault();
     document.execCommand("insertText", false, "\n\n");
@@ -3502,6 +3540,365 @@ async function settlePendingEdits() {
   return saved || !state.editing;
 }
 
+// The source of a block (or proposal unit) after the author turned its display
+// text into nextDisplay. Only the stretch between the common prefix and suffix
+// is rewritten.
+function rawTextForDisplayEdit(source, nextDisplay) {
+  const oldDisplay = source.display;
+  let prefix = 0;
+  while (prefix < oldDisplay.length && prefix < nextDisplay.length && oldDisplay[prefix] === nextDisplay[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < oldDisplay.length - prefix &&
+    suffix < nextDisplay.length - prefix &&
+    oldDisplay[oldDisplay.length - 1 - suffix] === nextDisplay[nextDisplay.length - 1 - suffix]
+  ) suffix += 1;
+  let oldEnd = oldDisplay.length - suffix;
+  // \verb text is one unit that the page does not let the author edit. An
+  // edit that still reaches into it takes in the whole unit, which stays only
+  // if its text survives unchanged.
+  const sameVerbatim = (left, right) => left >= 0 && right < oldDisplay.length && isVerbatimUnit(source, left)
+    && source.displayStarts[left] === source.displayStarts[right] && source.displayEnds[left] === source.displayEnds[right];
+  while (sameVerbatim(prefix - 1, prefix)) prefix -= 1;
+  while (sameVerbatim(oldEnd - 1, oldEnd)) oldEnd += 1;
+  const attempt = (from, to) => {
+    let rawStart = from < oldDisplay.length
+      ? source.displayStarts[from]
+      : (source.displayEnds.at(-1) ?? source.raw.length);
+    // Never start between a "% comment" and the line break that ends it: the
+    // new text would be written into the comment. Start before the comment.
+    if (from < oldDisplay.length && endsSourceComment(source, from)) {
+      rawStart = from > 0 ? source.displayEnds[from - 1] : 0;
+    }
+    const rawEnd = to > from ? source.displayEnds[to - 1] : rawStart;
+    const replacement = nextDisplay.slice(from, nextDisplay.length - (oldDisplay.length - to));
+    const changed = displayEditKeepingMarkup(source, rawStart, from, to, replacement);
+    return { rawStart, rawEnd, replacement, changed };
+  };
+  let edit = attempt(prefix, oldEnd);
+  if (edit.changed) {
+    // Across markup the stretch takes whole words: "use very bold" retyped as
+    // "need" must not keep the final "d" of "bold" as source and write "nee"
+    // outside the groups that "d" sits in.
+    const boundaries = [0];
+    for (const token of tokenizeDiffText(oldDisplay)) boundaries.push(boundaries.at(-1) + token.length);
+    const wordStart = boundaries.filter((at) => at <= prefix).at(-1) ?? prefix;
+    const wordEnd = boundaries.find((at) => at >= oldEnd) ?? oldEnd;
+    if (wordStart !== prefix || wordEnd !== oldEnd) {
+      const widened = attempt(wordStart, wordEnd);
+      if (widened.changed) edit = widened;
+    }
+  }
+  const changed = edit.changed ?? [{ text: edit.replacement, typed: true }];
+  const pieces = [{ text: source.raw.slice(0, edit.rawStart) }, ...changed, { text: source.raw.slice(edit.rawEnd) }];
+  let before = "";
+  for (const piece of pieces) {
+    if (piece.typed && !insideLiteralText(before)) piece.text = escapeTypedText(piece.text);
+    before += piece.text;
+  }
+  return tidyEditedSource(pieces);
+}
+
+// The display character at `index` is the text of \verb (or \lstinline,
+// \mintinline): one source unit, shown but not editable.
+function isVerbatimUnit(source, index) {
+  return /^\\(?:verb|lstinline|mintinline)(?![A-Za-z])/.test(source.raw.slice(source.displayStarts[index], source.displayEnds[index]));
+}
+
+// The display character at `index` is the line break that ends a "% comment":
+// the last line of the hidden source before it holds a "%" that is not "\%".
+// A "%" that is displayed (inside \url, say) is not in that hidden source.
+function endsSourceComment(source, index) {
+  const start = source.displayStarts[index];
+  if (source.raw[start] !== "\n") return false;
+  const hidden = source.raw.slice(index > 0 ? source.displayEnds[index - 1] : 0, start);
+  return /(?:^|[^\\])(?:\\\\)*%/.test(hidden.slice(hidden.lastIndexOf("\n") + 1));
+}
+
+// Escapes the text the author typed. The page shows "\%", "\&" and "\#" as
+// %, & and #, so a typed "%" written as is would start a comment that hides
+// the rest of the line, and "&" or "#" would stop the compile. A backslash the
+// author typed in front keeps the character as it is. $, _ and ^ are left
+// alone on purpose: authors type inline math and subscripts as source
+// ("$x_1$"), and escaping them would break that.
+function escapeTypedText(text) {
+  return text.replace(/(\\*)([%&#])/g, (match, slashes, character) => (
+    slashes.length % 2 ? match : `${slashes}\\${character}`
+  ));
+}
+
+// True when text written right after `before` lands in a URL or verbatim
+// text, where %, & and # are shown as they are written and stay unescaped.
+function insideLiteralText(before) {
+  const command = [...before.matchAll(/\\(?:url|nolinkurl|path|href)\s*\{/g)].at(-1);
+  if (command) {
+    let depth = 1;
+    for (let at = command.index + command[0].length; at < before.length && depth > 0; at += 1) {
+      if (before[at] === "{") depth += 1;
+      else if (before[at] === "}") depth -= 1;
+    }
+    if (depth > 0) return true;
+  }
+  const verb = [...before.matchAll(/\\verb\*?([^a-zA-Z\s*])/g)].at(-1);
+  return Boolean(verb && !before.slice(verb.index + verb[0].length).includes(verb[1]));
+}
+
+// The changed display stretch [from, to) as source pieces, keeping the markup
+// that sits between two of its characters: the "}" that closes \textbf{ or an
+// "\emph{" has no display character, so the author cannot have meant to
+// delete it. Replacing the whole stretch turned "The \textbf{big} dog" edited
+// to "The small cat" into "The \textbf{small cat", whose open brace swallows
+// the rest of the file. A word diff places the new text next to the words it
+// replaces instead, here giving "The \textbf{small} cat". The source from
+// rawFrom up to the first character is markup as well. Pieces the author
+// typed are marked `typed`. Null when there is no such markup (the plain
+// replacement is exact) or the characters do not map to the source in order.
+function displayEditKeepingMarkup(source, rawFrom, from, to, replacement) {
+  const { raw, displayStarts: starts, displayEnds: ends } = source;
+  // Characters produced together (a macro's expansion, a citation label) share
+  // one source range and are kept or dropped as a whole.
+  const sameUnit = (index) => starts[index] === starts[index - 1] && ends[index] === ends[index - 1];
+  // A comment's closing line break is markup too: deleting it would comment out
+  // the text after it.
+  const endsComment = (index) => endsSourceComment(source, index);
+  let hasMarkup = from < to && rawFrom < starts[from];
+  for (let index = from; index < to; index += 1) {
+    if (!(ends[index] >= starts[index])) return null;
+    if (endsComment(index) || isVerbatimUnit(source, index)) hasMarkup = true;
+    if (index === from || sameUnit(index)) continue;
+    if (starts[index] < ends[index - 1]) return null;
+    if (starts[index] > ends[index - 1]) hasMarkup = true;
+  }
+  if (!hasMarkup) return null;
+  const kept = new Array(to - from).fill(false);
+  // Text inserted before a character goes in front of the markup before that
+  // character, staying with the text before it. Text that replaces a deleted
+  // run goes where the run started, after that markup: in "Urban
+  // \textbf{songbirds} are", typing "birds" over "songbirds are" keeps
+  // "birds" inside \textbf, where the page showed it.
+  const before = new Array(to - from + 1).fill("");
+  const replacing = new Array(to - from).fill("");
+  let index = from;
+  let runStart = -1;
+  for (const operation of diffTextOperations(source.display.slice(from, to), replacement)) {
+    if (operation.type === "insert") {
+      if (runStart >= 0 && !endsComment(runStart)) replacing[runStart - from] += operation.text;
+      else before[index - from] += operation.text;
+      continue;
+    }
+    runStart = operation.type === "delete" ? index : -1;
+    for (let count = 0; count < operation.text.length; count += 1) {
+      kept[index - from] = operation.type === "equal";
+      index += 1;
+    }
+  }
+  if (index !== to) return null;
+  const pieces = [];
+  const typed = (text) => { if (text) pieces.push({ text, typed: true }); };
+  for (let at = from; at < to; at += 1) {
+    typed(before[at - from]);
+    pieces.push({ text: raw.slice(at > from ? ends[at - 1] : rawFrom, starts[at]) });
+    let last = at;
+    while (last + 1 < to && sameUnit(last + 1)) last += 1;
+    // A unit (a macro's text, a citation label, \verb text) stays only when
+    // its whole text survives unchanged and in one piece: new text that merely
+    // reuses some of its letters, or is typed between them, replaces it.
+    const unitKept = kept.slice(at - from, last - from + 1).every(Boolean)
+      && !before.slice(at - from + 1, last - from + 1).some(Boolean);
+    if (endsComment(at) || unitKept) {
+      typed(replacing[at - from]);
+      pieces.push({ text: raw.slice(starts[at], ends[at]) });
+    } else {
+      // The unit goes; what the author typed in its place, and the characters
+      // left standing, stay as typed text in their order.
+      let text = "";
+      for (let index = at; index <= last; index += 1) {
+        if (index > at) text += before[index - from];
+        text += replacing[index - from];
+        if (kept[index - from]) text += source.display[index];
+      }
+      typed(text);
+    }
+    at = last;
+  }
+  typed(before[to - from]);
+  return pieces;
+}
+
+// Formatting commands an edit may empty, split around a paragraph break, or
+// trim a leading space from.
+const TEXT_STYLE_COMMAND = /^\\(?:textbf|textit|textsl|textsc|texttt|textsf|textrm|textup|textmd|textnormal|emph|underline)$/;
+
+// Joins the pieces of an edited block into its new source and tidies what the
+// edit did to groups. Every character carries the piece it came from (negative
+// for text the author typed), so a group the source already had is told apart
+// from one this edit changed.
+function tidyEditedSource(pieces) {
+  const edited = { text: "", origin: [] };
+  for (const [index, piece] of pieces.entries()) {
+    edited.text += piece.text;
+    for (let count = 0; count < piece.text.length; count += 1) edited.origin.push(piece.typed ? -1 - index : index);
+  }
+  dropEmptiedFormatting(edited);
+  // Moving a blank line out can empty a command again.
+  if (keepParagraphBreaksOutsideGroups(edited)) dropEmptiedFormatting(edited);
+  moveLeadingSpaceOutOfGroups(edited);
+  return edited.text;
+}
+
+// Replaces edited.text[start, end) with `text`, whose characters get `origin`.
+function spliceEdited(edited, start, end, text, origin) {
+  edited.text = `${edited.text.slice(0, start)}${text}${edited.text.slice(end)}`;
+  edited.origin = [...edited.origin.slice(0, start), ...origin, ...edited.origin.slice(end)];
+}
+
+// The groups open at `position`: [{ open, command }], innermost last. Escaped
+// characters, \verb text and % comments are skipped; in a URL a % is text.
+function openGroupsAt(text, position) {
+  const open = [];
+  for (let at = 0; at < position; at += 1) {
+    const character = text[at];
+    const verb = character === "\\" ? /^\\verb\*?([^a-zA-Z\s*])/.exec(text.slice(at, at + 7)) : null;
+    if (verb) {
+      const close = text.indexOf(verb[1], at + verb[0].length);
+      at = close < 0 ? at + verb[0].length - 1 : close;
+    } else if (character === "\\") at += 1;
+    else if (character === "%" && !/^\\(?:url|nolinkurl|path|href)/.test(open.at(-1)?.command || "")) {
+      const lineEnd = text.indexOf("\n", at);
+      if (lineEnd < 0 || lineEnd >= position) break;
+      at = lineEnd;
+    } else if (character === "{") {
+      open.push({ open: at, command: commandBeforeGroup(text, at) });
+    } else if (character === "}") open.pop();
+  }
+  return open;
+}
+
+// The command a "{" belongs to, with the arguments before it: "\\emph",
+// "\\textcolor{red}", "\\footnote[7]"; "" for a bare group.
+function commandBeforeGroup(text, open) {
+  let at = open;
+  for (;;) {
+    const closer = text[at - 1];
+    if (closer !== "}" && closer !== "]") break;
+    const opener = closer === "}" ? "{" : "[";
+    let depth = 0;
+    let index = at - 1;
+    for (; index >= 0; index -= 1) {
+      if (text[index] === closer && text[index - 1] !== "\\") depth += 1;
+      else if (text[index] === opener && text[index - 1] !== "\\" && (depth -= 1) === 0) break;
+    }
+    if (index < 0) return "";
+    at = index;
+  }
+  const name = text.slice(0, at).match(/\\[A-Za-z]+\*?\s*$/)?.[0];
+  return name ? text.slice(at - name.length, open) : "";
+}
+
+function closingBrace(text, open) {
+  let depth = 0;
+  for (let at = open; at < text.length; at += 1) {
+    if (text[at] === "\\") at += 1;
+    else if (text[at] === "{") depth += 1;
+    else if (text[at] === "}" && (depth -= 1) === 0) return at;
+  }
+  return -1;
+}
+
+// A blank line the author typed never stays inside a group: the parser splits
+// paragraphs at blank lines, so "\textbf{b\n\n}here" became two blocks with an
+// unclosed brace each. The break moves after the group when nothing follows
+// it there, before the group when nothing precedes it, and otherwise splits a
+// formatting command in two ("\emph{one}\n\n\emph{two}"). Inside any other
+// group it becomes a plain line break. True when anything moved.
+function keepParagraphBreaksOutsideGroups(edited) {
+  // Each change moves one break out of one group; the bound is a safety net.
+  let changes = 0;
+  for (let from = 0; changes < 200;) {
+    const at = edited.text.indexOf("\n\n", from);
+    if (at < 0) break;
+    from = at + 1;
+    if (edited.origin[at] >= 0) continue;
+    const group = openGroupsAt(edited.text, at).at(-1);
+    if (!group) continue;
+    const close = closingBrace(edited.text, group.open);
+    if (close < at) continue;
+    changes += 1;
+    const breakOrigin = edited.origin.slice(at, at + 2);
+    const commandStart = group.open - group.command.length;
+    if (!edited.text.slice(at + 2, close).trim()) {
+      const moved = edited.text.slice(at + 2, close + 1);
+      spliceEdited(edited, at, close + 1, `${moved}\n\n`, [...edited.origin.slice(at + 2, close + 1), ...breakOrigin]);
+    } else if (!edited.text.slice(group.open + 1, at).trim() && group.command && !/^\\footnote/.test(group.command)) {
+      // Not out of a footnote: its mark would move to the next paragraph.
+      const moved = edited.text.slice(commandStart, at);
+      spliceEdited(edited, commandStart, at + 2, `\n\n${moved}`, [...breakOrigin, ...edited.origin.slice(commandStart, at)]);
+    } else if (TEXT_STYLE_COMMAND.test(group.command.trim())) {
+      // Only a bare formatting command can be reopened as it was.
+      const command = group.command.trim();
+      const added = `}\n\n${command}{`;
+      spliceEdited(edited, at, at + 2, added, added.split("").map(() => breakOrigin[0]));
+    } else {
+      spliceEdited(edited, at, at + 2, "\n", [breakOrigin[0]]);
+    }
+    from = 0;
+  }
+  return changes > 0;
+}
+
+// Drops a formatting command whose text the edit deleted entirely:
+// "\textbf{}" keeps invisible formatting at that spot and clutters the source.
+// When the author's new text sits right before or after it, the text moves
+// inside instead, so it keeps the formatting the page showed there. A command
+// that was already empty in the source (both braces from one piece) stays.
+function dropEmptiedFormatting(edited) {
+  const isTyped = (at) => edited.origin[at] < 0;
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const match of edited.text.matchAll(/(\\[A-Za-z]+)\{\}/g)) {
+      if (!TEXT_STYLE_COMMAND.test(match[1])) continue;
+      const { text, origin } = edited;
+      const start = match.index;
+      const close = start + match[0].length - 1;
+      if (origin[close - 1] === origin[close]) continue;
+      // The new text next to the command, preferring the text before it: that
+      // is where a replacement for the deleted run was put.
+      let moveFrom = start;
+      while (moveFrom > 0 && isTyped(moveFrom - 1) && origin[moveFrom - 1] === origin[start - 1]) moveFrom -= 1;
+      let moveTo = close + 1;
+      if (moveFrom === start) {
+        while (moveTo < text.length && isTyped(moveTo) && origin[moveTo] === origin[close + 1]) moveTo += 1;
+      }
+      const moved = moveFrom < start ? text.slice(moveFrom, start) : text.slice(close + 1, moveTo);
+      const movedOrigin = moveFrom < start ? origin.slice(moveFrom, start) : origin.slice(close + 1, moveTo);
+      const end = moveFrom < start ? close + 1 : moveTo;
+      // Only words move in, never just spaces or a blank line.
+      if (/\S/.test(moved) && !moved.includes("\n\n")) {
+        spliceEdited(edited, moveFrom, end, `${text.slice(start, close)}${moved}}`, [...origin.slice(start, close), ...movedOrigin, origin[close]]);
+      } else {
+        spliceEdited(edited, start, close + 1, "", []);
+      }
+      changed = true;
+      break;
+    }
+  }
+}
+
+// "need\emph{ words}": the page does not show a space at the start of a group,
+// so where the edit put text right before such a group the space moves out in
+// front: "need \emph{words}". Groups the edit did not touch stay as they were.
+function moveLeadingSpaceOutOfGroups(edited) {
+  for (const match of [...edited.text.matchAll(/(\\[A-Za-z]+)\{ /g)].reverse()) {
+    const start = match.index;
+    const space = start + match[0].length - 1;
+    if (!TEXT_STYLE_COMMAND.test(match[1]) || start === 0 || /\s/.test(edited.text[start - 1])) continue;
+    if (edited.text[space + 1] === "}") continue;
+    const before = edited.origin[start - 1];
+    if (before >= 0 && before === edited.origin[start]) continue;
+    spliceEdited(edited, start, space + 1, ` ${edited.text.slice(start, space)}`, [edited.origin[space], ...edited.origin.slice(start, space)]);
+  }
+}
+
 async function performSave({ force = false } = {}) {
   const editing = state.editing;
   const documentAtStart = state.document;
@@ -3511,26 +3908,11 @@ async function performSave({ force = false } = {}) {
   let failed = false;
   setSaveState("Saving…", true);
   try {
-    const oldDisplay = editing.block.display;
     const nextDisplay = unwrapPastedHeadingCommand(
       canonicalEditableText(editing.element),
       editing.block,
     );
-    let prefix = 0;
-    while (prefix < oldDisplay.length && prefix < nextDisplay.length && oldDisplay[prefix] === nextDisplay[prefix]) prefix += 1;
-    let suffix = 0;
-    while (
-      suffix < oldDisplay.length - prefix &&
-      suffix < nextDisplay.length - prefix &&
-      oldDisplay[oldDisplay.length - 1 - suffix] === nextDisplay[nextDisplay.length - 1 - suffix]
-    ) suffix += 1;
-    const oldEnd = oldDisplay.length - suffix;
-    const rawStart = prefix < oldDisplay.length
-      ? editing.block.displayStarts[prefix]
-      : (editing.block.displayEnds.at(-1) ?? editing.block.raw.length);
-    const rawEnd = oldEnd > prefix ? editing.block.displayEnds[oldEnd - 1] : rawStart;
-    const replacement = nextDisplay.slice(prefix, nextDisplay.length - suffix);
-    const nextRaw = `${editing.block.raw.slice(0, rawStart)}${replacement}${editing.block.raw.slice(rawEnd)}`;
+    const nextRaw = rawTextForDisplayEdit(editing.block, nextDisplay);
     const nextDocument = await api("/api/save", {
       method: "POST",
       body: JSON.stringify({
@@ -3556,6 +3938,18 @@ async function performSave({ force = false } = {}) {
     const sameShape = nextDocument.blocks.length === state.document.blocks.length;
     const reviewPreviewWasHidden = editing.element.dataset.reviewPreviewHidden === "true";
     state.document = nextDocument;
+    // The author may have typed on while this save was on its way. That edit
+    // was captured against the block as it was before this save; sent as is,
+    // it fails as "the paragraph changed". It continues from the saved block.
+    const savedBlock = sameShape ? nextDocument.blocks[editing.blockIndex] : null;
+    if (savedBlock) {
+      editing.element.dataset.blockId = savedBlock.id;
+      editing.element.reviewBlock = savedBlock;
+      if (state.editing?.element === editing.element) {
+        state.editing.block = savedBlock;
+        state.editing.blockId = savedBlock.id;
+      }
+    }
     await refreshCompiledOutline({ render: false });
     if (reviewPreviewWasHidden) {
       await refreshRequests();
@@ -3764,13 +4158,15 @@ function selectionContext() {
     }))
     .filter((segment) => segment.end > segment.start);
   if (!segments.length || absoluteEnd <= absoluteStart) return null;
+  // The endpoints may have been pulled inward above, so the ids come from the
+  // blocks the range now starts and ends in, not the elements under the drag.
   return {
     blockIndex: startBlockIndex,
-    blockId: startBlock.dataset.blockId,
+    blockId: firstBlock.id,
     start,
     end,
     endBlockIndex,
-    endBlockId: endBlock.dataset.blockId,
+    endBlockId: lastBlock.id,
     absoluteStart,
     absoluteEnd,
     segments,
@@ -3805,6 +4201,9 @@ function selectionActionRect(range) {
 
 function showSelectionToolbar() {
   const context = selectionContext();
+  // A selection that is gone must not linger: hasLocalDocumentState() reads it
+  // and would keep turning a quiet reload into the external-change banner.
+  if (!context) state.selection = null;
   if (!context || state.editing) {
     dom.selectionToolbar.hidden = true;
     return;
@@ -3936,7 +4335,7 @@ function updateComposerOptionsSummary() {
 function updateScopeHint() {
   updateComposerOptionsSummary();
   if (!dom.scopeHint) return;
-  const selected = state.selection?.selectedText || "";
+  const selected = state.commentDraft?.selectedText || "";
   const short = selected.length > 0 && selected.length < SHORT_SELECTION_CHARS;
   const bySelection = dom.rewriteScope?.value !== "paragraph";
   if (!short || !bySelection) {
@@ -4211,7 +4610,9 @@ async function askCommentQuestionInChat() {
 }
 
 async function submitComment({ responseMode = "rewrite" } = {}) {
-  const selection = state.selection;
+  // The passage the composer quotes and highlights, not the live selection:
+  // selecting other text while writing (to copy it, say) moves state.selection.
+  const selection = state.commentDraft;
   const comment = dom.commentInput.value.trim();
   if (!selection || !comment) {
     showToast("Write a rewrite instruction first.");
@@ -5444,15 +5845,25 @@ function renderRequestLists() {
   for (const card of dom.requestList.querySelectorAll(".request-card")) {
     commentCardResizeObserver?.observe(card);
   }
-  decorateReviewCards(new Map(current.map((request, index) => [request.id, index + 1])));
+  // The same numbers as the badges in the text, which leave out a comment whose
+  // anchor is gone; counting it here shifted every later card by one.
+  decorateReviewCards(currentReviewNumberMap());
   tickRunningStatuses();
   commentCardResizeObserver?.observe(dom.commentComposer);
   applyCommentMarkers();
   positionCommentCards({ restoreScrollTop: previousScrollTop });
 }
 
+// Every agent status change sends a "request" event, so several refreshes are
+// often in flight at once and can resolve out of order. An answer is shown
+// unless one to a later request is already on screen. Each caller waits for
+// its own fetch only and gets its own result or error; what it reads
+// afterwards is at least as new as that answer.
 async function refreshRequests() {
+  const token = (state.requestsToken = (state.requestsToken || 0) + 1);
   const requests = await api("/api/requests");
+  if (token < state.requestsShownToken) return;
+  state.requestsShownToken = token;
   state.requests = Array.isArray(requests) ? requests : [];
   // The cards always update. The manuscript re-renders only when that cannot
   // destroy a selection or an edit in progress; otherwise it is replayed later.
@@ -5980,6 +6391,7 @@ function connectEvents() {
   let events = null;
   let retryTimer = null;
   let attempts = 0;
+  let everOpened = false;
   const disconnect = () => {
     clearTimeout(retryTimer);
     retryTimer = null;
@@ -6003,7 +6415,10 @@ function connectEvents() {
     const source = new EventSource("/api/events");
     events = source;
     events.onopen = () => {
-      const reconnected = attempts > 0 || dom.connectionStatus?.classList.contains("offline");
+      // Every open after the first is a reconnect, including the one after the
+      // stream was closed on purpose while the tab was hidden.
+      const reconnected = everOpened || attempts > 0 || dom.connectionStatus?.classList.contains("offline");
+      everOpened = true;
       attempts = 0;
       setConnectionStatus(true);
       // Events sent while the stream was down are gone; re-read what they
@@ -6011,6 +6426,7 @@ function connectEvents() {
       if (reconnected) {
         refreshRequests().catch(() => {});
         refreshUndo();
+        followMissedDocumentChange();
       }
       // A server restart can interrupt a local Codex process without emitting
       // its final chat event. Re-read persisted state as soon as SSE reconnects
@@ -6026,9 +6442,10 @@ function connectEvents() {
     };
     events.addEventListener("compile", (event) => applyCompileState(JSON.parse(event.data)));
     events.addEventListener("undo", (event) => applyUndoStatus(JSON.parse(event.data)));
-    events.addEventListener("request", () => refreshRequests());
+    // While the server is down these fetches fail; the reconnect re-reads.
+    events.addEventListener("request", () => refreshRequests().catch(() => {}));
     events.addEventListener("chat", () => {
-      refreshChat({ scroll: !dom.codexChat.hidden });
+      refreshChat({ scroll: !dom.codexChat.hidden }).catch(() => {});
     });
     events.addEventListener("structure-plan", (event) => {
       state.structurePlan = JSON.parse(event.data);
@@ -6066,6 +6483,25 @@ function connectEvents() {
   });
   window.addEventListener("pagehide", disconnect);
   connect();
+}
+
+// A "document" event lost while the stream was down: compare the open file with
+// the disk and do what that event would have done.
+async function followMissedDocumentChange() {
+  const path = state.document?.path;
+  const etag = state.document?.etag;
+  if (!path) return;
+  let disk;
+  try {
+    disk = await api(`/api/document?path=${encodeURIComponent(path)}`);
+  } catch {
+    return;
+  }
+  // Our own save (or another load) has moved the document on meanwhile.
+  if (state.document?.path !== path || state.document?.etag !== etag || state.savePromise) return;
+  if (!disk?.etag || disk.etag === etag) return;
+  if (!hasLocalDocumentState()) reloadDocumentQuietly(path);
+  else showExternalChangeBanner();
 }
 
 // Local state that a reload from disk would discard or confuse: an unsaved

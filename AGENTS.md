@@ -106,6 +106,8 @@ helper before adding one.
 - A bug fix comes with a test that fails without it. Parser changes need a round-trip test: the
   blocks must tile the source exactly and an edit must change only the edited construct.
 - The suite runs test files concurrently. Do not share state between files.
+- There are no browser tests. `tests/frontend.test.mjs` runs named functions cut unchanged out of
+  `public/app.js` in `node:vm` with plain stubs (`loadAppFunctions()`); a missing name throws.
 
 ## Style
 
