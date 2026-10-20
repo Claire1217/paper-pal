@@ -944,13 +944,24 @@ async function revertCurrentStructure() {
     : "Discard this approved structure plan? The proposed structure will remain available for revision.");
   if (!confirmed) return;
   dom.revertStructure.disabled = true;
+  let forced = false;
   try {
-    state.structurePlan = await api("/api/structure/revert", { method: "POST", body: "{}" });
+    try {
+      state.structurePlan = await api("/api/structure/revert", { method: "POST", body: "{}" });
+    } catch (error) {
+      // The server refuses to overwrite edits made after the plan was approved
+      // until the author says so; the revert itself can be undone.
+      if (!/changed after this structure plan was approved/i.test(error.message)) throw error;
+      if (!window.confirm(`${error.message}\n\nRevert anyway?`)) return;
+      forced = true;
+      state.structurePlan = await api("/api/structure/revert", { method: "POST", body: JSON.stringify({ force: true }) });
+    }
     state.outlinePreview = false;
     await Promise.all([refreshCompiledOutline({ render: false }), loadStructure({ force: true })]);
     if (state.document?.path) await loadDocument(state.document.path, { quiet: true, discardEditing: true });
     renderOutline();
-    showToast(applied ? "The applied restructuring was reverted." : "The approved plan was discarded. No source text changed.", 4800);
+    if (forced) showToast("The structure plan was reverted, together with the later edits. Use Undo to bring them back.", 6000);
+    else showToast(applied ? "The applied restructuring was reverted." : "The approved plan was discarded. No source text changed.", 4800);
   } catch (error) {
     showToast(error.message, 6000);
   } finally {

@@ -131,7 +131,7 @@ and `capabilities: { readRepo }`.
 | POST | `/api/confirm` | Mark a selection as confirmed. State only. | `path`, `etag`, and `segments: [{ blockIndex, blockId, start, end }]` or the same four fields at top level. Offsets index the block's raw text. |
 | POST | `/api/unconfirm` | Remove confirmation. State only. | Same body. |
 | GET | `/api/undo` | Undo status: `available`, `label`, `kind`, `path`, `createdAt`, `depth`. | |
-| POST | `/api/undo` | Undo the last action (edit, confirm, unconfirm, accepted proposal, linked change set). **Writes source** when the action did. | No body. |
+| POST | `/api/undo` | Undo the last action (edit, confirm, unconfirm, accepted proposal, linked change set, structure revert). **Writes source** when the action did. Undoing a structure revert makes the plan active again. | No body. |
 
 ### Comments and proposals
 
@@ -170,7 +170,7 @@ A "request" is one comment with its conversation, proposal and history.
 | POST | `/api/structure/confirm` | Confirm a structure proposal from chat as the plan; snapshots sources and review state. `201`. | `sessionId`, `proposal`, `force` |
 | POST | `/api/structure/section-rewrite` | Create rewrite requests for one section of the plan. `202`. | `sectionId`, `autoProcess` |
 | POST | `/api/structure/mark-applied` | Mark plan sections as applied. | `sectionIds` |
-| POST | `/api/structure/revert` | Restore every source file and the review state captured by the plan. **Writes source.** | none |
+| POST | `/api/structure/revert` | Restore every source file and the review state captured by the plan, and push an undo entry. `409` when a file changed after the plan was approved (or, once applied, after it was applied), unless `force` is `true`. **Writes source.** | `force` |
 
 ### Chat
 

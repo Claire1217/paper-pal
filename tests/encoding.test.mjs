@@ -357,7 +357,8 @@ describe("structure plans and files that are not UTF-8", () => {
     const document = await getDocument(server, "sections/utf8.tex");
     const block = document.blocks.find((item) => item.raw.startsWith("The second UTF-8 paragraph"));
     await saveBlock(server, document, block, block.raw.replace("to change", "that changed"));
-    const reverted = await apiOk(server, "/api/structure/revert", { method: "POST" });
+    // The save came after the plan was approved, so the revert must be confirmed.
+    const reverted = await apiOk(server, "/api/structure/revert", { method: "POST", body: { force: true } });
     assert.equal(reverted.status, "reverted");
     assert.ok((await fs.readFile(utf8File)).equals(Buffer.from(UTF8_TEXT)), "the UTF-8 file is restored");
     await assertUntouched(latin1File, latin1Before, "structure revert");
@@ -378,5 +379,95 @@ describe("structure plans and files that are not UTF-8", () => {
     assert.match(result.value.error, NOT_UTF8);
     await assertUntouched(latin1File, reencoded, "refused revert (Latin-1 file)");
     await assertUntouched(utf8File, utf8Edited, "refused revert (UTF-8 file of the same plan)");
+  });
+});
+
+describe("reverting a structure plan keeps later edits", () => {
+  const MAIN_TEXT = "\\documentclass{article}\n\\begin{document}\n\n\\section{Intro}\n\nFirst intro paragraph.\n\n\\section{Method}\n\nMethod paragraph.\n\n\\end{document}\n";
+  let project;
+  let server;
+  let mainFile;
+
+  before(async () => {
+    project = await makeProject({ files: { "main.tex": MAIN_TEXT } });
+    mainFile = path.join(project.root, "main.tex");
+    server = await startServer(project.root);
+  });
+
+  async function confirmIntroPlan() {
+    await fs.writeFile(mainFile, MAIN_TEXT, "utf8");
+    const structure = await apiOk(server, "/api/structure");
+    const intro = structure.sections.find((section) => section.title === "Intro");
+    const plan = await apiOk(server, "/api/structure/confirm", {
+      method: "POST",
+      body: { proposal: { summary: "test plan", sections: [{ sectionId: intro.id, title: "Intro", nodes: [{ title: "Intro", kind: "paragraph" }] }] } },
+    });
+    assert.equal(plan.status, "confirmed");
+    return plan;
+  }
+
+  async function editParagraph(before, after) {
+    const document = await getDocument(server, "main.tex");
+    const block = document.blocks.find((item) => item.raw === before);
+    await saveBlock(server, document, block, after);
+  }
+
+  it("refuses to revert over edits made after the plan was approved, and keeps them", async () => {
+    await confirmIntroPlan();
+    await editParagraph("Method paragraph.", "Method paragraph, rewritten by hand.");
+    await editParagraph("First intro paragraph.", "First intro paragraph, also edited.");
+    const edited = await fs.readFile(mainFile, "utf8");
+    const undoBefore = await apiOk(server, "/api/undo");
+
+    const refused = await api(server, "/api/structure/revert", { method: "POST" });
+    assert.equal(refused.status, 409);
+    assert.match(refused.value.error, /^main\.tex changed after this structure plan was approved/);
+    assert.equal(await fs.readFile(mainFile, "utf8"), edited, "the later edits are still on disk");
+    assert.equal((await apiOk(server, "/api/structure/plan")).status, "confirmed");
+    assert.deepEqual(await apiOk(server, "/api/undo"), undoBefore);
+  });
+
+  it("reverts on explicit confirmation and lets Undo bring the later edits back", async () => {
+    await confirmIntroPlan();
+    await editParagraph("Method paragraph.", "Method paragraph, rewritten by hand.");
+    const edited = await fs.readFile(mainFile, "utf8");
+
+    const reverted = await apiOk(server, "/api/structure/revert", { method: "POST", body: { force: true } });
+    assert.equal(reverted.status, "reverted");
+    assert.equal(await fs.readFile(mainFile, "utf8"), MAIN_TEXT);
+    const undo = await apiOk(server, "/api/undo");
+    assert.equal(undo.kind, "structure-revert");
+
+    const undone = await apiOk(server, "/api/undo", { method: "POST" });
+    assert.equal(undone.undone.kind, "structure-revert");
+    assert.equal(await fs.readFile(mainFile, "utf8"), edited, "Undo restores the text from before the revert");
+    assert.equal((await apiOk(server, "/api/structure/plan")).status, "confirmed", "Undo makes the plan active again");
+    await apiOk(server, "/api/structure/revert", { method: "POST", body: { force: true } });
+  });
+
+  it("reverts without confirmation when nothing changed after the plan was applied", async () => {
+    await confirmIntroPlan();
+    await editParagraph("First intro paragraph.", "First intro paragraph, restructured.");
+    await apiOk(server, "/api/structure/mark-applied", { method: "POST", body: {} });
+    const reverted = await apiOk(server, "/api/structure/revert", { method: "POST" });
+    assert.equal(reverted.status, "reverted");
+    assert.equal(await fs.readFile(mainFile, "utf8"), MAIN_TEXT);
+  });
+
+  it("answers 400, not 500, for null entries in proposal sections and selection segments", async () => {
+    for (const sections of [[null], [null, 5, "x"]]) {
+      const result = await api(server, "/api/structure/confirm", { method: "POST", body: { proposal: { sections } } });
+      assert.equal(result.status, 400, JSON.stringify(sections));
+    }
+    const document = await getDocument(server, "main.tex");
+    const block = document.blocks.find((item) => item.kind === "paragraph");
+    const valid = { blockIndex: block.index, blockId: block.id, start: 0, end: 3 };
+    for (const endpoint of ["/api/confirm", "/api/unconfirm"]) {
+      for (const segments of [[null], [valid, null]]) {
+        const result = await api(server, endpoint, { method: "POST", body: { path: "main.tex", etag: document.etag, segments } });
+        assert.equal(result.status, 400, `${endpoint} ${JSON.stringify(segments)}`);
+      }
+    }
+    assert.doesNotMatch(server.output(), /TypeError/);
   });
 });

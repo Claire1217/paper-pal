@@ -70,6 +70,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - An accented or other non-ASCII character in the compile log or an agent's
   trace could show as two replacement characters when the program's output
   arrived split inside that character. Output is now decoded per stream.
+- **Reverting a structure plan discarded every edit made after the plan was
+  approved, and Undo could not bring them back.** Paper Pal now refuses the
+  revert when a file of the plan changed after it was approved (or after it was
+  applied) and asks the author to confirm. A confirmed revert is an undo entry:
+  Undo restores the text from before the revert and makes the plan active again.
+- A `null` entry in `proposal.sections` (`/api/structure/confirm`) or in
+  `segments` (`/api/confirm`, `/api/unconfirm`, `/api/rewrite`) answered 500
+  "Internal error". It now answers 400.
 - **Citations showed "key (n.d.)" for entries exported by the ACL Anthology,
   JabRef and many hand-kept `.bib` files.** Values in double quotes
   (`title = "..."`), bare numbers (`year = 2019`), `@string` names
