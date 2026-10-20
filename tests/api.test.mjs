@@ -97,9 +97,10 @@ describe("API adapter: OpenAI-compatible protocol", () => {
   });
 
   it("retries once after a network error and reports it without the key", async () => {
-    // A listener that drops every connection: a failure on the wire, and no
-    // other test can take the port while it is held.
-    const dropper = net.createServer((socket) => socket.destroy());
+    // A listener that resets every connection: a failure on the wire, and no
+    // other test can take the port while it is held. A reset, not a plain
+    // close: Node 20's fetch waits out its timeout on a socket closed at once.
+    const dropper = net.createServer((socket) => socket.resetAndDestroy());
     await new Promise((resolve) => dropper.listen(0, "127.0.0.1", resolve));
     after(() => new Promise((resolve) => dropper.close(resolve)));
     const run = await runAdapter(["--base-url", `http://127.0.0.1:${dropper.address().port}/v1`, "--model", "m", "--key-env", "MOCK_KEY"], { env: { MOCK_KEY: KEY } });
