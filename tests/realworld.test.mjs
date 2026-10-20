@@ -485,6 +485,52 @@ describe("real-world manuscript: .bib exports", () => {
   });
 });
 
+describe("real-world manuscript: malformed .bib files", () => {
+  let citations;
+
+  before(async () => {
+    // One mistake per file, each followed by an entry that must survive it.
+    const project = await makeProject({
+      files: {
+        "main.tex": "We cite \\citet{open1}, \\citet{after1}, \\citet{escaped2}, \\citet{junk3}, \\citet{after4} and \\citet{pct5}.\n",
+        "unclosed-quote.bib": [
+          "@article{open1, title = \"Oops a typo, year = {2019}}",
+          "@article{after1, author = {Lee, Ann}, title = {After an Unclosed Quote}, year = {2020}}",
+          "",
+        ].join("\n"),
+        "escaped-quote.bib": "@article{escaped2, author = {Field, Rhys}, title = \"The \\\"Best\\\" Wool\", year = {2019}}\n",
+        "junk.bib": "@article{junk3, author = {Kim, Bo}, title = {T}, junk junk, year = {2021}}\n",
+        "unbalanced-comment.bib": [
+          "@comment{ unbalanced { here }",
+          "@article{after4, author = {Ito, Ren}, title = {After a Comment}, year = {2022}}",
+          "",
+        ].join("\n"),
+        "percent.bib": "@misc{pct5, author = {Ode, Sam}, title = {P}, year = {2023}, url = {https://example.org/a%20b.pdf}}\n",
+      },
+    });
+    const server = await startServer(project.root);
+    const document = await getDocument(server, "main.tex");
+    citations = Object.fromEntries(document.references.citations.map((item) => [item.key, item]));
+  });
+  after(cleanupAll);
+
+  it("keeps later entries and fields after an unclosed quote, stray text or an unbalanced @comment", () => {
+    assert.ok(citations.open1, "the broken entry is still listed");
+    assert.doesNotMatch(citations.open1.title, /After an Unclosed Quote/);
+    assert.equal(citations.after1?.year, "2020");
+    assert.equal(citations.after1.author, "Lee");
+    assert.match(citations.escaped2.title, /^The .*Wool$/, "a \\\" does not end the quoted value");
+    assert.equal(citations.escaped2.year, "2019");
+    assert.equal(citations.junk3.year, "2021");
+    assert.equal(citations.after4?.year, "2022");
+  });
+
+  it("keeps a percent sign in a URL", () => {
+    assert.equal(citations.pct5.url, "https://example.org/a%20b.pdf");
+    assert.equal(citations.pct5.pdfUrl, "https://example.org/a%20b.pdf");
+  });
+});
+
 describe("real-world manuscript: every editable block round-trips", () => {
   let project;
   let server;

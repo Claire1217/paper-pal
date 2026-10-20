@@ -2018,28 +2018,31 @@ function auxGroups(value, startAt) {
 const bibMonths = Object.assign(Object.create(null), Object.fromEntries(["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
   .map((month) => [month.slice(0, 3), month[0].toUpperCase() + month.slice(1)])));
 
-// One field value at `at`: {braced}, "quoted" (ends at a " outside braces),
-// a number, or an @string name, joined with #. Returns the value with its
-// TeX braces kept, and where reading stopped.
-function readBibValue(bib, at, strings) {
+// One field value at `at`: {braced}, "quoted" (ends at a " outside braces
+// that is not \"), a number, or an @string name, joined with #. Returns the
+// value with its TeX braces kept, and where reading stopped. Nothing is read
+// past `limit`, the end of the entry, so an unclosed quote or brace costs
+// one entry and not the rest of the file.
+function readBibValue(bib, at, strings, limit) {
   let value = "";
   let cursor = at;
   for (;;) {
     while (/\s/.test(bib[cursor] || "")) cursor += 1;
     if (bib[cursor] === "{") {
       const group = braceGroupAt(bib, cursor);
-      if (!group) return { value, end: bib.length };
+      if (!group || group.end > limit) return { value: value + bib.slice(cursor + 1, limit), end: limit };
       value += group.value;
       cursor = group.end;
     } else if (bib[cursor] === "\"") {
       let depth = 0;
       let close = cursor + 1;
-      for (; close < bib.length; close += 1) {
+      for (; close < limit; close += 1) {
         if (bib[close] === "{" && bib[close - 1] !== "\\") depth += 1;
         if (bib[close] === "}" && bib[close - 1] !== "\\") depth -= 1;
-        if (bib[close] === "\"" && depth <= 0) break;
+        if (depth < 0 || (bib[close] === "\"" && bib[close - 1] !== "\\" && depth === 0)) break;
       }
       value += bib.slice(cursor + 1, close);
+      if (close >= limit || depth < 0) return { value, end: close };
       cursor = close + 1;
     } else {
       const token = /^[^\s,#{}()"=]+/.exec(bib.slice(cursor, cursor + 200))?.[0] || "";
@@ -2070,11 +2073,12 @@ function parseBibEntries(bib) {
     const closer = match[2] === "{" ? "}" : ")";
     let cursor = entryPattern.lastIndex;
     if (type === "comment" || type === "preamble") {
+      // Unbalanced: carry on right after the opener, as BibTeX does.
       if (match[2] === "{") {
-        cursor = braceGroupAt(bib, cursor - 1)?.end ?? bib.length;
+        cursor = braceGroupAt(bib, cursor - 1)?.end ?? cursor;
       } else {
         const close = bib.indexOf(")", cursor);
-        cursor = close < 0 ? bib.length : close + 1;
+        cursor = close < 0 ? cursor : close + 1;
       }
       entryPattern.lastIndex = cursor;
       continue;
@@ -2085,9 +2089,12 @@ function parseBibEntries(bib) {
       key = keyMatch[1];
       cursor += keyMatch[0].length;
     }
-    // A { } entry may hold something this reader gives up on; resume after
-    // its closing brace rather than inside it.
+    // The entry ends at its closing brace. A ( ) entry, or one whose braces
+    // do not balance, ends at the next line that starts with @.
     const braceEnd = match[2] === "{" ? braceGroupAt(bib, entryPattern.lastIndex - 1)?.end || 0 : 0;
+    const nextEntry = /\n[ \t]*@/g;
+    nextEntry.lastIndex = cursor;
+    const limit = braceEnd ? braceEnd - 1 : nextEntry.exec(bib)?.index ?? bib.length;
     const fields = Object.create(null);
     for (;;) {
       while (/[\s,]/.test(bib[cursor] || "")) cursor += 1;
@@ -2097,10 +2104,19 @@ function parseBibEntries(bib) {
         cursor = lineEnd < 0 ? bib.length : lineEnd;
         continue;
       }
-      if (cursor >= bib.length || bib[cursor] === closer) break;
+      if (cursor >= limit || bib[cursor] === closer) break;
       const nameMatch = /^([^\s,=#{}()"]+)\s*=/.exec(bib.slice(cursor, cursor + 200));
-      if (!nameMatch) break;
-      const read = readBibValue(bib, cursor + nameMatch[0].length, strings);
+      if (!nameMatch) {
+        // Stray text: skip to the next comma outside braces and keep reading.
+        let depth = 0;
+        for (; cursor < limit; cursor += 1) {
+          if (bib[cursor] === "{") depth += 1;
+          if (bib[cursor] === "}") depth = Math.max(0, depth - 1);
+          if (depth === 0 && (bib[cursor] === "," || bib[cursor] === closer)) break;
+        }
+        continue;
+      }
+      const read = readBibValue(bib, cursor + nameMatch[0].length, strings, limit);
       fields[nameMatch[1].toLowerCase()] ??= read.value;
       cursor = read.end;
     }
@@ -2111,6 +2127,12 @@ function parseBibEntries(bib) {
     entryPattern.lastIndex = Math.max(cursor, entryPattern.lastIndex);
   }
   return entries;
+}
+
+// url and doi are verbatim in BibTeX: a % is part of the address, not a TeX
+// comment. Drop braces, line breaks and the escapes some exporters add.
+function bibVerbatim(value) {
+  return value.replace(/\\([%_&#$~])/g, "$1").replace(/[{}\s]/g, "");
 }
 
 // Split at a pattern only outside braces: "and", spaces and commas inside
@@ -2215,8 +2237,8 @@ async function projectReferences() {
       citations[key].venue = stripTex(field("journal") || field("booktitle"));
       // Only web links leave the server: a .bib pasted from elsewhere must not
       // be able to hand the browser a javascript: or data: URL.
-      citations[key].url = safeHttpUrl(stripTex(field("url")));
-      citations[key].doi = stripTex(field("doi")).replace(/^https?:\/\/(?:dx[.])?doi[.]org\//i, "");
+      citations[key].url = safeHttpUrl(bibVerbatim(field("url")));
+      citations[key].doi = bibVerbatim(field("doi")).replace(/^https?:\/\/(?:dx[.])?doi[.]org\//i, "");
       if (!/^10[.]\d{4,9}\/\S+$/.test(citations[key].doi)) citations[key].doi = "";
       citations[key].abstract = stripTex(field("abstract"));
       const paperUrl = citations[key].url;

@@ -26,6 +26,9 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - A corporate author written `{{Open Data Collective}}` showed only its last
   word. A wholly braced name is now shown whole, and `and` inside braces no
   longer splits a name.
+- A `.bib` link with a `%` in it (`url = {https://example.org/a%20b.pdf}`) was
+  cut at the `%`, and its PDF link was lost. `url` and `doi` are now read
+  verbatim, as BibTeX reads them.
 - **Codex runs failed with "the argument '--dangerously-bypass-approvals-and-sandbox'
   cannot be used with '--ask-for-approval'"** when the `codex` on PATH is a
   wrapper that adds that flag. Paper Pal now passes the approval policy as a
