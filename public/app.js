@@ -942,6 +942,10 @@ async function confirmCurrentStructure() {
 
 async function revertCurrentStructure() {
   if (!activeStructurePlan()) return;
+  // The revert reloads the document. Typed text is saved first, so the server
+  // can see it among the later changes; text a conflict keeps from disk is
+  // discarded only after the author agrees.
+  if (!(await mayReplaceDocument(true))) return;
   const applied = activeStructurePlan().sections?.some((section) => section.status === "applied");
   const confirmed = window.confirm(applied
     ? "Restore every source file in this restructuring plan to its pre-structure snapshot?"
@@ -3960,11 +3964,11 @@ function editedRawText(editing) {
 
 // What a refused save means for the typed text. "conflict": the paragraph
 // also changed on disk, and "Keep my edit" can still write the text over it.
-// "gone": the paragraph was removed or rewritten on disk, or cannot be told
-// apart from another one, so no save can place the text; only copying it
+// "gone": the paragraph was removed, rewritten or moved on disk, or cannot be
+// told apart from another one, so no save can place the text; only copying it
 // keeps it. Anything else is worth retrying.
 function saveErrorKind(message) {
-  if (/\bparagraph you were editing no longer exists\b|\bmore than one paragraph\b/i.test(message)) return "gone";
+  if (/\bparagraph you were editing no longer exists\b|\bmore than one paragraph\b|\bcannot tell which paragraph\b/i.test(message)) return "gone";
   if (/\b(?:file|paragraph|source) changed\b/i.test(message)) return "conflict";
   return null;
 }
@@ -4053,7 +4057,7 @@ async function performSave({ force = false } = {}) {
     if (kind) {
       state.externalChange = true;
       dom.externalChangeMessage.textContent = kind === "gone"
-        ? "The paragraph you were editing was removed or rewritten on disk, so your edit cannot be saved. Your text is still here: use Copy my text before you use the disk version."
+        ? "The paragraph you were editing was removed, rewritten or moved on disk, so your edit cannot be saved. Your text is still here: use Copy my text before you use the disk version."
         : "The source changed while you were editing. Your text is still preserved here.";
       dom.externalKeep.hidden = kind === "gone";
       dom.externalCopy.hidden = false;

@@ -618,6 +618,7 @@ describe("front end", () => {
     }
     const gone = "The paragraph you were editing no longer exists on disk. Copy your text, then reload the document.";
     const ambiguous = "The document changed and more than one paragraph on disk now looks like the one you were editing. Copy your text, then reload the document.";
+    const unplaced = "The paragraph you were editing moved and changed on disk, so Keep my edit cannot tell which paragraph to replace. Copy your text, then reload the document.";
 
     it("sends the neighbouring paragraphs, so the server can tell them from the edited one", async () => {
       const { app, requests } = setup();
@@ -626,7 +627,7 @@ describe("front end", () => {
       assert.equal(requests[0].nextText, "After text.");
     });
 
-    for (const message of [gone, ambiguous]) {
+    for (const message of [gone, ambiguous, unplaced]) {
       it(`offers to copy the text, not "Keep my edit", when the server says: ${message.split(".")[0]}`, async () => {
         const { app } = setup({ error: message });
         assert.equal(await app.performSave(), false);
@@ -635,7 +636,7 @@ describe("front end", () => {
         assert.equal(app.dom.externalChange.hidden, false);
         assert.equal(app.dom.externalKeep.hidden, true);
         assert.equal(app.dom.externalCopy.hidden, false);
-        assert.match(app.dom.externalChangeMessage.textContent, /removed or rewritten on disk/);
+        assert.match(app.dom.externalChangeMessage.textContent, /removed, rewritten or moved on disk/);
         assert.match(app.dom.externalChangeMessage.textContent, /Copy my text/);
       });
     }
@@ -692,6 +693,26 @@ describe("front end", () => {
       app.state.savePromise = saving;
       await app.copyEditedText();
       assert.ok(calls.includes("copy: Alpha text, edited."), calls.join("\n"));
+    });
+
+    it("saves typed text, or asks, before Revert structure reloads the document", async () => {
+      const { app, calls } = setup({ error: gone, confirmAnswer: false });
+      await app.performSave();
+      const reverts = [];
+      const revert = loadAppFunctions(["revertCurrentStructure"], {
+        state: app.state,
+        window: app.window,
+        dom: { revertStructure: {} },
+        activeStructurePlan: () => ({ sections: [{ status: "applied" }] }),
+        mayReplaceDocument: app.mayReplaceDocument,
+        api: async (url) => reverts.push(url),
+        showToast() {},
+        renderStructurePlanControls() {},
+      });
+      await revert.revertCurrentStructure();
+      assert.deepEqual(reverts, [], "the author kept the text, so nothing is reverted");
+      assert.ok(app.state.editing);
+      assert.match(calls.find((call) => call.startsWith("confirm")), /discarded/);
     });
 
     it("asks before Use disk version drops typed text", async () => {

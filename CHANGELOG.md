@@ -17,14 +17,14 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - **"Keep my edit" could overwrite a different paragraph.** After a co-author
   added or removed a paragraph above the one being edited, the forced save
   replaced whatever paragraph now sat at the old position. It now finds the
-  edited paragraph where it moved, also when the co-author edited it, and
-  refuses rather than guess when two paragraphs look equally like it or none
-  does.
+  edited paragraph by its place between the paragraphs around it, also when
+  the co-author edited it, and never takes a look-alike elsewhere for it. When
+  the place is unclear, the save is refused rather than guessed.
 - **An edit to a paragraph that was deleted on disk was merged into the next
   paragraph.** The save now fails, and the page says that the paragraph was
   removed or rewritten on disk. It keeps the typed text on screen, offers
   "Copy my text" instead of "Keep my edit", and asks before Reload, another
-  file or "Use disk version" discards the text.
+  file, "Use disk version" or "Revert structure" discards the text.
 - A save after a change on disk wrote into the first paragraph with the same
   text when a paragraph appears more than once. It now writes into the copy
   that was being edited.

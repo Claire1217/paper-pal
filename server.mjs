@@ -6994,26 +6994,12 @@ async function resolveTrackedChange(body) {
   });
 }
 
-// The page treats both messages as "the paragraph is gone": no save can place
-// the text, so they tell the author to copy it rather than to use the disk
-// version, which would drop it.
+// The page treats these messages as "the edit cannot be placed": no save can
+// put the text anywhere, so they tell the author to copy it rather than to use
+// the disk version, which would drop it.
 const EDITED_PARAGRAPH_GONE = "The paragraph you were editing no longer exists on disk. Copy your text, then reload the document.";
 const EDITED_PARAGRAPH_AMBIGUOUS = "The document changed and more than one paragraph on disk now looks like the one you were editing. Copy your text, then reload the document.";
-
-// Where the edited paragraph sits now when its text is unchanged on disk: at
-// the editor's position if the text is still there, else the copy of that
-// text nearest the position, because paragraphs above it may have been added
-// or removed and the same text can appear more than once. Null when no block
-// has the text any more.
-function unchangedEditedBlock(blocks, body) {
-  const atIndex = blocks[body.blockIndex];
-  if (atIndex?.raw === body.baseText) return atIndex;
-  const copies = blocks.filter((block) => block.raw === body.baseText);
-  if (!copies.length) return null;
-  const nearest = nearestBlock(copies, body.blockIndex);
-  if (!nearest) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
-  return nearest;
-}
+const EDITED_PARAGRAPH_UNPLACED = "The paragraph you were editing moved and changed on disk, so Keep my edit cannot tell which paragraph to replace. Copy your text, then reload the document.";
 
 // Tokens for telling whether two texts are versions of one paragraph: runs of
 // letters and digits, case-folded, with punctuation dropped, and every Han,
@@ -7049,29 +7035,85 @@ const SAME_PARAGRAPH_MIN_LEAD = 0.05;
 // number of paragraphs a co-author adds or removes above while one is open.
 const SAME_PARAGRAPH_SEARCH_RADIUS = 25;
 
-// The edited paragraph when a co-author changed it, perhaps after adding or
-// removing paragraphs above it: the block of the same kind near the old
-// position that is most like the text the author started from. Only a clear
-// winner counts. Merging or forcing the edit into a look-alike would
-// overwrite that paragraph, so a near tie is refused, and so is a position
-// where nothing is similar (the paragraph was deleted or rewritten). A block
-// whose text equals a neighbour the editor saw (previousText, nextText) is
-// that neighbour, unchanged, and never the edited paragraph.
-function changedEditedBlock(blocks, body) {
-  const baseText = String(body.baseText || "");
-  const position = Number(body.blockIndex);
-  const nearby = Number.isInteger(position)
-    ? blocks.slice(Math.max(0, position - SAME_PARAGRAPH_SEARCH_RADIUS), position + SAME_PARAGRAPH_SEARCH_RADIUS + 1)
-    : blocks;
-  const ranked = nearby
-    .filter((block) => !body.blockKind || block.kind === body.blockKind)
-    .filter((block) => block.raw !== body.previousText && block.raw !== body.nextText)
+// The block with this exact text nearest `position`, within the search radius;
+// null when there is none or two are equally near.
+function nearbyBlockWithText(blocks, text, position) {
+  if (typeof text !== "string" || !Number.isFinite(position)) return null;
+  const matches = blocks.filter((block) => block.raw === text && Math.abs(block.index - position) <= SAME_PARAGRAPH_SEARCH_RADIUS);
+  return matches.length ? nearestBlock(matches, position) : null;
+}
+
+// Where the edited paragraph belongs now: between the neighbours the editor
+// saw (previousText, nextText), wherever they sit after paragraphs were added
+// or removed above. `located` when both were found, which pins the place. With
+// one neighbour the place is next to it; with none, the old position.
+function mappedEditedRegion(blocks, body) {
+  const position = Number.isInteger(Number(body.blockIndex)) ? Number(body.blockIndex) : NaN;
+  const previous = nearbyBlockWithText(blocks, body.previousText, position - 1);
+  const next = nearbyBlockWithText(blocks, body.nextText, position + 1);
+  if (previous && next && previous.index < next.index) {
+    return { region: blocks.slice(previous.index + 1, next.index), located: true, anchored: true, position: (previous.index + next.index) / 2 };
+  }
+  if (previous) return { region: blocks.slice(previous.index + 1, previous.index + 2), located: false, anchored: true, position: previous.index + 1 };
+  if (next) return { region: blocks.slice(Math.max(0, next.index - 1), next.index), located: false, anchored: true, position: next.index - 1 };
+  return { region: Number.isFinite(position) && blocks[position] ? [blocks[position]] : [], located: false, anchored: false, position };
+}
+
+function pickNearest(candidates, position) {
+  if (!candidates.length) return null;
+  const nearest = nearestBlock(candidates, position);
+  if (!nearest) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
+  return nearest;
+}
+
+function rankedBySimilarity(candidates, baseText) {
+  return candidates
     .map((block) => ({ block, similarity: paragraphSimilarity(baseText, block.raw) }))
     .sort((left, right) => right.similarity - left.similarity);
-  const [best, next] = ranked;
-  if (!best || best.similarity < SAME_PARAGRAPH_MIN_SIMILARITY) throw new Error(EDITED_PARAGRAPH_GONE);
-  if (next && best.similarity - next.similarity < SAME_PARAGRAPH_MIN_LEAD) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
-  return best.block;
+}
+
+// The block the author edited, after the file changed on disk. Position comes
+// first, because a look-alike elsewhere (the same text, or a paragraph that
+// differs by one setting) can be closer to the old text than the edited
+// paragraph is after a co-author's change:
+// 1. where the paragraph belongs (mappedEditedRegion), its unchanged text;
+// 2. there, the block still similar to it (a co-author edited it);
+// 3. elsewhere, the nearest unchanged copy of it (it was moved);
+// 4. unless the neighbours pinned the place, the clearly most similar block
+//    nearby; "Keep my edit" never writes there, since it is a judgement.
+// Anything ambiguous is refused, never guessed. `placed` is false for 4.
+function locateEditedBlock(blocks, body) {
+  if (typeof body.baseText !== "string") throw new Error(EDITED_PARAGRAPH_GONE);
+  const baseText = body.baseText;
+  const sameKind = (block) => !body.blockKind || block.kind === body.blockKind;
+  const neighbour = (block) => block.raw === body.previousText || block.raw === body.nextText;
+  const { region, located, anchored, position } = mappedEditedRegion(blocks, body);
+  const inPlace = pickNearest(region.filter((block) => block.raw === baseText), position);
+  if (inPlace) return { block: inPlace, placed: true };
+  const [best, runnerUp] = rankedBySimilarity(region.filter(sameKind), baseText);
+  if (best && best.similarity >= SAME_PARAGRAPH_MIN_SIMILARITY) {
+    if (runnerUp && best.similarity - runnerUp.similarity < SAME_PARAGRAPH_MIN_LEAD) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
+    // Without either neighbour the old position is a guess (paragraphs may
+    // have been added above), so a closer match nearby makes it ambiguous.
+    if (!anchored && nearbyBlocks(blocks, position).some((block) =>
+      block !== best.block && sameKind(block) && paragraphSimilarity(baseText, block.raw) > best.similarity
+    )) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
+    return { block: best.block, placed: true };
+  }
+  const copy = pickNearest(blocks.filter((block) => block.raw === baseText), position);
+  if (copy) return { block: copy, placed: true };
+  // Both neighbours are where they were and the paragraph between them is
+  // gone or rewritten; a similar block elsewhere is some other paragraph.
+  if (located) throw new Error(EDITED_PARAGRAPH_GONE);
+  const [found, next] = rankedBySimilarity(nearbyBlocks(blocks, position).filter((block) => sameKind(block) && !neighbour(block)), baseText);
+  if (!found || found.similarity < SAME_PARAGRAPH_MIN_SIMILARITY) throw new Error(EDITED_PARAGRAPH_GONE);
+  if (next && found.similarity - next.similarity < SAME_PARAGRAPH_MIN_LEAD) throw new Error(EDITED_PARAGRAPH_AMBIGUOUS);
+  return { block: found.block, placed: false };
+}
+
+function nearbyBlocks(blocks, position) {
+  if (!Number.isFinite(position)) return blocks;
+  return blocks.slice(Math.max(0, Math.floor(position) - SAME_PARAGRAPH_SEARCH_RADIUS), Math.ceil(position) + SAME_PARAGRAPH_SEARCH_RADIUS + 1);
 }
 
 async function saveBlock(body) {
@@ -7089,10 +7131,10 @@ async function saveBlock(body) {
     // old position alone does not say which block the author edited. This
     // holds for "Keep my edit" (force) too: it overrides the co-author's
     // version of this paragraph, never a different paragraph.
-    const unchangedBlock = typeof body.baseText === "string" ? unchangedEditedBlock(blocks, body) : null;
-    if (unchangedBlock) block = unchangedBlock;
-    else {
-      block = changedEditedBlock(blocks, body);
+    const located = locateEditedBlock(blocks, body);
+    block = located.block;
+    if (block.raw !== body.baseText) {
+      if (body.force && !located.placed) throw new Error(EDITED_PARAGRAPH_UNPLACED);
       if (!body.force) {
         const merged = await mergeBlockText(String(body.baseText || ""), body.text, block.raw);
         if (!merged.clean) {

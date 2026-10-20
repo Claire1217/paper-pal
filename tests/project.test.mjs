@@ -647,6 +647,72 @@ describe("saving a paragraph after the file changed on disk", () => {
     assert.equal(await fs.readFile(file, "utf8"), disk);
   });
 
+  // The page sends the neighbours; an older client sends only the position.
+  const withoutNeighbours = { previousText: undefined, nextText: undefined };
+
+  it("keeps the edit in its own paragraph when a look-alike further away is closer to the old text", async () => {
+    const alpha = "On dataset alpha we used a learning rate of 0.1 with batch size 32 and dropout 0.5.";
+    const beta = alpha.replace("alpha", "beta");
+    const betaOnDisk = beta.replace("0.1", "0.2").replace("size 32", "size 64");
+    for (const [label, extra] of [["page", {}], ["older client", withoutNeighbours]]) {
+      for (const force of [false, true]) {
+        const { server, file, document } = await setUp([alpha, "Middle text here.", beta, "End."]);
+        const target = document.blocks.find((block) => block.raw === beta);
+        const disk = body([alpha, "Middle text here.", betaOnDisk, "End."]);
+        await fs.writeFile(file, disk);
+        const result = await staleSave(server, document, target, `${beta} See Table 3.`, { force, ...extra });
+        if (extra === withoutNeighbours) {
+          // Without neighbours the old position might hold another paragraph,
+          // and alpha is closer to the old text: refuse rather than guess.
+          assert.equal(result.status, 409, `${label}, force ${force}`);
+          assert.equal(await fs.readFile(file, "utf8"), disk);
+          continue;
+        }
+        assert.equal(result.status, 200, `${label}, force ${force}: ${result.value.error}`);
+        const expected = force ? `${beta} See Table 3.` : `${betaOnDisk} See Table 3.`;
+        assert.equal(await fs.readFile(file, "utf8"), body([alpha, "Middle text here.", expected, "End."]), `${label}, force ${force}`);
+      }
+    }
+  });
+
+  it("keeps the edit in the copy of a repeated paragraph that the co-author also edited", async () => {
+    const repeated = "See the appendix for the full derivation of this result.";
+    const tweaked = repeated.replace("full", "complete");
+    for (const force of [false, true]) {
+      const { server, file, document } = await setUp(["A.", repeated, "B.", repeated, "C."]);
+      const second = document.blocks.filter((block) => block.raw === repeated)[1];
+      await fs.writeFile(file, body(["A.", repeated, "B.", tweaked, "C."]));
+      const result = await staleSave(server, document, second, `${repeated} Extra.`, { force });
+      assert.equal(result.status, 200, result.value.error);
+      assert.equal(await fs.readFile(file, "utf8"), body(["A.", repeated, "B.", force ? `${repeated} Extra.` : `${tweaked} Extra.`, "C."]));
+    }
+  });
+
+  it("never lets an older client's forced save overwrite a similar paragraph at the old position", async () => {
+    const { server, file, document } = await setUp(["Intro.", experimentOne, experimentTwo, "End."]);
+    const target = document.blocks.find((block) => block.raw === experimentTwo);
+    const disk = insertedAndEdited();
+    await fs.writeFile(file, disk);
+    const result = await staleSave(server, document, target, `${experimentTwo} Results in Table 2.`, { force: true, ...withoutNeighbours });
+    // Without neighbours the position is a guess: refusing is fine, writing
+    // into experiment one is not.
+    assert.equal(result.status, 409);
+    assert.match(result.value.error, /more than one paragraph/);
+    assert.equal(await fs.readFile(file, "utf8"), disk);
+  });
+
+  it("refuses an edit to a paragraph that moved more than 25 blocks and changed", async () => {
+    const long = "We trained the model for ten epochs on the full dataset and report accuracy on the held-out split.";
+    const { server, file, document } = await setUp(["Intro.", long, "End."]);
+    const block = document.blocks.find((item) => item.raw === long);
+    const filler = Array.from({ length: 30 }, (_, index) => `Filler ${index} unrelated content number ${index}.`);
+    const disk = body([...filler, "Intro.", long.replace("ten", "twelve"), "End."]);
+    await fs.writeFile(file, disk);
+    const result = await staleSave(server, document, block, `${long} More.`);
+    assert.equal(result.status, 409);
+    assert.equal(await fs.readFile(file, "utf8"), disk);
+  });
+
   it("refuses to guess between two paragraphs that are equally like the edited one", async () => {
     const { server, file, document } = await setUp(["Intro.", experimentTwo, "End."]);
     const target = document.blocks.find((block) => block.raw === experimentTwo);
