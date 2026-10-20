@@ -295,17 +295,59 @@ async function assertSourcesWritable(relativePaths) {
   }
 }
 
-async function writeSource(relativePath, text) {
+// `previous` is the text the caller changed and `edit` the range it replaced
+// ({ start, end } in `previous`, `replacementEnd` in `text`), when known. The
+// open comments in the file are moved with the edit before this returns;
+// `exceptIds` are comments the caller rewrites itself (the one being accepted).
+async function writeSource(relativePath, text, { previous = null, edit = null, exceptIds = [], previousBlocks = null, blocks = null } = {}) {
   const absolutePath = resolveDocument(relativePath);
   await assertSourcesWritable([relativePath]);
   // A lone surrogate (a selection that split an emoji) would be written as U+FFFD.
   if (typeof text !== "string" || !text.isWellFormed()) {
     throw new HttpError(422, "The new text contains half of a character pair (for example a split emoji), so it was not saved. Reload the document and try again.");
   }
+  const before = typeof previous === "string" ? previous : await fs.readFile(absolutePath, "utf8").catch(() => null);
   recentWrites.set(relativePath, Date.now());
   await atomicWrite(absolutePath, text);
   recentWrites.set(relativePath, Date.now());
   sourceSignatures.set(relativePath, await fileSignature(absolutePath));
+  rememberSource(text);
+  if (typeof before === "string" && before !== text) {
+    await rebaseOpenAnchors(relativePath, before, text, { edit, exceptIds, oldBlocks: previousBlocks, newBlocks: blocks });
+  }
+}
+
+// Recent versions of the source files by etag. Every open comment stores the
+// etag of the version its offsets refer to (documentEtag, or the sourceEtag of
+// a proposal or linked change), so after an edit in another program its range
+// can be mapped from that version to the current text instead of searched
+// for. In memory only: after a restart, anchorWithoutHistory is the fallback.
+// Bounded by characters, not entries: a project with many small files must
+// not push out the version its comments were made on.
+const SOURCE_VERSION_CHAR_LIMIT = 32 * 1024 * 1024;
+const sourceVersions = new Map();
+let sourceVersionChars = 0;
+
+// The same few texts are looked up for every comment of a file, and hashing
+// a large file each time would cost more than the lookup.
+const recentEtags = [];
+
+function rememberSource(source) {
+  let etag = recentEtags.find(([text]) => text === source)?.[1];
+  if (!etag) {
+    etag = sha(source);
+    recentEtags.unshift([source, etag]);
+    recentEtags.length = Math.min(recentEtags.length, 4);
+  }
+  if (sourceVersions.has(etag)) sourceVersions.delete(etag);
+  else sourceVersionChars += source.length;
+  sourceVersions.set(etag, source);
+  while (sourceVersionChars > SOURCE_VERSION_CHAR_LIMIT && sourceVersions.size > 1) {
+    const [oldest, text] = sourceVersions.entries().next().value;
+    sourceVersions.delete(oldest);
+    sourceVersionChars -= text.length;
+  }
+  return etag;
 }
 
 // One async mutex per key. Every read-modify-write of the review state files
@@ -3560,6 +3602,8 @@ async function documentPayload(relativePath) {
   const bytes = await fs.readFile(absolutePath);
   // Same text as readFile(..., "utf8"): a lossy decoding when the file is not UTF-8.
   const source = bytes.toString("utf8");
+  // Comments made on this text name its etag; keep it to map them later.
+  rememberSource(source);
   const checked = sourceEncoding(bytes);
   const encoding = checked.valid
     ? { valid: true }
@@ -4151,9 +4195,53 @@ function selectionSpanFromAbsoluteRange(blocks, absoluteStart, absoluteEnd) {
   };
 }
 
+// Where an open comment's passage is in `source` now. The anchor's offsets
+// refer to the version of the file named by its etag. When that is the
+// current text, or a version this server has seen and can align with it, the
+// passage is valid exactly when the text at its (mapped) range is still the
+// selected text, whatever changed around it; when that text differs, the
+// commented text was edited (`edited`), and the answer is no match, never
+// another place with the same words. When the alignment cannot follow the
+// range (the text was cut and pasted elsewhere, or the change was too large
+// to align), that is no evidence either way, and the strict search in
+// anchorWithoutHistory decides, as it does for an anchor whose version is
+// unknown (the file changed while the server was stopped).
 function findSelectionAnchor(source, blocks, selection) {
   const selectedText = String(selection?.selectedText || "");
   if (!selectedText) return { match: null, matchCount: 0 };
+  const start = Number(selection?.absoluteStart);
+  const end = Number(selection?.absoluteEnd);
+  const hasRange = Number.isInteger(start) && Number.isInteger(end) && end > start;
+  const version = String(selection?.documentEtag || selection?.sourceEtag || selection?.etag || "");
+  if (hasRange && version && version === rememberSource(source)) return passageAt(source, blocks, start, end, selectedText);
+  const previous = hasRange && version ? sourceVersions.get(version) : undefined;
+  if (previous === undefined) return anchorWithoutHistory(source, blocks, selection, selectedText);
+  const alignment = cachedAlignment(previous, source);
+  const mapped = mapRangeThrough(alignment, start, end);
+  if (mapped.status === "mapped") return passageAt(source, blocks, mapped.start, mapped.end, selectedText);
+  // A server edit rewrote this passage (rebaseOpenAnchors): never searched for.
+  if (selection.anchorChanged) return { match: null, matchCount: 0 };
+  return anchorWithoutHistory(source, blocks, selection, selectedText, alignment);
+}
+
+// A line ending converted between CRLF and LF does not change the passage.
+const withoutCarriageReturns = (text) => String(text).replace(/\r(?=\n)/g, "");
+
+function sameAnchorText(a, b) {
+  return a === b || withoutCarriageReturns(a) === withoutCarriageReturns(b);
+}
+
+function passageAt(source, blocks, start, end, selectedText) {
+  if (!sameAnchorText(source.slice(start, end), selectedText)) return { match: null, matchCount: 0, edited: true };
+  const match = selectionMatchFromAbsolute(blocks, start, end) || selectionSpanFromAbsoluteRange(blocks, start, end);
+  return match ? { match, matchCount: 1 } : { match: null, matchCount: 0 };
+}
+
+// `alignment`, when given, is the alignment of the anchor's own version with
+// `source`: a hit that is text carried over unchanged from that version is
+// another copy that was already there, not the passage moved, so it is
+// never taken.
+function anchorWithoutHistory(source, blocks, selection, selectedText, alignment = null) {
   const suppliedAbsoluteStart = Number(selection?.absoluteStart);
   const suppliedAbsoluteEnd = Number(selection?.absoluteEnd);
   if (Number.isInteger(suppliedAbsoluteStart) && Number.isInteger(suppliedAbsoluteEnd) && suppliedAbsoluteEnd > suppliedAbsoluteStart &&
@@ -4180,6 +4268,14 @@ function findSelectionAnchor(source, blocks, selection) {
     }
   }
 
+  // Last resort: the text must occur once, with the stored context agreeing
+  // on both sides. A stored side shorter than the agreement length means the
+  // passage sat that close to the file's edge.
+  const prefix = withoutCarriageReturns(selection.prefix || "");
+  const suffix = withoutCarriageReturns(selection.suffix || "");
+  // Only a selection with no stored range and no context (an old chat
+  // message) is taken on its text alone, as before.
+  const textOnly = !prefix && !suffix && !selection.blockId && !Number.isInteger(suppliedAbsoluteStart);
   const matches = [];
   let cursor = 0;
   while (cursor <= source.length) {
@@ -4187,19 +4283,421 @@ function findSelectionAnchor(source, blocks, selection) {
     if (absoluteStart < 0) break;
     const absoluteEnd = absoluteStart + selectedText.length;
     const match = selectionMatchFromAbsolute(blocks, absoluteStart, absoluteEnd);
-    if (match) {
-      const prefixMatches = !selection.prefix || source.slice(Math.max(0, absoluteStart - selection.prefix.length), absoluteStart) === selection.prefix;
-      const suffixMatches = !selection.suffix || source.slice(absoluteEnd, absoluteEnd + selection.suffix.length) === selection.suffix;
-      matches.push({ ...match, contextMatches: prefixMatches && suffixMatches });
-    }
+    if (match) matches.push(match);
     cursor = absoluteStart + Math.max(1, selectedText.length);
   }
-  const contextual = matches.filter((match) => match.contextMatches);
+  if (matches.length !== 1) return { match: null, matchCount: matches.length };
+  const [only] = matches;
+  if (alignment && carriedOver(alignment, only.absoluteStart, only.absoluteEnd)) return { match: null, matchCount: 1 };
+  // Twice the length, so a CRLF file still yields as many characters.
+  const before = withoutCarriageReturns(source.slice(Math.max(0, only.absoluteStart - 2 * prefix.length), only.absoluteStart));
+  const after = withoutCarriageReturns(source.slice(only.absoluteEnd, only.absoluteEnd + 2 * suffix.length));
+  // Text moved by cut and paste (a hit in new text, see above) keeps its own
+  // line but not what surrounded it, so there agreement up to a line break
+  // is enough.
+  const toLineBreak = (agreedText) => Boolean(alignment) && agreedText.includes("\n");
+  const prefixAgreement = commonSuffixLength(prefix, before);
+  const suffixAgreement = commonPrefixLength(suffix, after);
+  const sideAgrees = (stored, agreement, available, agreedText) => toLineBreak(agreedText) || (stored.length >= ANCHOR_CONTEXT_AGREEMENT
+    ? agreement >= ANCHOR_CONTEXT_AGREEMENT
+    : agreement === stored.length && available === stored.length);
+  const agrees = textOnly || (
+    sideAgrees(prefix, prefixAgreement, before.length, prefix.slice(prefix.length - prefixAgreement)) &&
+    sideAgrees(suffix, suffixAgreement, after.length, suffix.slice(0, suffixAgreement))
+  );
+  return { match: agrees ? only : null, matchCount: 1 };
+}
+
+// Characters of stored context that must still read the same on each side
+// before the last-resort search takes a hit. A sentence end or a paragraph
+// break (". ", "\n\n") agrees next to almost any sentence.
+const ANCHOR_CONTEXT_AGREEMENT = 32;
+
+function commonPrefixLength(a, b) {
+  let length = 0;
+  while (length < a.length && length < b.length && a[length] === b[length]) length += 1;
+  return length;
+}
+
+function commonSuffixLength(a, b) {
+  let length = 0;
+  while (length < a.length && length < b.length && a[a.length - 1 - length] === b[b.length - 1 - length]) length += 1;
+  return length;
+}
+
+// How two versions of a text line up: `segments` are equal stretches
+// [oldStart, newStart, length]; `unknown` are regions [oldStart, oldEnd,
+// newStart, newEnd] too large to align, where nothing is known. Everything
+// else was compared and changed. The shared head and tail come first, then
+// lines (a line ending converted between CRLF and LF still matches), then
+// words inside the lines that differ, with the page's word tokens. Pieces
+// are matched by unique pieces first (patience diff), so the work grows with
+// the size of the changes, not of the file.
+function alignTexts(oldText, newText) {
+  const alignment = { segments: [], unknown: [] };
+  const head = commonPrefixLength(oldText, newText);
+  const tail = commonSuffixLength(oldText.slice(head), newText.slice(head));
+  if (head) alignment.segments.push([0, 0, head]);
+  alignLines(oldText, newText, head, oldText.length - tail, head, newText.length - tail, alignment);
+  if (tail) alignment.segments.push([oldText.length - tail, newText.length - tail, tail]);
+  return alignment;
+}
+
+function textPieces(text, from, to, pattern) {
+  const pieces = [];
+  pattern.lastIndex = 0;
+  const slice = text.slice(from, to);
+  for (const found of slice.matchAll(pattern)) pieces.push({ at: from + found.index, text: found[0] });
+  return pieces;
+}
+
+const LINE_PIECES = /[^\n]*\n|[^\n]+$/g;
+const WORD_PIECES = /\s+|[A-Za-z0-9]+(?:[-’'][A-Za-z0-9]+)*|./gu;
+
+function alignLines(oldText, newText, oldFrom, oldTo, newFrom, newTo, alignment) {
+  const oldLines = textPieces(oldText, oldFrom, oldTo, LINE_PIECES);
+  const newLines = textPieces(newText, newFrom, newTo, LINE_PIECES);
+  const key = (line) => withoutCarriageReturns(line.text);
+  const { pairs } = matchPieces(oldLines.map(key), newLines.map(key));
+  let oldAt = oldFrom;
+  let newAt = newFrom;
+  const gap = (oldStop, newStop) => {
+    if (oldStop > oldAt && newStop > newAt) alignWords(oldText, newText, oldAt, oldStop, newAt, newStop, alignment);
+  };
+  for (const [i, j] of pairs) {
+    const oldLine = oldLines[i];
+    const newLine = newLines[j];
+    gap(oldLine.at, newLine.at);
+    if (oldLine.text === newLine.text) {
+      alignment.segments.push([oldLine.at, newLine.at, oldLine.text.length]);
+    } else {
+      // Same line with another ending: the text, then the "\n".
+      const content = key(oldLine).length - 1;
+      if (content > 0) alignment.segments.push([oldLine.at, newLine.at, content]);
+      alignment.segments.push([oldLine.at + oldLine.text.length - 1, newLine.at + newLine.text.length - 1, 1]);
+    }
+    oldAt = oldLine.at + oldLine.text.length;
+    newAt = newLine.at + newLine.text.length;
+  }
+  gap(oldTo, newTo);
+}
+
+function alignWords(oldText, newText, oldFrom, oldTo, newFrom, newTo, alignment) {
+  const oldWords = textPieces(oldText, oldFrom, oldTo, WORD_PIECES);
+  const newWords = textPieces(newText, newFrom, newTo, WORD_PIECES);
+  const { pairs, unresolved } = matchPieces(oldWords.map((word) => word.text), newWords.map((word) => word.text));
+  for (const [i, j] of pairs) {
+    const last = alignment.segments.at(-1);
+    const oldAt = oldWords[i].at;
+    const newAt = newWords[j].at;
+    if (last && last[0] + last[2] === oldAt && last[1] + last[2] === newAt) last[2] += oldWords[i].text.length;
+    else alignment.segments.push([oldAt, newAt, oldWords[i].text.length]);
+  }
+  const edge = (pieces, index, to) => (index < pieces.length ? pieces[index].at : to);
+  for (const [a0, a1, b0, b1] of unresolved) {
+    alignment.unknown.push([edge(oldWords, a0, oldTo), edge(oldWords, a1, oldTo), edge(newWords, b0, newTo), edge(newWords, b1, newTo)]);
+  }
+}
+
+// Index pairs of equal pieces, in order. Shared ends are matched directly; a
+// small remainder by a longest-common-subsequence table; a large one by the
+// pieces that occur once on each side and keep their order, and then the
+// stretches between those. A large stretch with no such piece is unresolved.
+const MATCH_TABLE_CELLS = 250000;
+
+function matchPieces(oldPieces, newPieces) {
+  const pairs = [];
+  const unresolved = [];
+  const stack = [[0, oldPieces.length, 0, newPieces.length]];
+  while (stack.length) {
+    let [a0, a1, b0, b1] = stack.pop();
+    while (a0 < a1 && b0 < b1 && oldPieces[a0] === newPieces[b0]) pairs.push([a0++, b0++]);
+    while (a1 > a0 && b1 > b0 && oldPieces[a1 - 1] === newPieces[b1 - 1]) pairs.push([--a1, --b1]);
+    if (a0 === a1 || b0 === b1) continue;
+    if ((a1 - a0) * (b1 - b0) <= MATCH_TABLE_CELLS) {
+      pairs.push(...tablePairs(oldPieces, newPieces, a0, a1, b0, b1));
+      continue;
+    }
+    const anchors = uniqueAnchors(oldPieces, newPieces, a0, a1, b0, b1);
+    if (!anchors.length) {
+      unresolved.push([a0, a1, b0, b1]);
+      continue;
+    }
+    let previousA = a0;
+    let previousB = b0;
+    for (const [i, j] of anchors) {
+      pairs.push([i, j]);
+      stack.push([previousA, i, previousB, j]);
+      previousA = i + 1;
+      previousB = j + 1;
+    }
+    stack.push([previousA, a1, previousB, b1]);
+  }
+  pairs.sort((x, y) => x[0] - y[0]);
+  return { pairs, unresolved };
+}
+
+function tablePairs(oldPieces, newPieces, a0, a1, b0, b1) {
+  const rows = a1 - a0;
+  const columns = b1 - b0;
+  const table = Array.from({ length: rows + 1 }, () => new Uint16Array(columns + 1));
+  for (let i = rows - 1; i >= 0; i -= 1) {
+    for (let j = columns - 1; j >= 0; j -= 1) {
+      table[i][j] = oldPieces[a0 + i] === newPieces[b0 + j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+    }
+  }
+  const pairs = [];
+  let i = 0;
+  let j = 0;
+  while (i < rows && j < columns) {
+    if (oldPieces[a0 + i] === newPieces[b0 + j]) {
+      pairs.push([a0 + i, b0 + j]);
+      i += 1;
+      j += 1;
+    } else if (table[i + 1][j] >= table[i][j + 1]) i += 1;
+    else j += 1;
+  }
+  return pairs;
+}
+
+// Pieces that occur exactly once in both ranges, reduced to the longest run
+// that keeps the same order on both sides.
+function uniqueAnchors(oldPieces, newPieces, a0, a1, b0, b1) {
+  const counts = new Map();
+  for (let i = a0; i < a1; i += 1) {
+    const entry = counts.get(oldPieces[i]) || { old: 0, new: 0, i: -1, j: -1 };
+    entry.old += 1;
+    entry.i = i;
+    counts.set(oldPieces[i], entry);
+  }
+  for (let j = b0; j < b1; j += 1) {
+    const entry = counts.get(newPieces[j]);
+    if (!entry) continue;
+    entry.new += 1;
+    entry.j = j;
+  }
+  const candidates = [...counts.values()].filter((entry) => entry.old === 1 && entry.new === 1).sort((x, y) => x.i - y.i);
+  // Longest increasing subsequence of j (patience sorting).
+  const tails = [];
+  const previous = new Array(candidates.length);
+  for (const [index, entry] of candidates.entries()) {
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (candidates[tails[middle]].j < entry.j) low = middle + 1;
+      else high = middle;
+    }
+    previous[index] = low > 0 ? tails[low - 1] : -1;
+    tails[low] = index;
+  }
+  const anchors = [];
+  for (let index = tails.at(-1) ?? -1; index >= 0; index = previous[index]) anchors.push([candidates[index].i, candidates[index].j]);
+  return anchors.reverse();
+}
+
+// An edit whose range is known keeps everything outside it in place; only
+// the replaced text and its replacement are aligned.
+function alignEdit(oldText, newText, edit) {
+  if (!edit) return alignTexts(oldText, newText);
+  const inner = alignTexts(oldText.slice(edit.start, edit.end), newText.slice(edit.start, edit.replacementEnd));
+  const alignment = {
+    segments: [
+      ...(edit.start ? [[0, 0, edit.start]] : []),
+      ...inner.segments.map(([oldStart, newStart, length]) => [edit.start + oldStart, edit.start + newStart, length]),
+      ...(oldText.length > edit.end ? [[edit.end, edit.replacementEnd, oldText.length - edit.end]] : []),
+    ],
+    unknown: inner.unknown.map(([o0, o1, n0, n1]) => [edit.start + o0, edit.start + o1, edit.start + n0, edit.start + n1]),
+  };
+  return alignment;
+}
+
+// The same edit seen from the new text back to the old one (Undo, rollback).
+function reverseEdit(edit) {
+  return edit ? { start: edit.start, end: edit.replacementEnd, replacementEnd: edit.end } : null;
+}
+
+const alignmentCache = new Map();
+
+function cachedAlignment(oldText, newText) {
+  const key = `${rememberSource(oldText)}>${rememberSource(newText)}`;
+  let alignment = alignmentCache.get(key);
+  if (!alignment) {
+    alignment = alignTexts(oldText, newText);
+    alignmentCache.set(key, alignment);
+    while (alignmentCache.size > 32) alignmentCache.delete(alignmentCache.keys().next().value);
+  }
+  return alignment;
+}
+
+// "mapped" when both ends fall in equal stretches (whether the text between
+// them survived is the caller's check), "unknown" when an end falls where the
+// alignment gave up, "changed" when an end's text was compared and changed.
+function mapRangeThrough(alignment, start, end) {
+  const locate = (offset, isEnd) => {
+    const inside = (from, length) => (isEnd ? offset > from && offset <= from + length : offset >= from && offset < from + length);
+    const segment = alignment.segments.find(([oldStart, , length]) => inside(oldStart, length));
+    if (segment) return { offset: segment[1] + offset - segment[0] };
+    return { unknown: alignment.unknown.some(([oldStart, oldEnd]) => inside(oldStart, oldEnd - oldStart)) };
+  };
+  const from = locate(start, false);
+  const to = locate(end, true);
+  if (from.offset !== undefined && to.offset !== undefined && to.offset > from.offset) {
+    return { status: "mapped", start: from.offset, end: to.offset };
+  }
+  return { status: from.unknown || to.unknown ? "unknown" : "changed" };
+}
+
+// True when [start, end) of the new text is old text carried over unchanged.
+function carriedOver(alignment, start, end) {
+  return alignment.segments.some(([, newStart, length]) => start >= newStart && end <= newStart + length);
+}
+
+// The anchors of one comment that live in `relativePath`: its own passage,
+// its proposal, and the linked changes of that proposal. `field` holds the
+// anchor's text.
+function commentAnchors(request, relativePath) {
+  const anchors = [];
+  if (request.path === relativePath) {
+    anchors.push({ kind: "request", target: request, field: "selectedText" });
+    if (request.proposal && Number.isInteger(request.proposal.absoluteStart)) {
+      anchors.push({ kind: "proposal", target: request.proposal, field: "originalText" });
+    }
+  }
+  for (const change of request.proposal?.linkedChanges || []) {
+    if (change.path === relativePath) anchors.push({ kind: "linked", target: change, field: "selectedText" });
+  }
+  return anchors;
+}
+
+// What findSelectionAnchor needs for one anchor. A proposal or a linked
+// change has only a range, its text and the etag of its version; the
+// request's block position helps the no-history fallback for a proposal.
+function anchorLookup({ kind, target, field }, request) {
+  if (kind === "request") return target;
   return {
-    match: contextual.length === 1 ? contextual[0] : matches.length === 1 ? matches[0] : null,
-    matchCount: matches.length,
+    blockIndex: kind === "linked" ? target.blockIndex : request.blockIndex,
+    ...(kind === "proposal" ? { start: request.start, end: request.end } : {}),
+    selectedText: String(target[field] ?? ""),
+    absoluteStart: target.absoluteStart,
+    absoluteEnd: target.absoluteEnd,
+    documentEtag: target.documentEtag || target.sourceEtag,
+    anchorChanged: Boolean(target.anchorChanged),
   };
 }
+
+function proposalLookup(request) {
+  return anchorLookup({ kind: "proposal", target: request.proposal, field: "originalText" }, request);
+}
+
+const rangeOf = (match) => ({ start: match.absoluteStart, end: match.absoluteEnd });
+
+// Stores `range` of `source` (version `etag`) as the anchor's place, with
+// `changed` as its anchorChanged mark. Returns false, and changes nothing,
+// when the stored position is already that one: the request file is then
+// not rewritten, and the old etag keeps naming a version these offsets fit.
+function placeAnchor(anchor, source, blocks, range, etag, changed = false) {
+  const { kind, target, field } = anchor;
+  const span = selectionMatchFromAbsolute(blocks, range.start, range.end) || selectionSpanFromAbsoluteRange(blocks, range.start, range.end);
+  if (!span) return false;
+  const position = {
+    absoluteStart: range.start,
+    absoluteEnd: range.end,
+    [field]: source.slice(range.start, range.end),
+    ...(kind === "request" ? {
+      blockId: span.startBlock.id,
+      blockIndex: span.startBlock.index,
+      start: span.start,
+      end: span.end,
+      endBlockId: span.endBlock.id,
+      endBlockIndex: span.endBlock.index,
+    } : {}),
+    ...(kind === "linked" ? { blockIndex: span.startBlock.index, endBlockIndex: span.endBlock.index } : {}),
+  };
+  // A comment whose paragraph only moved keeps its place inside that
+  // paragraph (block id, offsets in it) and needs no rewrite either: its
+  // absolute offsets still fit the version its etag names, and without that
+  // version the paragraph position finds it (anchorWithoutHistory).
+  const unchanged = (name) => target[name] === position[name] ||
+    (!changed && kind === "request" && ["absoluteStart", "absoluteEnd"].includes(name));
+  const same = Object.keys(position).every(unchanged) && Boolean(target.anchorChanged) === changed;
+  if (same && (!changed || (target.documentEtag || target.sourceEtag) === etag)) return false;
+  Object.assign(target, position, { documentEtag: etag });
+  if (kind === "request") {
+    target.prefix = source.slice(Math.max(0, range.start - 120), range.start);
+    target.suffix = source.slice(range.end, Math.min(source.length, range.end + 120));
+    target.blockText = source.slice(span.startBlock.start, span.endBlock.end);
+  }
+  if (changed) target.anchorChanged = true;
+  else delete target.anchorChanged;
+  return true;
+}
+
+// Keeps the stored offsets of every open comment in a file current when the
+// file changes, the way rebaseDocumentReviewSelections does for confirmations.
+// With `oldSource` (a write by this server) each anchor is found in the old
+// text and moved through the edit; without it (an edit in another program,
+// noticed by the change watcher) it is mapped from the version it names.
+// Only evidence marks a passage anchorChanged: its range was followed and the
+// text there differs, or the server's own edit (a known range) rewrote it and
+// it is nowhere else. It is then refused, never moved to other text, and keeps
+// the offsets of the last version that held it, so an Undo restores it. When
+// the alignment cannot follow a range, the strict search decides, and a
+// passage it does not find is left as it was.
+// `oldBlocks` and `newBlocks` are the parsed texts when the caller has them.
+async function rebaseOpenAnchors(relativePath, oldSource, newSource, { edit = null, exceptIds = [], ...parsed } = {}) {
+  const newEtag = rememberSource(newSource);
+  const newBlocks = parsed.newBlocks || parseBlocks(newSource);
+  const oldEtag = oldSource === null ? null : rememberSource(oldSource);
+  const oldBlocks = oldSource === null ? null : parsed.oldBlocks || parseBlocks(oldSource);
+  const alignment = oldSource === null ? null : alignEdit(oldSource, newSource, edit);
+  const entries = (await fs.readdir(requestsRoot).catch(() => [])).filter((entry) => entry.endsWith(".json"));
+  const contents = await Promise.all(entries.map((name) => fs.readFile(path.join(requestsRoot, name), "utf8").catch(() => null)));
+  for (const [index, name] of entries.entries()) {
+    const target = path.join(requestsRoot, name);
+    let request;
+    try {
+      request = JSON.parse(contents[index]);
+    } catch {
+      continue;
+    }
+    if (!request || exceptIds.includes(request.id) || ["resolved", "deleted"].includes(request.status)) continue;
+    let changed = false;
+    for (const anchor of commentAnchors(request, relativePath)) {
+      const lookup = anchorLookup(anchor, request);
+      const text = lookup.selectedText;
+      if (oldSource === null) {
+        if ((lookup.documentEtag || lookup.sourceEtag) === newEtag) continue;
+        const found = findSelectionAnchor(newSource, newBlocks, lookup);
+        if (found.match) changed = placeAnchor(anchor, newSource, newBlocks, rangeOf(found.match), newEtag) || changed;
+        else if (found.edited && !anchor.target.anchorChanged) {
+          anchor.target.anchorChanged = true;
+          changed = true;
+        }
+        continue;
+      }
+      const found = findSelectionAnchor(oldSource, oldBlocks, lookup);
+      if (!found.match) continue;
+      const range = rangeOf(found.match);
+      const mapped = mapRangeThrough(alignment, range.start, range.end);
+      if (mapped.status === "mapped") {
+        changed = (sameAnchorText(newSource.slice(mapped.start, mapped.end), text)
+          ? placeAnchor(anchor, newSource, newBlocks, mapped, newEtag)
+          : placeAnchor(anchor, oldSource, oldBlocks, range, oldEtag, true)) || changed;
+        continue;
+      }
+      const searched = anchorWithoutHistory(newSource, newBlocks, { ...lookup, absoluteStart: range.start, absoluteEnd: range.end }, text, alignment);
+      if (searched.match) changed = placeAnchor(anchor, newSource, newBlocks, rangeOf(searched.match), newEtag) || changed;
+      else if (edit && mapped.status === "changed") changed = placeAnchor(anchor, oldSource, oldBlocks, range, oldEtag, true) || changed;
+    }
+    // The manuscript write has already happened; a comment that could not be
+    // updated is mapped again when it is next read.
+    if (changed) await atomicWrite(target, `${JSON.stringify(request, null, 2)}\n`).catch(() => {});
+  }
+}
+
+// The message for a passage findSelectionAnchor no longer finds.
+const COMMENTED_TEXT_EDITED = "The commented text was edited, so select the passage again and leave a new comment.";
 
 function selectionAnchorPayload(pathValue, documentEtag, source, match, selectedText, message = null) {
   return {
@@ -4221,7 +4719,7 @@ function selectionAnchorPayload(pathValue, documentEtag, source, match, selected
   };
 }
 
-async function normalizeChatSelectionContext(value, message = null, { requireEtag = true } = {}) {
+async function normalizeChatSelectionContext(value, message = null, { requireEtag = true, editedMessage = null } = {}) {
   if (!value || typeof value !== "object") return null;
   const pathValue = String(value.path || message?.activePath || "");
   const selectedText = String(value.selectedText || "");
@@ -4236,7 +4734,9 @@ async function normalizeChatSelectionContext(value, message = null, { requireEta
     selectedText,
   });
   if (!match) {
-    throw new Error(`The selected passage matched ${matchCount} current locations. Reselect it before creating a proposal.`);
+    throw new Error(editedMessage || (matchCount > 1
+      ? "The selected text appears more than once, so reselect the passage and try again."
+      : "The selected text was edited, so reselect the passage and try again."));
   }
   return selectionAnchorPayload(pathValue, payload.etag, payload.source, match, selectedText, message);
 }
@@ -4356,10 +4856,8 @@ async function refreshRewriteRequestAnchor(target, request) {
   const blocks = parseBlocks(source);
   const selectedText = String(request.selectedText || "");
   if (!selectedText) throw new Error("This comment no longer has a selected passage.");
-  const { match, matchCount } = findSelectionAnchor(source, blocks, request);
-  if (!match) {
-    throw new Error(`Selected passage matched ${matchCount} current locations; reselect it before retrying.`);
-  }
+  const { match } = findSelectionAnchor(source, blocks, request);
+  if (!match) throw new Error(COMMENTED_TEXT_EDITED);
   const spansMultipleBlocks = match.startBlock.index !== match.endBlock.index;
   const structuralKinds = new Set(["heading", "paragraph-heading"]);
   const snappedStart = spansMultipleBlocks && structuralKinds.has(match.startBlock.kind) ? 0 : match.start;
@@ -4379,6 +4877,7 @@ async function refreshRewriteRequestAnchor(target, request) {
   request.suffix = source.slice(snappedAbsoluteEnd, Math.min(source.length, snappedAbsoluteEnd + 120));
   request.blockText = source.slice(match.startBlock.start, match.endBlock.end);
   request.documentEtag = sha(source);
+  delete request.anchorChanged;
   await atomicWrite(target, `${JSON.stringify(request, null, 2)}\n`);
   return request;
 }
@@ -4559,7 +5058,7 @@ async function validateRelatedProposalChanges(rawChanges, primaryPath) {
         required: Boolean(raw?.required),
         reason,
         summary,
-        sourceEtag: sha(source),
+        sourceEtag: rememberSource(source),
         absoluteStart,
         absoluteEnd,
         blockIndex: match.startBlock.index,
@@ -4652,10 +5151,8 @@ async function attachGeneratedProposal(requestId, replacementText, summary) {
   const absolutePath = resolveDocument(request.path);
   const source = await fs.readFile(absolutePath, "utf8");
   const blocks = parseBlocks(source);
-  const { match, matchCount } = findSelectionAnchor(source, blocks, request);
-  if (!match) {
-    throw new Error(`The selected passage matched ${matchCount} locations; refusing to guess.`);
-  }
+  const { match } = findSelectionAnchor(source, blocks, request);
+  if (!match) throw new Error(COMMENTED_TEXT_EDITED);
   const originalText = source.slice(match.absoluteStart, match.absoluteEnd);
   replacementText = trimBoundaryEcho(
     replacementText, originalText,
@@ -6043,7 +6540,7 @@ async function revertStructurePlan(body = {}) {
     for (const snapshot of plan.sourceSnapshots || []) {
       const beforeReview = reviewStateSnapshot(reviewState, snapshot.path);
       if (!unchanged.has(snapshot.path)) {
-        await writeSource(snapshot.path, snapshot.source);
+        await writeSource(snapshot.path, snapshot.source, { previous: currentSources.get(snapshot.path) });
         written.push(snapshot.path);
       }
       restoreReviewStateSnapshot(reviewState, snapshot.path, plan.reviewSnapshots?.[snapshot.path]);
@@ -6421,17 +6918,19 @@ async function createProposalFromChat(body) {
   if (!session) throw new Error("This chat session no longer exists.");
   if (["queued", "running"].includes(session.status)) throw new Error("Wait for this Chat reply before creating a proposal.");
   const discussion = chatDiscussionForAssistant(session, String(body.assistantMessageId || ""));
+  // The stored selection names the version of the file it was made on, so
+  // findSelectionAnchor maps it to the current text and refuses it only when
+  // the discussed text itself was edited; edits around it do not matter.
   const anchor = await normalizeChatSelectionContext(
     discussion.selectionMessage.selectionContext,
     discussion.selectionMessage,
-    { requireEtag: false },
+    { requireEtag: false, editedMessage: "The discussed text was edited during the chat, so select the passage again before creating a proposal." },
   );
   const payload = await documentPayload(anchor.path);
   const block = payload.blocks[anchor.blockIndex];
   const endBlock = payload.blocks[anchor.endBlockIndex];
-  if (!block || !endBlock || block.id !== anchor.blockId || endBlock.id !== anchor.endBlockId ||
-      payload.source.slice(anchor.absoluteStart, anchor.absoluteEnd) !== anchor.selectedText) {
-    throw new Error("The selected passage changed during the discussion. Reselect it before creating a proposal.");
+  if (!block || !endBlock || payload.source.slice(anchor.absoluteStart, anchor.absoluteEnd) !== anchor.selectedText) {
+    throw new Error("The discussed text was edited during the chat, so select the passage again before creating a proposal.");
   }
   const comment = "Apply the writing decision reached in Project Chat to this selected passage. Use the discussion through the chosen assistant reply as the authority, preserve the surrounding text, and avoid unsupported claims.";
   const origin = {
@@ -6492,6 +6991,7 @@ async function createProposalFromChat(body) {
     delete request.proposal;
     delete request.discussion;
     delete request.rejectedAt;
+    delete request.anchorChanged;
     request = await persistRewriteRequest(request, { autoProcess: body.autoProcess !== false });
   } else {
     request = buildRewriteRequest({
@@ -7222,12 +7722,13 @@ async function saveBlock(body) {
   const savedBlock = block;
   const nextSource = `${currentSource.slice(0, block.start)}${replacementText}${currentSource.slice(block.end)}`;
   assertNoNestedHeadingCommands(nextSource);
-  await writeSource(body.path, nextSource);
+  const sourceEdit = { start: block.start, end: block.end, replacementEnd: block.start + replacementText.length };
+  const nextBlocks = parseBlocks(nextSource);
+  await writeSource(body.path, nextSource, { previous: currentSource, edit: sourceEdit, previousBlocks: blocks, blocks: nextBlocks });
 
   const state = await readState();
   const beforeReview = reviewStateSnapshot(state, body.path);
   state.paragraphs[body.path] ||= {};
-  const nextBlocks = parseBlocks(nextSource);
   const nextBlock = nextBlocks[Math.min(savedBlockIndex, nextBlocks.length - 1)];
   if (nextBlock) {
     const edit = contiguousEdit(savedBlock.raw, replacementText);
@@ -7255,6 +7756,7 @@ async function saveBlock(body) {
       afterEtag: sha(nextSource),
       beforeReview,
       afterReview,
+      edit: sourceEdit,
     });
   }
   scheduleCompile();
@@ -7836,26 +8338,19 @@ async function confirmAllLinkedChanges(body) {
   return request;
 }
 
-function prepareSourceReplacement({ path: relativePath, sourceEtag, absoluteStart, absoluteEnd, selectedText, replacementText }) {
+// `change` is a path, a replacement and an anchor lookup (anchorLookup).
+function prepareSourceReplacement(change) {
+  const { path: relativePath, replacementText } = change;
   return fs.readFile(resolveDocument(relativePath), "utf8").then((source) => {
     const sourceBlocks = parseBlocks(source);
-    let start = Number(absoluteStart);
-    let end = Number(absoluteEnd);
-    if (sha(source) !== sourceEtag ||
-        !Number.isInteger(start) || !Number.isInteger(end) ||
-        source.slice(start, end) !== selectedText) {
-      const { match, matchCount } = findSelectionAnchor(source, sourceBlocks, {
-        path: relativePath,
-        selectedText,
-        absoluteStart: start,
-        absoluteEnd: end,
-      });
-      if (!match) {
-        throw new Error(`${path.basename(relativePath)} changed and could not be merged safely (${matchCount} matching passages).`);
-      }
-      start = match.absoluteStart;
-      end = match.absoluteEnd;
+    const { match } = findSelectionAnchor(source, sourceBlocks, change);
+    if (!match) {
+      throw new Error(change.primary
+        ? COMMENTED_TEXT_EDITED
+        : `The passage this change set rewrites in ${path.basename(relativePath)} was edited, so run the comment again.`);
     }
+    const start = match.absoluteStart;
+    const end = match.absoluteEnd;
     const sourceMatch = selectionMatchFromAbsolute(sourceBlocks, start, end)
       || selectionSpanFromAbsoluteRange(sourceBlocks, start, end);
     if (!sourceMatch) throw new Error(`${path.basename(relativePath)} no longer contains a reviewable target range.`);
@@ -7921,14 +8416,15 @@ async function applyLinkedChangeSet(body) {
   if (rejectedRequired.length) throw new Error("A required linked change is not confirmed.");
 
   const selected = [{
+    ...proposalLookup(request),
+    primary: true,
     path: request.path,
-    sourceEtag: request.proposal.sourceEtag,
-    absoluteStart: request.proposal.absoluteStart,
-    absoluteEnd: request.proposal.absoluteEnd,
-    selectedText: request.proposal.originalText,
     replacementText: request.proposal.replacementText,
-    summary: request.proposal.summary,
-  }, ...request.proposal.linkedChanges.filter((change) => change.status === "confirmed")];
+  }, ...request.proposal.linkedChanges.filter((change) => change.status === "confirmed").map((change) => ({
+    ...anchorLookup({ kind: "linked", target: change, field: "selectedText" }, request),
+    path: change.path,
+    replacementText: change.replacementText,
+  }))];
   // All or nothing: one target that cannot be written refuses the whole set.
   await assertSourcesWritable(selected.map((change) => change.path));
   const prepared = await Promise.all(selected.map(prepareSourceReplacement));
@@ -7986,6 +8482,13 @@ async function applyLinkedChangeSet(body) {
       beforeSource: changes[0].source,
       afterSource: current,
       afterEtag: sha(current),
+      // One range over all changes in the file: the open comments outside it
+      // shift exactly, and the text inside it is aligned word by word.
+      edit: {
+        start: Math.min(...changes.map((change) => change.start)),
+        end: Math.max(...changes.map((change) => change.end)),
+        replacementEnd: Math.max(...changes.map((change) => change.end)) + current.length - changes[0].source.length,
+      },
       beforeReview,
       afterReview,
     };
@@ -7998,14 +8501,14 @@ async function applyLinkedChangeSet(body) {
   const written = [];
   try {
     for (const file of files) {
-      await writeSource(file.path, file.afterSource);
+      await writeSource(file.path, file.afterSource, { previous: file.beforeSource, edit: file.edit, exceptIds: [request.id] });
       written.push(file);
     }
     await writeState(reviewState);
     await atomicWrite(target, `${JSON.stringify(request, null, 2)}\n`);
   } catch (error) {
     for (const file of [...written].reverse()) {
-      await writeSource(file.path, file.beforeSource).catch(() => {});
+      await writeSource(file.path, file.beforeSource, { previous: file.afterSource, edit: reverseEdit(file.edit) }).catch(() => {});
     }
     await writeState(beforeState).catch(() => {});
     throw error;
@@ -8092,30 +8595,18 @@ async function acceptRewriteProposal(body) {
   await assertSourcesWritable([request.path]);
   const source = await fs.readFile(absolutePath, "utf8");
   const sourceBlocks = parseBlocks(source);
-  let start = Number(request.proposal.absoluteStart);
-  let end = Number(request.proposal.absoluteEnd);
-  if (sha(source) !== request.proposal.sourceEtag ||
-      !Number.isInteger(start) || !Number.isInteger(end) ||
-      source.slice(start, end) !== request.proposal.originalText) {
-    const { match, matchCount } = findSelectionAnchor(source, sourceBlocks, {
-      ...request,
-      selectedText: request.proposal.originalText,
-      absoluteStart: start,
-      absoluteEnd: end,
-    });
-    if (!match) {
-      throw new Error(`The source changed and this proposal could not be merged safely (${matchCount} matching passages). Run the agent again for this item.`);
-    }
-    start = match.absoluteStart;
-    end = match.absoluteEnd;
-  }
+  const { match } = findSelectionAnchor(source, sourceBlocks, proposalLookup(request));
+  if (!match) throw new Error(COMMENTED_TEXT_EDITED);
+  const start = match.absoluteStart;
+  const end = match.absoluteEnd;
   const sourceMatch = selectionMatchFromAbsolute(sourceBlocks, start, end)
     || selectionSpanFromAbsoluteRange(sourceBlocks, start, end);
   if (!sourceMatch) throw new Error("The proposed source range no longer belongs to the selected passage.");
   const replacement = String(request.proposal.replacementText || "");
   const nextSource = `${source.slice(0, start)}${replacement}${source.slice(end)}`;
   assertNoNestedHeadingCommands(nextSource);
-  await writeSource(request.path, nextSource);
+  const edit = { start, end, replacementEnd: start + replacement.length };
+  await writeSource(request.path, nextSource, { previous: source, edit, exceptIds: [request.id] });
   request.status = "resolved";
   request.acceptedAt = new Date().toISOString();
   request.resolutionSummary = request.proposal.summary || "Accepted Paper Pal proposal";
@@ -8148,6 +8639,7 @@ async function acceptRewriteProposal(body) {
     afterEtag: sha(nextSource),
     beforeReview,
     afterReview,
+    edit,
     requestId: request.id,
     beforeRequest,
     afterRequest: structuredClone(request),
@@ -8174,6 +8666,7 @@ async function undoLastAction() {
         afterEtag: action.afterEtag,
         beforeReview: action.beforeReview,
         afterReview: action.afterReview,
+        edit: action.edit,
       }];
   for (const file of files) {
     const currentSource = await fs.readFile(resolveDocument(file.path), "utf8");
@@ -8200,9 +8693,14 @@ async function undoLastAction() {
   }
 
   await assertSourcesWritable(files.filter((file) => typeof file.beforeSource === "string").map((file) => file.path));
+  // Open comments follow the text back (writeSource). The action's own
+  // request is resolved until it is restored below with its earlier anchor.
   for (const file of files) {
     if (typeof file.beforeSource === "string") {
-      await writeSource(file.path, file.beforeSource);
+      await writeSource(file.path, file.beforeSource, {
+        previous: typeof file.afterSource === "string" ? file.afterSource : null,
+        edit: reverseEdit(file.edit),
+      });
     }
     if (file.beforeReview) restoreReviewStateSnapshot(state, file.path, file.beforeReview);
   }
@@ -8301,11 +8799,7 @@ async function listRequests() {
           replacementDisplay: latexToDisplay(String(change.replacementText || ""), "paragraph", new Map(), proposalReferences).display,
           ...(await anchorFor({
             path: change.path,
-            selectedText: change.selectedText,
-            absoluteStart: change.absoluteStart,
-            absoluteEnd: change.absoluteEnd,
-            blockIndex: change.blockIndex,
-            endBlockIndex: change.endBlockIndex,
+            ...anchorLookup({ kind: "linked", target: change, field: "selectedText" }, request),
           })),
         })));
         request.proposal = {
@@ -8842,6 +9336,12 @@ async function noteSourceChange(absolutePath) {
   if (sourceSignatures.get(relativePath) === signature) return;
   sourceSignatures.set(relativePath, signature);
   if (Date.now() - (recentWrites.get(relativePath) || 0) < 2000) return;
+  // Store the open comments' mapped offsets, so they survive a restart that
+  // forgets the old text.
+  void withProjectLock(async () => {
+    const bytes = await fs.readFile(absolutePath);
+    if (sourceEncoding(bytes).valid) await rebaseOpenAnchors(relativePath, null, bytes.toString("utf8"));
+  }).catch(() => {});
   emit("document", { path: relativePath, reason: "external-change" });
 }
 

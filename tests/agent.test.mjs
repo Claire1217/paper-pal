@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { api, apiOk, cleanupAll, commentOn, getDocument, makeProject, startServer, stateDirectory, trySymlink, waitFor, waitForRequest } from "./helpers.mjs";
+import { api, apiOk, cleanupAll, commentOn, getDocument, makeProject, saveBlock, startServer, stateDirectory, trySymlink, waitFor, waitForRequest } from "./helpers.mjs";
 
 const SECRET = "sk-test-DO-NOT-LEAK-0123456789";
 
@@ -826,5 +826,500 @@ describe("linked change sets with several changes in one file", () => {
     const proposed = await waitForProposal(aliasedServer, created.id);
     assert.deepEqual(proposed.proposal.linkedChanges ?? [], []);
     assert.match((proposed.proposal.linkedWarnings ?? []).join("\n"), /different file/);
+  });
+});
+
+describe("comments on a sentence that appears twice", () => {
+  const REPEATED = "The model works well in practice.";
+  const MAIN = [
+    "\\documentclass{article}",
+    "\\begin{document}",
+    "\\section{Intro}",
+    `We study the model carefully. ${REPEATED}`,
+    "",
+    `Our results show a clear gain. ${REPEATED}`,
+    "",
+    "The final paragraph closes the paper with a summary of findings.",
+    "\\end{document}",
+    "",
+  ].join("\n");
+  after(cleanupAll);
+
+  async function start(main = MAIN) {
+    const project = await makeProject({ files: { "main.tex": main }, fakeAgent: true });
+    const server = await startServer(project.root);
+    const file = path.join(project.root, "main.tex");
+    return { project, server, file };
+  }
+
+  // A comment on one copy, chosen by its paragraph (commentOn takes the first).
+  async function commentOnCopy(server, paragraphStart, comment) {
+    const document = await getDocument(server, "main.tex");
+    const block = document.blocks.find((item) => item.raw.includes(paragraphStart));
+    const start = block.raw.indexOf(REPEATED);
+    return apiOk(server, "/api/rewrite", {
+      method: "POST",
+      body: { path: "main.tex", etag: document.etag, blockIndex: block.index, blockId: block.id, start, end: start + REPEATED.length, comment },
+    });
+  }
+
+  async function editParagraph(server, paragraphStart, edit) {
+    const document = await getDocument(server, "main.tex");
+    const block = document.blocks.find((item) => item.raw.includes(paragraphStart));
+    await saveBlock(server, document, block, edit(block.raw));
+  }
+
+  async function propose(server, id) {
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id } });
+    return waitForRequest(server, id, (request) => request.status === "proposed", "proposal");
+  }
+
+  // The proposal text the author accepts, as if the agent had written it.
+  async function setReplacement(project, id, replacementText) {
+    const requestFile = path.join(project.root, stateDirectory, "requests", `${id}.json`);
+    const stored = JSON.parse(await fs.readFile(requestFile, "utf8"));
+    stored.proposal.replacementText = replacementText;
+    await fs.writeFile(requestFile, JSON.stringify(stored), "utf8");
+  }
+
+  it("does not move a comment to the other copy when its own copy is edited away", async () => {
+    const { server, file } = await start();
+    const created = await commentOnCopy(server, "We study", "Tone this down.");
+    await editParagraph(server, "We study", (raw) => raw.replace(REPEATED, "It is fine."));
+    const listed = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+    assert.equal(listed.anchorValid, false, "the comment is shown as detached, not on the second paragraph");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    const failed = await waitFor(async () => {
+      const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+      return request?.agentStatus === "failed" || request?.status === "proposed" ? request : null;
+    }, { label: "run finished" });
+    assert.equal(failed.status, "pending", "no proposal is made for the second paragraph");
+    assert.match(failed.agentError, /commented text was edited/);
+    assert.ok((await fs.readFile(file, "utf8")).includes(`Our results show a clear gain. ${REPEATED}`));
+  });
+
+  it("keeps a comment on its copy after an edit nearby in the same paragraph", async () => {
+    const { server, file } = await start();
+    const created = await commentOnCopy(server, "We study", "Tone this down.");
+    await editParagraph(server, "We study", (raw) => raw.replace("carefully", "closely"));
+    await propose(server, created.id);
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: created.id } });
+    assert.equal(await fs.readFile(file, "utf8"),
+      MAIN.replace("carefully", "closely").replace(REPEATED, REPEATED.toUpperCase()));
+  });
+
+  it("keeps a comment on its copy after another comment in its paragraph is accepted", async () => {
+    const { server, file } = await start();
+    const first = await commentOnCopy(server, "We study", "A");
+    const neighbour = await commentOn(server, "main.tex", "We study the model carefully.", "B");
+    await propose(server, first.id);
+    await propose(server, neighbour.id);
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: neighbour.id } });
+    const accepted = await api(server, "/api/request/accept", { method: "POST", body: { id: first.id } });
+    assert.equal(accepted.status, 200, accepted.value?.error);
+    assert.equal(await fs.readFile(file, "utf8"),
+      MAIN.replace(`We study the model carefully. ${REPEATED}`, `WE STUDY THE MODEL CAREFULLY. ${REPEATED.toUpperCase()}`));
+  });
+
+  it("moves open comments with the text when an accept or an undo rewrites around them", async () => {
+    const { project, server, file } = await start();
+    const target = await commentOnCopy(server, "Our results", "Tone this down.");
+    const before = await commentOn(server, "main.tex", "Our results show a clear gain.", "Shorter.");
+    const afterward = await commentOn(server, "main.tex", "The final paragraph closes the paper with a summary of findings.", "Shorter.");
+    await propose(server, before.id);
+    await propose(server, afterward.id);
+    await setReplacement(project, before.id, "We see a gain.");
+    await setReplacement(project, afterward.id, "That is all.");
+    const storedRange = async (id) => {
+      const stored = JSON.parse(await fs.readFile(path.join(project.root, stateDirectory, "requests", `${id}.json`), "utf8"));
+      return [stored.absoluteStart, stored.absoluteEnd];
+    };
+    const target2 = MAIN.lastIndexOf(REPEATED);
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: before.id } });
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: afterward.id } });
+    const shift = "We see a gain.".length - "Our results show a clear gain.".length;
+    assert.deepEqual(await storedRange(target.id), [target2 + shift, target2 + shift + REPEATED.length]);
+    await apiOk(server, "/api/undo", { method: "POST" });
+    await apiOk(server, "/api/undo", { method: "POST" });
+    assert.equal(await fs.readFile(file, "utf8"), MAIN);
+    assert.deepEqual(await storedRange(target.id), [target2, target2 + REPEATED.length], "Undo moves the comment back");
+
+    // Both sides of the target's stored context change, and its first copy
+    // stays untouched: only the recorded edits can tell where it went.
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: before.id } });
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: afterward.id } });
+    const edited = MAIN.replace("Our results show a clear gain.", "We see a gain.")
+      .replace("The final paragraph closes the paper with a summary of findings.", "That is all.");
+    assert.equal(await fs.readFile(file, "utf8"), edited);
+    await propose(server, target.id);
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: target.id } });
+    assert.equal(await fs.readFile(file, "utf8"),
+      edited.replace(`We see a gain. ${REPEATED}`, `We see a gain. ${REPEATED.toUpperCase()}`));
+  });
+
+  it("moves open comments with the text when a tracked change is resolved", async () => {
+    const tracked = MAIN.replace("show a clear gain.", "show a \\chdel{very }clear gain.");
+    const { project, server, file } = await start(tracked);
+    const target = await commentOnCopy(server, "Our results", "Tone this down.");
+    const document = await getDocument(server, "main.tex");
+    const block = document.blocks.find((item) => item.raw.includes("\\chdel"));
+    const [group] = block.trackedChanges;
+    await apiOk(server, "/api/tracked-change/resolve", {
+      method: "POST",
+      body: {
+        path: "main.tex", etag: document.etag, blockIndex: block.index, blockId: block.id,
+        start: group.start, end: group.end, text: block.raw.slice(group.start, group.end), action: "accept",
+      },
+    });
+    assert.equal(await fs.readFile(file, "utf8"), MAIN);
+    const stored = JSON.parse(await fs.readFile(path.join(project.root, stateDirectory, "requests", `${target.id}.json`), "utf8"));
+    assert.equal(stored.absoluteStart, MAIN.lastIndexOf(REPEATED));
+    assert.equal(stored.blockId, (await getDocument(server, "main.tex")).blocks.find((item) => item.raw.includes("Our results")).id);
+  });
+
+  async function chatOn(server, passage) {
+    const document = await getDocument(server, "main.tex");
+    const block = document.blocks.find((item) => item.raw.includes(passage));
+    const offset = block.raw.indexOf(passage);
+    const session = await apiOk(server, "/api/chat/message", {
+      method: "POST",
+      body: {
+        message: "Is this too strong?",
+        activePath: "main.tex",
+        selectionContext: {
+          path: "main.tex", etag: document.etag, selectedText: passage,
+          blockId: block.id, blockIndex: block.index, start: offset, end: offset + passage.length,
+          absoluteStart: block.start + offset, absoluteEnd: block.start + offset + passage.length,
+        },
+      },
+    });
+    const answered = await waitFor(async () => {
+      const current = await apiOk(server, `/api/chat?id=${session.id}`);
+      if (current.status === "failed") throw new Error(current.error);
+      return current.status === "idle" && current.messages.length === 2 ? current : null;
+    }, { label: "chat answer" });
+    return () => api(server, "/api/chat/create-proposal", {
+      method: "POST",
+      body: { sessionId: session.id, assistantMessageId: answered.messages[1].id, autoProcess: false },
+    });
+  }
+
+  it("refuses a chat proposal when the discussed text was edited during the chat", async () => {
+    const { server } = await start();
+    const discussed = "Our results show a clear gain.";
+    const createProposal = await chatOn(server, discussed);
+    await editParagraph(server, discussed, (raw) => raw.replace("clear gain", "small gain"));
+    const result = await createProposal();
+    assert.notEqual(result.status, 202);
+    assert.match(result.value.error, /discussed text was edited/);
+  });
+
+  it("creates a chat proposal when only the text around the discussed passage changed", async () => {
+    for (const edit of [
+      // A paragraph added above the first one under the heading.
+      (source) => source.replace("\\section{Intro}\n", "\\section{Intro}\nA new opening paragraph.\n\n"),
+      // Another sentence and a word before the passage, in its own paragraph.
+      (source) => source.replace("We study the model carefully.", "We study the model closely. We also check it."),
+    ]) {
+      const { server, file } = await start();
+      const discussed = "We study the model";
+      const createProposal = await chatOn(server, discussed);
+      await fs.writeFile(file, edit(MAIN), "utf8");
+      const result = await createProposal();
+      assert.equal(result.status, 202, result.value?.error);
+    }
+  });
+});
+
+describe("comment anchors through edits in the page and in other programs", () => {
+  after(cleanupAll);
+
+  async function commentAt(server, relativePath, paragraph, needle, comment = "Tone this down.") {
+    const document = await getDocument(server, relativePath);
+    const block = document.blocks.find((item) => item.raw.includes(paragraph));
+    const start = block.raw.indexOf(needle);
+    return apiOk(server, "/api/rewrite", {
+      method: "POST",
+      body: { path: relativePath, etag: document.etag, blockIndex: block.index, blockId: block.id, start, end: start + needle.length, comment },
+    });
+  }
+
+  async function runToEnd(server, id) {
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id } });
+    return waitFor(async () => {
+      const request = (await apiOk(server, "/api/requests")).find((item) => item.id === id);
+      return request?.agentStatus === "failed" || request?.status === "proposed" ? request : null;
+    }, { label: "run finished" });
+  }
+
+  const SENTENCE = "As shown in Table 2, the proposed method outperforms all baselines on every benchmark.";
+  const RESULTS = [
+    "\\documentclass{article}",
+    "\\begin{document}",
+    "\\section{Results}",
+    `We evaluate on five datasets. ${SENTENCE}`,
+    "",
+    `In the ablation we drop one module at a time. ${SENTENCE}`,
+    "",
+    "The end.",
+    "\\end{document}",
+    "",
+  ].join("\n");
+
+  it("refuses a comment on part of a long repeated sentence once its own copy is reworded", async () => {
+    const project = await makeProject({ files: { "main.tex": RESULTS }, fakeAgent: true });
+    const server = await startServer(project.root);
+    const created = await commentAt(server, "main.tex", "We evaluate", "As shown in Table 2");
+    const document = await getDocument(server, "main.tex");
+    const block = document.blocks.find((item) => item.raw.includes("We evaluate"));
+    await saveBlock(server, document, block, block.raw.replace("As shown in Table 2", "Table 2 shows that"));
+    const finished = await runToEnd(server, created.id);
+    assert.equal(finished.status, "pending");
+    assert.match(finished.agentError, /commented text was edited/);
+    assert.ok((await fs.readFile(path.join(project.root, "main.tex"), "utf8")).includes(`a time. ${SENTENCE}`));
+  });
+
+  it("refuses, and never moves, a comment whose text an accepted proposal rewrote", async () => {
+    const project = await makeProject({ files: { "main.tex": RESULTS }, fakeAgent: true });
+    const server = await startServer(project.root);
+    const file = path.join(project.root, "main.tex");
+    const accepted = await commentAt(server, "main.tex", "In the ablation", "As shown in Table 2, the proposed method");
+    const overlapping = await commentAt(server, "main.tex", "In the ablation", "the proposed method outperforms");
+    await runToEnd(server, accepted.id);
+    const requestFile = path.join(project.root, stateDirectory, "requests", `${accepted.id}.json`);
+    const stored = JSON.parse(await fs.readFile(requestFile, "utf8"));
+    stored.proposal.replacementText = "Table 2 shows that our method";
+    await fs.writeFile(requestFile, JSON.stringify(stored), "utf8");
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: accepted.id } });
+    const listed = (await apiOk(server, "/api/requests")).find((item) => item.id === overlapping.id);
+    assert.equal(listed.anchorValid, false);
+    const finished = await runToEnd(server, overlapping.id);
+    assert.equal(finished.status, "pending");
+    assert.match(finished.agentError, /commented text was edited/);
+    assert.ok((await fs.readFile(file, "utf8")).includes(`five datasets. ${SENTENCE}`), "the first paragraph is untouched");
+
+    // Undo brings the rewritten text back, and with it the comment.
+    await apiOk(server, "/api/undo", { method: "POST" });
+    const restored = (await apiOk(server, "/api/requests")).find((item) => item.id === overlapping.id);
+    assert.equal(restored.anchorValid, true);
+    assert.equal(restored.resolvedAbsoluteStart, RESULTS.lastIndexOf("the proposed method outperforms"));
+  });
+
+  // [name, before, passage, after]. The passage is the only copy in its file.
+  const EXTERNAL = [
+    ["both neighbouring words", "Intro.\n\nWe gather data. The model works well in practice. It holds for all sizes.\n",
+      "The model works well in practice.", "Intro.\n\nWe collect data. The model works well in practice. Something holds for all sizes.\n"],
+    ["start of a file", "The first claim holds. We study models.\n\nMore.\n",
+      "The first claim holds.", "The first claim holds. We examine models.\n\nMore.\n"],
+    ["end of a file without a newline", "Intro text here.\n\nWe study models. The final claim holds.",
+      "The final claim holds.", "Intro text here.\n\nWe examine models. The final claim holds."],
+    ["short paragraph", "Intro paragraph that is long enough to matter here.\n\nAlpha beta gamma.\n\nOutro.\n",
+      "beta", "Intro paragraph that is long enough to matter here.\n\nAlphas beta gammas.\n\nOutro.\n"],
+    ["typo fixes around the passage", "Intro.\n\nWe obsreve that the model works well in pratice on all data.\n",
+      "the model works well", "Intro.\n\nWe observe that the model works well in practice on all data.\n"],
+    ["paragraph added above and a word edited before", "First para.\n\nWe study models. The final claim holds. Then more text follows.\n",
+      "The final claim holds.", "New para inserted.\n\nFirst para.\n\nWe examine models. The final claim holds. Then more text follows.\n"],
+    ["CRLF lines", "Intro.\r\n\r\nWe gather data. The model works well in practice. It holds.\r\n",
+      "The model works well in practice.", "Intro.\r\n\r\nWe collect data. The model works well in practice. That holds.\r\n"],
+  ];
+
+  it("keeps a comment on its text through edits made in another program", async () => {
+    const files = { "main.tex": "\\documentclass{article}\n\\begin{document}\nHello.\n\\end{document}\n" };
+    EXTERNAL.forEach(([, before], index) => { files[`e${index}.md`] = before; });
+    files["edited.md"] = "Intro.\n\nWe gather data. The model works well in practice. It holds.\n";
+    const project = await makeProject({ files, fakeAgent: true });
+    const server = await startServer(project.root);
+    const ids = [];
+    for (const [index, [, , passage]] of EXTERNAL.entries()) {
+      ids.push((await commentAt(server, `e${index}.md`, passage, passage)).id);
+    }
+    const editedId = (await commentAt(server, "edited.md", "works well", "works well")).id;
+    for (const [index, [, , , after]] of EXTERNAL.entries()) await fs.writeFile(path.join(project.root, `e${index}.md`), after);
+    await fs.writeFile(path.join(project.root, "edited.md"), "Intro.\n\nWe gather data. The model works poorly in practice. It holds.\n");
+    const requests = await apiOk(server, "/api/requests");
+    for (const [index, [name, , passage, after]] of EXTERNAL.entries()) {
+      const request = requests.find((item) => item.id === ids[index]);
+      assert.equal(request.anchorValid, true, name);
+      assert.equal(request.resolvedAbsoluteStart, after.indexOf(passage), name);
+    }
+    assert.equal(requests.find((item) => item.id === editedId).anchorValid, false, "the commented text itself was edited");
+  });
+
+  it("keeps a comment valid when the words on both sides of it are saved in the page", async () => {
+    const source = "\\documentclass{article}\n\\begin{document}\nWe gather data. The model works well in practice. It holds.\n\\end{document}\n";
+    const project = await makeProject({ files: { "main.tex": source }, fakeAgent: true });
+    const server = await startServer(project.root);
+    const passage = "The model works well in practice.";
+    const created = await commentAt(server, "main.tex", passage, passage);
+    const document = await getDocument(server, "main.tex");
+    const block = document.blocks.find((item) => item.raw.includes(passage));
+    await saveBlock(server, document, block, block.raw.replace("gather data.", "collect data.").replace("It holds.", "That holds."));
+    await runToEnd(server, created.id);
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: created.id } });
+    assert.equal(await fs.readFile(path.join(project.root, "main.tex"), "utf8"),
+      source.replace("gather data.", "collect data.").replace("It holds.", "That holds.").replace(passage, passage.toUpperCase()));
+  });
+
+  it("after a restart, finds a comment again only by offsets that still hold or by strongly matching text", async () => {
+    const source = [
+      "\\documentclass{article}", "\\begin{document}",
+      "An opening paragraph that will grow while the server is stopped.", "",
+      "We gather data. The model works well in practice. It holds.", "",
+      "Closing words of a reasonable length for the context check here.", "",
+      "\\end{document}", "",
+    ].join("\n");
+    const project = await makeProject({ files: { "main.tex": source, "near.tex": source }, fakeAgent: true });
+    const file = path.join(project.root, "main.tex");
+    let server = await startServer(project.root);
+    const passage = "The model works well in practice.";
+    const far = await commentAt(server, "main.tex", passage, passage);
+    const near = await commentAt(server, "near.tex", passage, passage);
+    await server.stop();
+    await fs.writeFile(file, source.replace("will grow", "has grown by several words"), "utf8");
+    await fs.writeFile(path.join(project.root, "near.tex"), source.replace("gather data.", "collect data.").replace("It holds.", "That holds."), "utf8");
+    server = await startServer(project.root);
+    const requests = await apiOk(server, "/api/requests");
+    const moved = requests.find((item) => item.id === far.id);
+    assert.equal(moved.anchorValid, true);
+    assert.equal(moved.resolvedAbsoluteStart, (await fs.readFile(file, "utf8")).indexOf(passage));
+    assert.equal(requests.find((item) => item.id === near.id).anchorValid, false, "no old text to map from: both sides changed, so it is refused");
+  });
+
+  // Paragraphs of unique lines, as a long manuscript has them.
+  function longManuscript(paragraphs, linesPerParagraph = 5) {
+    const body = Array.from({ length: paragraphs }, (_, p) => Array.from({ length: linesPerParagraph },
+      (_, l) => `Paragraph ${p} line ${l} discusses result ${p * linesPerParagraph + l} in plain words.`).join("\n"));
+    return `\\documentclass{article}\n\\begin{document}\n${body.join("\n\n")}\n\\end{document}\n`;
+  }
+
+  async function commentsOnLines(server, relativePath, source, lines) {
+    const ids = [];
+    for (const line of lines) {
+      const passage = `line ${line.split(" line ")[1]}`;
+      const created = await commentAt(server, relativePath, line, passage);
+      ids.push({ id: created.id, passage, line });
+    }
+    return ids;
+  }
+
+  async function assertAllOnText(server, file, comments, label) {
+    const source = await fs.readFile(file, "utf8");
+    const requests = await apiOk(server, "/api/requests");
+    for (const { id, passage, line } of comments) {
+      const request = requests.find((item) => item.id === id);
+      assert.equal(request.anchorValid, true, `${label}: ${line}`);
+      const lineStart = source.indexOf(line.split(" line ")[0] + " line " + line.split(" line ")[1].split(" ")[0] + " ");
+      assert.equal(request.resolvedAbsoluteStart, source.indexOf(passage, lineStart), `${label}: ${line}`);
+    }
+  }
+
+  it("keeps every comment through 40 scattered one-word edits in a 2,200-line file", async () => {
+    const source = longManuscript(440);
+    const project = await makeProject({ files: { "main.tex": source }, fakeAgent: true });
+    const server = await startServer(project.root);
+    const file = path.join(project.root, "main.tex");
+    const lines = source.split("\n").filter((line) => line.startsWith("Paragraph "));
+    const comments = await commentsOnLines(server, "main.tex", source, lines.filter((_, index) => index % 110 === 7));
+    let edited = source;
+    for (let index = 0; index < 40; index += 1) {
+      const result = 3 + index * 53;
+      edited = edited.replace(`discusses result ${result} in`, `discusses outcome ${result} in`);
+    }
+    await fs.writeFile(file, edited, "utf8");
+    await assertAllOnText(server, file, comments, "scattered edits");
+  });
+
+  it("keeps every comment when another program converts the line endings", async () => {
+    const source = longManuscript(160);
+    const project = await makeProject({ files: { "main.tex": source }, fakeAgent: true });
+    const server = await startServer(project.root);
+    const file = path.join(project.root, "main.tex");
+    const lines = source.split("\n").filter((line) => line.startsWith("Paragraph "));
+    const comments = await commentsOnLines(server, "main.tex", source, lines.filter((_, index) => index % 80 === 11));
+    await fs.writeFile(file, source.replace(/\n/g, "\r\n"), "utf8");
+    await assertAllOnText(server, file, comments, "CRLF");
+    // The change watcher stores the mapped offsets; it must not mark them.
+    await new Promise((resolve) => setTimeout(resolve, 3500));
+    for (const { id } of comments) {
+      const stored = JSON.parse(await fs.readFile(path.join(project.root, stateDirectory, "requests", `${id}.json`), "utf8"));
+      assert.equal(stored.anchorChanged, undefined);
+    }
+    await fs.writeFile(file, source.replace("discusses result 3 in", "discusses outcome 3 in"), "utf8");
+    await assertAllOnText(server, file, comments, "back to LF with an edit");
+  });
+
+  it("keeps a comment inside a long one-line Chinese paragraph edited near both ends", async () => {
+    const sentence = "我们在四个领域收集了带标注的稿件并比较了不同的方法。";
+    const paragraph = Array.from({ length: 76 }, (_, index) => `第${index}句：${sentence}`).join("");
+    const passage = "第38句：我们在四个领域收集了带标注的稿件";
+    const source = `\\documentclass{article}\n\\begin{document}\n${paragraph}\n\\end{document}\n`;
+    assert.ok(paragraph.length > 1900);
+    const project = await makeProject({ files: { "main.tex": source }, fakeAgent: true });
+    const server = await startServer(project.root);
+    const file = path.join(project.root, "main.tex");
+    const created = await commentAt(server, "main.tex", passage, passage);
+    const edited = source.replace("第1句：我们", "第1句：他们").replace("第74句：我们", "第74句：他们");
+    await fs.writeFile(file, edited, "utf8");
+    const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+    assert.equal(request.anchorValid, true);
+    assert.equal(request.resolvedAbsoluteStart, edited.indexOf(passage));
+  });
+
+  it("finds a comment again after another program cuts and pastes its paragraph elsewhere", async () => {
+    const paragraphs = [
+      "The opening paragraph sets out the question in a few plain words.",
+      "A middle paragraph with its own material that stays where it is.",
+      "We moved this paragraph: the commented sentence sits in its middle, well away from both of its ends.",
+      "The closing paragraph sums up what the study found and what it did not.",
+    ];
+    const wrap = (items) => `\\documentclass{article}\n\\begin{document}\n${items.join("\n\n")}\n\\end{document}\n`;
+    const source = wrap(paragraphs);
+    const moved = wrap([paragraphs[2], paragraphs[0], paragraphs[1], paragraphs[3]]);
+    const passage = "the commented sentence sits in its middle";
+    const project = await makeProject({ files: { "main.tex": source }, fakeAgent: true });
+    const server = await startServer(project.root);
+    const created = await commentAt(server, "main.tex", passage, passage);
+    await fs.writeFile(path.join(project.root, "main.tex"), moved, "utf8");
+    const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+    assert.equal(request.anchorValid, true);
+    assert.equal(request.resolvedAbsoluteStart, moved.indexOf(passage));
+  });
+
+  it("moves an open comment through a linked change set with two changes in its file", async () => {
+    const MAIN = "\\documentclass{article}\n\\begin{document}\n\\input{sec}\nMain body paragraph here.\n\\end{document}\n";
+    const SEC = "Alpha opens the study.\n\nThe model works well in practice. Beta opens the result.\n\nGamma paragraph to edit by link.\n";
+    const project = await makeProject({ files: { "main.tex": MAIN, "sec.tex": SEC }, fakeAgent: true });
+    const server = await startServer(project.root);
+    const passage = "The model works well in practice.";
+    const third = await commentAt(server, "sec.tex", passage, passage);
+    const primary = await commentOn(server, "main.tex", "Main body paragraph here.", "Shorten this.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: primary.id } });
+    await waitForRequest(server, primary.id, (request) => request.status === "proposed", "proposal");
+    const sec = await getDocument(server, "sec.tex");
+    const change = (id, selectedText, replacementText) => {
+      const absoluteStart = sec.source.indexOf(selectedText);
+      return {
+        id, path: "sec.tex", status: "confirmed", required: true, sourceEtag: sec.etag,
+        absoluteStart, absoluteEnd: absoluteStart + selectedText.length, selectedText, replacementText, summary: "test",
+      };
+    };
+    const requestFile = path.join(project.root, stateDirectory, "requests", `${primary.id}.json`);
+    const stored = JSON.parse(await fs.readFile(requestFile, "utf8"));
+    stored.proposal.primaryReviewStatus = "confirmed";
+    stored.proposal.linkedChanges = [
+      change("linked_1", "Alpha opens the study.", "A."),
+      change("linked_2", "Gamma paragraph to edit by link.", "G."),
+    ];
+    await fs.writeFile(`${requestFile}.tmp`, JSON.stringify(stored), "utf8");
+    await fs.rename(`${requestFile}.tmp`, requestFile);
+    await apiOk(server, "/api/request/apply-linked", { method: "POST", body: { id: primary.id } });
+    const after = SEC.replace("Alpha opens the study.", "A.").replace("Gamma paragraph to edit by link.", "G.");
+    assert.equal(await fs.readFile(path.join(project.root, "sec.tex"), "utf8"), after);
+    const moved = (await apiOk(server, "/api/requests")).find((item) => item.id === third.id);
+    assert.equal(moved.anchorValid, true);
+    assert.equal(moved.resolvedAbsoluteStart, after.indexOf(passage));
+    await runToEnd(server, third.id);
+    await apiOk(server, "/api/request/accept", { method: "POST", body: { id: third.id } });
+    assert.equal(await fs.readFile(path.join(project.root, "sec.tex"), "utf8"), after.replace(passage, passage.toUpperCase()));
   });
 });
