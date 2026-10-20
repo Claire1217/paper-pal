@@ -93,12 +93,18 @@ let compileTimer = null;
 const codexRuns = new Map();
 const codexQueue = [];
 const cancelledCodexRequests = new Set();
+// Requests that received a follow-up while their run was going. That run reads
+// the conversation as it was when it started, so its answer is discarded and
+// the request runs again once it ends.
+const rerunCodexRequests = new Set();
 let codexQueueRunning = false;
 let activeCodexChild = null;
 let activeCodexRequestId = null;
 let currentChatSessionId = null;
 const chatQueue = [];
 const activeChatRuns = new Map();
+// Stopped runs whose child may still be exiting; shutdown signals them too.
+const stoppedChatRuns = new Set();
 const maxConcurrentChatTurns = Math.max(1, Number(config.codex?.chatConcurrency) || 1);
 let chatQueueDraining = false;
 const proposalSchemaPath = path.join(appRoot, "schemas", "proposal-output.schema.json");
@@ -4293,6 +4299,19 @@ async function validateLinkedCommentTargets(rawTargets, source) {
   const targets = [];
   const warnings = [];
   const seen = new Set();
+  // A follow-up runs the search again. A location that already has an active
+  // linked comment from this source keeps it rather than getting a second one.
+  const existing = new Map();
+  for (const id of Array.isArray(source.links) ? source.links : []) {
+    try {
+      const { value: linked } = await readRewriteRequest(id);
+      if (linked.origin?.sourceRequestId === source.id && ["pending", "proposed", "discussed"].includes(linked.status)) {
+        existing.set(`${linked.path}:${linked.absoluteStart}:${linked.absoluteEnd}`, linked.id);
+      }
+    } catch {
+      // A link whose file is gone cannot be reused.
+    }
+  }
   for (const [index, raw] of (Array.isArray(rawTargets) ? rawTargets : []).entries()) {
     try {
       const suppliedPath = String(raw?.path || "").trim();
@@ -4328,7 +4347,8 @@ async function validateLinkedCommentTargets(rawTargets, source) {
         || selectionSpanFromAbsoluteRange(blocks, absoluteStart, absoluteEnd);
       if (!span) throw new Error("the source anchor does not map to a reviewable source range");
       seen.add(key);
-      targets.push({ path: targetPath, span, comment, reason });
+      const existingId = existing.get(`${targetPath}:${span.absoluteStart}:${span.absoluteEnd}`);
+      targets.push({ path: targetPath, span, comment, reason, ...(existingId ? { existingId } : {}) });
     } catch (error) {
       warnings.push(`Linked location ${index + 1} was not attached: ${error.message}`);
     }
@@ -4339,10 +4359,15 @@ async function validateLinkedCommentTargets(rawTargets, source) {
 // Create one comment per resolved target and link it to its source comment in
 // both directions. Each is an ordinary comment at that location, so it can be
 // run for a proposal later; it just does not draft one on arrival, because the
-// author asked to be shown the locations first.
+// author asked to be shown the locations first. A target that already has a
+// linked comment (from an earlier search) is listed with that one.
 async function createLinkedCommentRequests(sourceRequest, targets, { autoProcess = false } = {}) {
   const created = [];
   for (const target of targets) {
+    if (target.existingId) {
+      created.push({ id: target.existingId, path: target.path, reason: target.reason });
+      continue;
+    }
     const payload = await documentPayload(target.path);
     const request = buildRewriteRequest({
       payload,
@@ -4431,7 +4456,10 @@ async function validateRelatedProposalChanges(rawChanges, primaryPath) {
 // already there. Accepting that would double the text in the source. An echo
 // is removed when the replacement begins (ends) with the text right before
 // (after) the selection and the selected text itself did not: either up to
-// three whole words, or any run of 12 or more characters.
+// three whole words, or any run of 12 or more characters. A repeated word can
+// also be meant ("argued that" + "that claim…", "we had" + "had to…"), so a
+// word echo goes only when the rest lines up with the selection word for word
+// better than the whole replacement does, or when the other edge echoes too.
 function trimBoundaryEcho(replacementText, originalText, before, after) {
   let result = replacementText;
   const overlap = (longest, candidate, original) => {
@@ -4456,23 +4484,42 @@ function trimBoundaryEcho(replacementText, originalText, before, after) {
 
   const lead = longLead || /^\s/.test(result) ? "" : before.match(/(?:^|\s)((?:\S+[ \t]+){1,3})$/)?.[1] || "";
   const leadWords = lead.split(/(?<=[ \t])(?=\S)/);
-  for (let count = leadWords.length; count >= 1; count -= 1) {
+  let leadEcho = "";
+  for (let count = leadWords.length; count >= 1 && !leadEcho; count -= 1) {
     const echo = leadWords.slice(-count).join("");
-    if (/\w/.test(echo) && result.startsWith(echo) && !originalText.startsWith(echo)) {
-      result = result.slice(echo.length);
-      break;
-    }
+    if (/\w/.test(echo) && result.startsWith(echo) && !originalText.startsWith(echo)) leadEcho = echo;
   }
-  const tail = longTail || /\s$/.test(result) ? "" : after.match(/^((?:[ \t]+\S+){1,3})(?=\s|$)/)?.[1] || "";
+  const rest = result.slice(leadEcho.length);
+  const tail = longTail || /\s$/.test(rest) ? "" : after.match(/^((?:[ \t]+\S+){1,3})(?=\s|$)/)?.[1] || "";
   const tailWords = tail.split(/(?<=\S)(?=[ \t])/);
-  for (let count = tailWords.length; count >= 1; count -= 1) {
+  let tailEcho = "";
+  for (let count = tailWords.length; count >= 1 && !tailEcho; count -= 1) {
     const echo = tailWords.slice(0, count).join("");
-    if (/\w/.test(echo) && result.endsWith(echo) && !originalText.endsWith(echo)) {
-      result = result.slice(0, -echo.length);
-      break;
-    }
+    if (/\w/.test(echo) && rest.endsWith(echo) && !originalText.endsWith(echo)) tailEcho = echo;
   }
   const mark = longTail ? null : after.match(/^[.,;:!?]/)?.[0];
+  const markEcho = Boolean(mark && result.endsWith(mark) && !originalText.endsWith(mark));
+  // How many words, counted from one edge, stand where the selection has them.
+  const words = (text) => String(text).trim().split(/\s+/).filter(Boolean)
+    .map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").toLowerCase());
+  const aligned = (text, fromEnd) => {
+    const candidate = words(text);
+    const original = words(originalText);
+    if (fromEnd) {
+      candidate.reverse();
+      original.reverse();
+    }
+    return candidate.filter((word, index) => word && word === original[index]).length;
+  };
+  // One selected word replaced by one word plus a neighbour ("0.5 percent" ->
+  // ".3 percent") is an echo; a meant doubling needs more words around it.
+  const oneForOne = (text) => words(originalText).length === 1 && words(text).length === 1;
+  const echoes = (trimmed, fromEnd) => aligned(trimmed, fromEnd) > aligned(result, fromEnd) || oneForOne(trimmed);
+  if (leadEcho && (longTail || tailEcho || markEcho || echoes(rest, false))) result = rest;
+  if (tailEcho) {
+    const trimmed = result.slice(0, -tailEcho.length);
+    if (longLead || leadEcho || echoes(trimmed, true)) result = trimmed;
+  }
   if (mark && result.trim() && result.endsWith(mark) && !originalText.endsWith(mark)) result = result.slice(0, -1);
   return result;
 }
@@ -4903,8 +4950,6 @@ async function generateCodexProposal(requestId) {
   }
   activeCodexRequestId = requestId;
   codexRunPayload(requestId, "running");
-  const temporaryRoot = await fs.mkdtemp(path.join(tmpdir(), `${TEMP_PREFIX}agent-`));
-  const outputPath = path.join(temporaryRoot, "proposal.json");
   const request = await withProjectLock(async () => {
     const { target: requestPath, value: savedRequest } = await readRewriteRequest(requestId);
     return refreshRewriteRequestAnchor(requestPath, savedRequest);
@@ -5153,6 +5198,10 @@ async function generateCodexProposal(requestId) {
     JSON.stringify(task),
   ].join("\n");
   const prompt = isLink || !useMinimalPrompt ? fullPrompt : minimalPrompt.join("\n");
+  // Created only now, right before the try whose finally removes it: any of
+  // the steps above can throw (a passage that is gone, an unreadable file).
+  const temporaryRoot = await fs.mkdtemp(path.join(tmpdir(), `${TEMP_PREFIX}agent-`));
+  const outputPath = path.join(temporaryRoot, "proposal.json");
   try {
     if (cancelledCodexRequests.has(requestId)) {
       const error = new Error("The agent run was cancelled because the comment was deleted.");
@@ -5208,6 +5257,11 @@ async function generateCodexProposal(requestId) {
     // linked requests), so it runs under the project lock: a follow-up or a
     // delete arriving at the same moment cannot be overwritten.
     await withProjectLock(async () => {
+      if (rerunCodexRequests.has(requestId)) {
+        const error = new Error("A follow-up arrived while the agent was answering; the request runs again.");
+        error.code = "CODEX_SUPERSEDED";
+        throw error;
+      }
       if (isDiscussion) {
         const answer = typeof proposal.answer === "string" ? proposal.answer.trim() : "";
         const recommendation = typeof proposal.recommendation === "string" ? proposal.recommendation.trim() : "";
@@ -5396,6 +5450,14 @@ async function drainCodexQueue() {
           });
           codexRuns.delete(requestId);
           cancelledCodexRequests.delete(requestId);
+          rerunCodexRequests.delete(requestId);
+          continue;
+        }
+        // The answer or failure belongs to the conversation before the
+        // follow-up, so neither is shown: the request goes back in the queue.
+        if (rerunCodexRequests.delete(requestId)) {
+          codexQueue.push(requestId);
+          codexRunPayload(requestId, "queued");
           continue;
         }
         try {
@@ -5439,9 +5501,15 @@ function assertAgentEnabled() {
   }
 }
 
-function queueCodexProposal(requestId) {
+function queueCodexProposal(requestId, { rerunIfActive = false } = {}) {
   assertAgentEnabled();
-  if (codexQueue.includes(requestId) || ["queued", "running", "validating"].includes(codexRuns.get(requestId)?.status)) return;
+  // A request still in the queue is read when its run starts. One whose run
+  // has started was read already, so a follow-up needs a fresh run after it.
+  if (codexQueue.includes(requestId)) return;
+  if (["queued", "running", "validating"].includes(codexRuns.get(requestId)?.status)) {
+    if (rerunIfActive) rerunCodexRequests.add(requestId);
+    return;
+  }
   codexQueue.push(requestId);
   codexRunPayload(requestId, "queued");
   void drainCodexQueue();
@@ -5542,6 +5610,9 @@ async function selectChatSession(body) {
     await atomicWrite(chatArchivePath(current.id), `${JSON.stringify(current, null, 2)}\n`);
   }
   await writeChatSession(selected, { makeCurrent: true, preserveUpdatedAt: true });
+  // The current file is now the only copy. A stale archive copy would list the
+  // chat as interrupted (it still says "running") once this run has finished.
+  await fs.rm(chatArchivePath(selected.id), { force: true });
   emit("chats", { currentId: selected.id, reason: "selected" });
   return selected;
 }
@@ -5567,6 +5638,9 @@ async function listChatSessions() {
     try {
       const session = JSON.parse(await fs.readFile(target, "utf8"));
       if (!chatIdPattern.test(String(session?.id || ""))) return;
+      // The current session is read from its own file; an archive copy of it
+      // is left over from before it was selected.
+      if (!isCurrent && session.id === currentChatSessionId) return;
       const runIsMissing = !activeChatRuns.has(session.id) && !chatQueue.includes(session.id);
       if (["queued", "running"].includes(session.status) && runIsMissing) {
         session.status = "interrupted";
@@ -5950,6 +6024,7 @@ function drainChatQueue() {
       activeChatRuns.set(sessionId, run);
       void runChatTurn(sessionId).finally(() => {
         if (activeChatRuns.get(sessionId) === run) activeChatRuns.delete(sessionId);
+        stoppedChatRuns.delete(run);
         drainChatQueue();
       });
     }
@@ -5965,8 +6040,10 @@ async function runChatTurn(sessionId) {
   const timeoutMs = Number(config.codex?.chatTimeoutMs) || 300000;
   let provider = defaultProvider;
   let model = providerModel(provider, config, { chat: true });
+  // Stop removes this run from activeChatRuns so the next message can start
+  // its own; from then on only this object says the run was cancelled.
+  const run = activeChatRuns.get(sessionId);
   try {
-    const run = activeChatRuns.get(sessionId);
     if (!run || run.cancelled) return;
     const session = await withProjectLock(async () => {
       const stored = await readChatSession({ id: sessionId, create: false, normalize: false });
@@ -6052,8 +6129,7 @@ async function runChatTurn(sessionId) {
       timeoutMs,
       label: `${providerLabel(provider)} chat`,
       onChild: (child) => {
-        const run = activeChatRuns.get(sessionId);
-        if (!run || run.cancelled) {
+        if (run.cancelled) {
           terminateChild(child);
           return;
         }
@@ -6061,14 +6137,14 @@ async function runChatTurn(sessionId) {
       },
     });
     await captureAgentOutput({ invocation, result, outputPath });
-    const activeRun = activeChatRuns.get(sessionId);
-    if (activeRun) activeRun.child = null;
+    run.child = null;
+    if (run.cancelled) return;
     if (result.code !== 0) throw new Error(agentFailureMessage(result, `${providerLabel(provider)} chat could not answer.`, { timeoutSetting: "agent.chatTimeoutMs" }));
     const rawContent = (await fs.readFile(outputPath, "utf8")).trim();
     if (!rawContent) throw new Error(`${providerLabel(provider)} chat returned an empty answer.`);
     await withProjectLock(async () => {
       const current = await readChatSession({ id: sessionId, create: false, normalize: false });
-      if (!current || current.id !== sessionId || current.status === "stopped") return;
+      if (!current || current.id !== sessionId || current.status === "stopped" || run.cancelled) return;
       const structured = extractStructureProposal(rawContent, current.activeStructure);
       current.messages.push({
         id: `msg_${Date.now()}_${randomBytes(3).toString("hex")}`,
@@ -6087,11 +6163,13 @@ async function runChatTurn(sessionId) {
       await writeChatSession(current);
     });
   } catch (error) {
-    const activeRun = activeChatRuns.get(sessionId);
-    if (activeRun) activeRun.child = null;
+    if (run) run.child = null;
+    // A stopped run's error (the killed child's output) is not news, and the
+    // session may already carry a newer message.
+    if (run?.cancelled) return;
     await withProjectLock(async () => {
       const current = await readChatSession({ id: sessionId, create: false, normalize: false });
-      if (current?.id === sessionId && current.status !== "stopped") {
+      if (current?.id === sessionId && current.status !== "stopped" && !run?.cancelled) {
         current.status = "failed";
         current.error = publicErrorMessage(error instanceof Error ? error.message : String(error)).slice(-1600);
         await writeChatSession(current);
@@ -6171,6 +6249,10 @@ async function stopChatTurn(body = {}) {
   session.status = "stopped";
   session.error = "Generation stopped. Your conversation is preserved.";
   activeRun.cancelled = true;
+  // Free the session at once: a message sent right after Stop starts a new run
+  // instead of being skipped while the old child is still exiting.
+  activeChatRuns.delete(session.id);
+  stoppedChatRuns.add(activeRun);
   await writeChatSession(session);
   terminateChild(activeRun.child);
   return session;
@@ -6409,7 +6491,7 @@ async function followupRewriteRequest(body) {
     status: request.status,
     reason: pendingUnitRevision ? "unit-followup" : "followup",
   });
-  queueCodexProposal(request.id);
+  queueCodexProposal(request.id, { rerunIfActive: true });
   return { ...request, agentStatus: codexRuns.get(request.id)?.status || "queued" };
 }
 
@@ -8551,7 +8633,7 @@ let shuttingDown = false;
 function shutdown() {
   if (shuttingDown) process.exit(0);
   shuttingDown = true;
-  const children = [activeCodexChild, activeReviewChild, ...[...activeChatRuns.values()].map((run) => run.child)]
+  const children = [activeCodexChild, activeReviewChild, ...[...activeChatRuns.values(), ...stoppedChatRuns].map((run) => run.child)]
     .filter((child) => child && child.exitCode === null && !child.signalCode);
   for (const child of children) terminateChild(child, 1500);
   for (const client of sseClients) client.end();

@@ -142,7 +142,7 @@ A "request" is one comment with its conversation, proposal and history.
 | GET | `/api/requests` | All requests with proposals, renderings, anchor validity and agent status. | |
 | POST | `/api/rewrite` | Create a comment on a selection and, by default, queue the agent. `201`. | `path`, `etag`, `segments` (as for confirm), `comment`, `responseMode` (`rewrite` default, `discuss`, `link`), `contextMode` (`local`, `smart` default, `project`), `rewriteScope` (`selection` default, `paragraph`), `provider`, `model`, `autoProcess`, `origin`. |
 | POST | `/api/request/process` | Queue a pending request. `202`. | `id`, `provider` |
-| POST | `/api/request/followup` | Add an instruction (optionally for one unit) and queue again. `202`. | `id`, `message`, `unitId` |
+| POST | `/api/request/followup` | Add an instruction (optionally for one unit) and queue again. Sent during a run, it runs again when that run ends and that run's answer is discarded. `202`. | `id`, `message`, `unitId` |
 | POST | `/api/request/regenerate` | Move the current answer to history and queue again. `202`. | `id`, `provider`, `model`, `autoProcess` |
 | POST | `/api/request/generate-proposal` | Turn a finished discussion into a rewrite run. `202`. | `id`, `autoProcess` |
 | POST | `/api/request/accept` | Apply the proposal to the file and push an undo entry. **Writes source.** | `id` |

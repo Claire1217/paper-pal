@@ -144,6 +144,26 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - A zero or negative `agent.timeoutMs`, `agent.projectTimeoutMs` or
   `agent.chatTimeoutMs` ended every agent run at once. Such values now use the
   default.
+- **A follow-up sent while the agent was still answering a comment was
+  dropped**, and the answer to the earlier instruction was shown as if it
+  replied to the follow-up. The comment now runs again with the follow-up once
+  the current run ends, and the earlier answer is discarded.
+- **A chat message sent right after Stop could fail with the stopped run's
+  output, or get the stopped run's reply.** Stop now frees the chat at once,
+  the new message gets a run of its own, and nothing from the stopped run is
+  written to the chat.
+- A proposal dropped a word that the replacement meant to double ("He argued
+  that" + "that claim…", "we had" + "had to…"), taking it for an echo of the
+  word before the selection. A word echo is now removed only when what remains
+  lines up with the selection, or when the other edge echoes too.
+- Running a link search again (a follow-up on a "Find linked" comment) placed a
+  second linked comment at every location it had already found. A location that
+  already has an active linked comment keeps that one.
+- A chat that finished after it was selected from the list showed as
+  "interrupted" with an old message count. The leftover archive copy is
+  removed when a chat is selected, and is not listed.
+- An agent run that failed before the agent started (for example because the
+  commented passage was gone) left a temporary folder behind.
 - **Codex runs failed with "the argument '--dangerously-bypass-approvals-and-sandbox'
   cannot be used with '--ask-for-approval'"** when the `codex` on PATH is a
   wrapper that adds that flag. Paper Pal now passes the approval policy as a
