@@ -5601,6 +5601,7 @@ function normalizedConfirmedProposal(value, structure) {
   if (!value || typeof value !== "object") throw new Error("No structure proposal is available to confirm.");
   const allowedIds = new Set(structure.sections.map((section) => section.id));
   const sections = (Array.isArray(value.sections) ? value.sections : [])
+    .filter((section) => section && typeof section === "object")
     .map((section) => ({
       sectionId: String(section.sectionId || ""),
       title: String(section.title || "").trim().slice(0, 240),
@@ -5696,7 +5697,7 @@ async function markStructurePlanApplied(body = {}) {
   return writeStructurePlan(plan);
 }
 
-async function revertStructurePlan() {
+async function revertStructurePlan(body = {}) {
   const plan = await readStructurePlan();
   if (!plan || plan.status === "reverted") throw new Error("There is no active restructuring to revert.");
   const activeRequests = (await listRequests()).filter((request) =>
@@ -5704,25 +5705,93 @@ async function revertStructurePlan() {
     plan.sections.some((section) => section.requestIds?.includes(request.id))
   );
   if (activeRequests.length) throw new Error("Resolve or delete the active structure rewrite proposals before reverting the whole plan.");
+  const beforePlan = structuredClone(plan);
   // A file that still holds its snapshot is left alone, so a read-only
   // (non-UTF-8) file the plan never changed does not block the revert.
   const unchanged = new Set();
+  const currentSources = new Map();
   for (const snapshot of plan.sourceSnapshots || []) {
-    const absolutePath = resolveDocument(snapshot.path);
-    const current = await fs.readFile(absolutePath, "utf8");
-    const expected = plan.appliedEtags?.[snapshot.path];
-    if (expected && sha(current) !== expected) {
-      throw new Error(`The source changed after restructuring: ${snapshot.path}. Revert was not applied.`);
-    }
+    const current = await fs.readFile(resolveDocument(snapshot.path), "utf8");
+    currentSources.set(snapshot.path, current);
     if (current === snapshot.source) unchanged.add(snapshot.path);
   }
   await assertSourcesWritable((plan.sourceSnapshots || []).map((snapshot) => snapshot.path).filter((item) => !unchanged.has(item)));
   const reviewState = await readState();
-  for (const snapshot of plan.sourceSnapshots || []) {
-    if (!unchanged.has(snapshot.path)) await writeSource(snapshot.path, snapshot.source);
-    restoreReviewStateSnapshot(reviewState, snapshot.path, plan.reviewSnapshots?.[snapshot.path]);
+  // Edits and confirmations made after the plan was applied (or, for a file
+  // the plan has not touched yet, after it was approved) would be replaced by
+  // the snapshot, so the author has to confirm that explicitly. A file that is
+  // back at its snapshot loses no text. Review state is compared only before
+  // the plan touched the file: accepting its proposals changes review state.
+  if (body.force !== true) {
+    const editedPaths = [];
+    const reviewedPaths = [];
+    let sinceApplied = true;
+    for (const snapshot of plan.sourceSnapshots || []) {
+      const expected = plan.appliedEtags?.[snapshot.path];
+      const edited = !unchanged.has(snapshot.path) && (!expected || sha(currentSources.get(snapshot.path)) !== expected);
+      const reviewed = !expected && !sameSnapshot(
+        reviewStateSnapshot(reviewState, snapshot.path),
+        plan.reviewSnapshots?.[snapshot.path] || { selections: [], paragraphs: {} },
+      );
+      if (edited) editedPaths.push(snapshot.path);
+      if (reviewed) reviewedPaths.push(snapshot.path);
+      if ((edited || reviewed) && !expected) sinceApplied = false;
+    }
+    const changedPaths = [...new Set([...editedPaths, ...reviewedPaths])];
+    if (changedPaths.length) {
+      const names = changedPaths.length === 1 ? changedPaths[0]
+        : changedPaths.length === 2 ? `${changedPaths[0]} and ${changedPaths[1]}`
+          : `${changedPaths[0]} and ${changedPaths.length - 1} more files`;
+      const when = `after this structure plan was ${sinceApplied ? "applied" : "approved"}`;
+      const lead = editedPaths.length
+        ? `${names} changed ${when}, and reverting would discard those ${reviewedPaths.length ? "edits and confirmations" : "edits"}.`
+        : `Confirmations in ${names} changed ${when}, and reverting would discard them.`;
+      throw new HttpError(409, `${lead} Confirm the revert to replace them; Undo can bring them back.`);
+    }
   }
-  await writeState(reviewState);
+  const beforeState = structuredClone(reviewState);
+  const undoFiles = [];
+  const written = [];
+  try {
+    for (const snapshot of plan.sourceSnapshots || []) {
+      const beforeReview = reviewStateSnapshot(reviewState, snapshot.path);
+      if (!unchanged.has(snapshot.path)) {
+        await writeSource(snapshot.path, snapshot.source);
+        written.push(snapshot.path);
+      }
+      restoreReviewStateSnapshot(reviewState, snapshot.path, plan.reviewSnapshots?.[snapshot.path]);
+      const afterReview = reviewStateSnapshot(reviewState, snapshot.path);
+      if (unchanged.has(snapshot.path) && sameSnapshot(beforeReview, afterReview)) continue;
+      undoFiles.push({
+        path: snapshot.path,
+        ...(unchanged.has(snapshot.path) ? {} : { beforeSource: currentSources.get(snapshot.path), afterSource: snapshot.source }),
+        afterEtag: sha(snapshot.source),
+        beforeReview,
+        afterReview,
+      });
+    }
+    await writeState(reviewState);
+    // The revert replaces whole files, so it must be undoable like every other
+    // source write; Undo also makes the plan active again.
+    if (undoFiles.length) {
+      await pushUndoAction({
+        kind: "structure-revert",
+        label: "Revert structure plan",
+        path: undoFiles[0].path,
+        files: undoFiles,
+        structurePlanId: plan.id,
+        beforePlan,
+      });
+    }
+  } catch (error) {
+    // All files or none: a write that fails partway (a read-only folder, a
+    // full disk) must not leave some files reverted with no undo entry.
+    for (const sourcePath of [...written].reverse()) {
+      await writeSource(sourcePath, currentSources.get(sourcePath)).catch(() => {});
+    }
+    await writeState(beforeState).catch(() => {});
+    throw error;
+  }
   plan.status = "reverted";
   plan.revertedAt = new Date().toISOString();
   plan.updatedAt = plan.revertedAt;
@@ -5742,6 +5811,7 @@ function extractStructureProposal(content, activeStructure) {
     const parsed = JSON.parse(match[1]);
     const allowedIds = new Set(activeStructure?.sectionIds || []);
     const sections = (Array.isArray(parsed.sections) ? parsed.sections : [])
+      .filter((section) => section && typeof section === "object")
       .map((section) => ({
         sectionId: String(section.sectionId || ""),
         title: String(section.title || "").trim().slice(0, 240),
@@ -6748,6 +6818,11 @@ function validatedSelectionSegments(payload, body, errorMessage) {
     ? body.segments
     : [{ blockIndex: body.blockIndex, blockId: body.blockId, start: body.start, end: body.end }];
   const segments = supplied.map((item) => {
+    // A malformed request, not a stale selection: 400 rather than the 409 that
+    // "The selected passage changed." maps to.
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new HttpError(400, "Each selection segment must be an object with blockIndex, blockId, start and end.");
+    }
     const blockIndex = Number(item.blockIndex);
     const block = payload.blocks[blockIndex];
     const start = Number(item.start);
@@ -7623,6 +7698,12 @@ async function undoLastAction() {
       throw new Error("The proposal changed after this action. Undo was not applied.");
     }
   }
+  if (action.beforePlan) {
+    const plan = await readStructurePlan();
+    if (plan?.id !== action.structurePlanId || plan.status !== "reverted") {
+      throw new Error("The structure plan changed after this action. Undo was not applied.");
+    }
+  }
 
   await assertSourcesWritable(files.filter((file) => typeof file.beforeSource === "string").map((file) => file.path));
   for (const file of files) {
@@ -7637,6 +7718,7 @@ async function undoLastAction() {
   if (action.requestId && action.beforeRequest) {
     await atomicWrite(resolveRequestPath(action.requestId), `${JSON.stringify(action.beforeRequest, null, 2)}\n`);
   }
+  if (action.beforePlan) await writeStructurePlan(action.beforePlan);
 
   actions.pop();
   await writeUndoStack(actions);
@@ -8041,7 +8123,8 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/structure/revert") {
-      json(response, 200, await withProjectLock(() => revertStructurePlan()));
+      const body = await readJson(request);
+      json(response, 200, await withProjectLock(() => revertStructurePlan(body)));
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/undo") {
