@@ -244,6 +244,14 @@ describe(".env loading", () => {
     });
   });
 
+  it("treats \"KEY=   # comment\" as an empty value, not as the comment", () => {
+    assert.deepEqual(parseEnv("BLANK_WITH_COMMENT=   # paste your key here\nTAB_COMMENT=\t# note\nHASH_FIRST=#kept\n"), {
+      BLANK_WITH_COMMENT: "",
+      TAB_COMMENT: "",
+      HASH_FIRST: "#kept",
+    });
+  });
+
   it("loads <appRoot>/.env without overriding the shell", async () => {
     const root = await makeTempDir();
     await fs.writeFile(path.join(root, ".env"), "FROM_FILE=file\nALREADY_SET=file\nBLANK=\n", "utf8");

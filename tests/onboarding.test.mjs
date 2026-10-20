@@ -112,6 +112,15 @@ describe("names: new first, pre-rename names as a fallback", () => {
     assert.equal((await loadReviewConfig({ appRoot, argv: ["--repo", project.root], env: {} })).port, 4317);
     await assert.rejects(loadReviewConfig({ appRoot, argv: ["--repo", project.root, "--port", "99999"], env: {} }), /Invalid port/);
   });
+  it("reads --name=value and refuses an option without a value", async () => {
+    const project = await makeProject();
+    const loaded = await loadReviewConfig({ appRoot, argv: [`--repo=${project.root}`, "--port=0"], env: {} });
+    assert.equal(loaded.repoRoot, project.root);
+    assert.equal(loaded.port, 0);
+    await assert.rejects(loadReviewConfig({ appRoot, argv: ["--repo", "--port", "0"], env: {} }), /--repo needs a value/);
+    await assert.rejects(loadReviewConfig({ appRoot, argv: ["--repo", project.root, "--port"], env: {} }), /--port needs a value/);
+    await assert.rejects(loadReviewConfig({ appRoot, argv: ["--repo="], env: {} }), /--repo needs a value/);
+  });
 });
 
 describe("setup: non-interactive, JSON, exit codes", () => {
@@ -439,6 +448,20 @@ describe("command line entry points", () => {
     assert.equal(run(["setup", "my paper", "--json"], { cwd: parent }).status, 6, "exit codes pass through");
     const doctor = run(["doctor", "--repo", path.join(parent, "my paper"), "--json"]);
     assert.equal(JSON.parse(doctor.stdout).checks.find((item) => item.id === "config").ok, true);
+  });
+
+  it("reanchor-confirmations reads Paper Pal's .env like the server does", async () => {
+    // The project names the fake agent by absolute path, which needs the
+    // allow switch; here it is set only in the .env file, not in the shell.
+    const project = await makeProject({ fakeAgent: true });
+    const envFile = path.join(await makeTempDir(), ".env");
+    await fs.writeFile(envFile, "PAPER_PAL_ALLOW_CUSTOM_COMMANDS=1\n", "utf8");
+    const result = spawnSync(process.execPath, [path.join(appRoot, "scripts", "reanchor-confirmations.mjs"), "--repo", project.root], {
+      encoding: "utf8",
+      env: { ...process.env, ...testEnvironment, PAPER_PAL_ENV_FILE: envFile, PAPER_PAL_ALLOW_CUSTOM_COMMANDS: "" },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /No review state found/);
   });
 
   it("package.json exposes the documented scripts and the bin", async () => {

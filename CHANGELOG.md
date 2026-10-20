@@ -29,6 +29,26 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - A `.bib` link with a `%` in it (`url = {https://example.org/a%20b.pdf}`) was
   cut at the `%`, and its PDF link was lost. `url` and `doi` are now read
   verbatim, as BibTeX reads them.
+- A `.env` line such as `OPENAI_API_KEY=   # paste your key here` set the
+  variable to the comment text. Paper Pal now reads it as an empty value.
+- Setup with an absolute `--main` or `--source` inside the paper folder exited
+  with 0 but wrote a configuration the server refused to load. Setup now stores
+  those paths relative to the project.
+- `scripts/reanchor-confirmations.mjs` ignored Paper Pal's `.env`, so it used
+  the wrong port and stopped with a stack trace on a project that needs a
+  `PAPER_PAL_ALLOW_*` switch. It now loads `.env` like the server and prints a
+  plain message when the configuration cannot be loaded.
+- A directory or a file without execute permission on `PATH` counted as an
+  installed agent CLI or LaTeX program. Paper Pal now accepts only executable
+  files, as a shell does.
+- A configured path of `/`, `C:`, `C:main.tex` or `C:/` was accepted (`/` as the
+  project folder itself). These are now refused as paths outside the project.
+- `--repo=<dir>`, `--config=<file>` and `--port=<n>` were ignored, and
+  `--repo --port 0` used `--port` as the project folder. Both forms are now
+  read, and an option without a value is reported as an error.
+- A zero or negative `agent.timeoutMs`, `agent.projectTimeoutMs` or
+  `agent.chatTimeoutMs` ended every agent run at once. Such values now use the
+  default.
 - **Codex runs failed with "the argument '--dangerously-bypass-approvals-and-sandbox'
   cannot be used with '--ask-for-approval'"** when the `codex` on PATH is a
   wrapper that adds that flag. Paper Pal now passes the approval policy as a

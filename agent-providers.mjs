@@ -1,4 +1,4 @@
-import { existsSync, promises as fs, openSync, readSync, closeSync, statSync } from "node:fs";
+import { accessSync, constants as fsConstants, promises as fs, openSync, readSync, closeSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -132,6 +132,19 @@ function executableNames(command) {
   return [...extensions.map((extension) => `${command}${extension}`), command];
 }
 
+// A shell skips a directory or a file without execute permission on PATH, so a
+// stray "codex" folder must not count as an installed CLI. Windows has no
+// execute bit: there PATHEXT already limits the names that are tried.
+function isExecutableFile(candidate) {
+  try {
+    if (!statSync(candidate).isFile()) return false;
+    if (process.platform !== "win32") accessSync(candidate, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Resolve a command name to an absolute executable path the way a shell would:
  * PATH lookup, honouring PATHEXT on Windows. Returns null when nothing matches.
@@ -140,7 +153,7 @@ export function resolveExecutable(command, extraDirectories = []) {
   const value = String(command || "");
   if (!value) return null;
   if (value.includes("/") || value.includes(path.sep) || path.isAbsolute(value)) {
-    return executableNames(value).find((candidate) => existsSync(candidate)) || null;
+    return executableNames(value).find(isExecutableFile) || null;
   }
   const directories = [
     ...(process.env.PATH || process.env.Path || "").split(path.delimiter).filter(Boolean),
@@ -149,7 +162,7 @@ export function resolveExecutable(command, extraDirectories = []) {
   for (const directory of directories) {
     for (const name of executableNames(value)) {
       const candidate = path.join(directory, name);
-      if (existsSync(candidate)) return candidate;
+      if (isExecutableFile(candidate)) return candidate;
     }
   }
   return null;

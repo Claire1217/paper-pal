@@ -20,12 +20,19 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadReviewConfig } from "../config.mjs";
-import { resolveStateDir } from "../names.mjs";
+import { loadEnvFile } from "../env.mjs";
+import { APP_NAME, resolveStateDir } from "../names.mjs";
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
 const apply = argv.includes("--apply");
-const { repoRoot, port } = await loadReviewConfig({ appRoot, argv });
+// Same .env as the server, so PAPER_PAL_PORT and the PAPER_PAL_ALLOW_* switches
+// that let the server load this project apply here too.
+loadEnvFile(appRoot);
+const { repoRoot, port } = await loadReviewConfig({ appRoot, argv }).catch((error) => {
+  console.error(`${APP_NAME} could not load the project.\n${error instanceof Error ? error.message : error}`);
+  process.exit(1);
+});
 const statePath = path.join(resolveStateDir(repoRoot), "state.json");
 
 function contentHash(blockId) {

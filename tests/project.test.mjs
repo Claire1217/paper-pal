@@ -35,6 +35,20 @@ describe("setup script", () => {
     const config = JSON.parse(await fs.readFile(path.join(root, configName), "utf8"));
     assert.equal(config.defaultDocument, "paper/main.tex");
   });
+  it("stores an absolute --main / --source inside the project as a relative path", async () => {
+    const root = await makeTempDir();
+    await fs.mkdir(path.join(root, "paper"));
+    await fs.writeFile(path.join(root, "paper", "main.tex"), "\\section{A}\nText.\n", "utf8");
+    const result = runSetup([root, "--main", path.join(root, "paper", "main.tex"), "--source", path.join(root, "paper"), "--no-compile", "--no-remember"]);
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(await fs.readFile(path.join(root, configName), "utf8"));
+    assert.equal(config.defaultDocument, "paper/main.tex");
+    assert.equal(config.sourceRoot, "paper");
+    assert.equal(config.latex.cwd, "paper");
+    assert.deepEqual(config.agent.entryPoints, ["paper/main.tex"]);
+    // The file setup wrote must also start the server.
+    await loadReviewConfig({ appRoot, argv: ["--repo", root], cwd: root, env: {} });
+  });
 });
 
 describe("configuration", () => {
@@ -77,6 +91,20 @@ describe("configuration", () => {
     await assert.rejects(load({ sourceRoot: "../elsewhere" }), /inside the configured project/);
     await assert.rejects(load({ latex: { enabled: false }, agent: { terminologyFiles: ["C:/secrets.txt"] } }), /inside the configured project/);
     await assert.rejects(load({ latex: { cwd: "missing-dir" } }), /latex\.cwd does not exist/);
+  });
+
+  it("rejects Windows drive-relative paths and the filesystem root", async () => {
+    for (const value of ["C:", "C:main.tex", "C:/", "c:\\", "/"]) {
+      await assert.rejects(load({ latex: { enabled: false }, agent: { terminologyFiles: [value] } }), /inside the configured project/, value);
+    }
+    await assert.rejects(load({ sourceRoot: "/" }), /inside the configured project/);
+  });
+
+  it("uses the default timeout for a zero or negative one instead of timing out at once", async () => {
+    const { config } = await load({ latex: { enabled: false }, agent: { timeoutMs: -1, projectTimeoutMs: 0, chatTimeoutMs: -300 } });
+    assert.equal(config.codex.timeoutMs, 90_000);
+    assert.equal(config.codex.projectTimeoutMs, 180_000);
+    assert.equal(config.codex.chatTimeoutMs, 300_000);
   });
 
   it("loads the shipped example configuration", async () => {
@@ -201,6 +229,20 @@ describe("agent adapters", () => {
   it("resolve executables through PATH", () => {
     assert.ok(path.isAbsolute(resolveExecutable("node") || ""));
     assert.equal(resolveExecutable("surely-not-a-real-command-xyz"), null);
+  });
+
+  it("resolve only what a shell would run: not a directory, not a file without execute permission", async () => {
+    const bin = await makeTempDir();
+    await fs.mkdir(path.join(bin, "paper-pal-dir-cmd"));
+    assert.equal(resolveExecutable("paper-pal-dir-cmd", [bin]), null);
+    assert.equal(resolveExecutable(path.join(bin, "paper-pal-dir-cmd")), null);
+    if (process.platform !== "win32") {
+      await fs.writeFile(path.join(bin, "paper-pal-plain-cmd"), "#!/bin/sh\n", { mode: 0o644 });
+      assert.equal(resolveExecutable("paper-pal-plain-cmd", [bin]), null);
+      assert.equal(resolveExecutable(path.join(bin, "paper-pal-plain-cmd")), null);
+      await fs.chmod(path.join(bin, "paper-pal-plain-cmd"), 0o755);
+      assert.equal(resolveExecutable("paper-pal-plain-cmd", [bin]), path.join(bin, "paper-pal-plain-cmd"));
+    }
   });
 });
 

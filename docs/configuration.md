@@ -32,6 +32,9 @@ Configuration file: `--config <file>` if given, otherwise
 Port: `--port <n>`, then `PAPER_PAL_PORT`, then `4317`. `0` means any free
 port; the real one is printed.
 
+`--repo`, `--config` and `--port` also accept the `--repo=<dir>` form. An
+option given without a value is an error.
+
 Environment: a variable set in your shell wins over the same variable in
 `<app>/.env`. An empty value counts as unset. A `.env` file inside the paper
 folder is never read.
@@ -108,7 +111,8 @@ ships no model ids.
 | `agent.guidanceFiles` | whichever of `AGENTS.md`, `CLAUDE.md` exist in the paper folder | Writing guidance for the agent. Inlined for API providers. |
 | `agent.terminologyFiles` | `[]` | Project vocabulary sent with every task. Nothing is loaded implicitly. |
 
-All paths are relative to the project folder.
+All paths are relative to the project folder. A timeout that is zero, negative,
+not a number or longer than about 24 days is replaced by its default.
 
 ### CLI backends: `codex`, `claude`
 
@@ -211,7 +215,8 @@ Set them in your shell or in `<app>/.env`.
 
 `.env` syntax: `KEY=VALUE`, optional `export` prefix, `'single'` quotes
 (literal), `"double"` quotes (`\n`, `\r`, `\t`, `\\`, `\"` are understood),
-`#` comment lines, and ` # trailing comments` after an unquoted value.
+`#` comment lines, and ` # trailing comments` after an unquoted value
+(`KEY=   # note` is an empty value; `KEY=#value` keeps the `#`).
 
 ### Trust switches
 
