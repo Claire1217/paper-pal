@@ -1160,6 +1160,77 @@ describe("comment anchors through edits in the page and in other programs", () =
       source.replace("gather data.", "collect data.").replace("It holds.", "That holds.").replace(passage, passage.toUpperCase()));
   });
 
+  // Two copies in one paragraph, and an earlier paragraph that loses exactly
+  // the distance between them: stale offsets would then name the second copy.
+  describe("after a restart, with offsets shifted by the distance between two copies", () => {
+    const REPEATED = "The model works well.";
+    const between = " Then a few more words follow. ";
+    const distance = REPEATED.length + between.length;
+    const chunk = "lorem ipsum dolor sit amet ".repeat(4).slice(0, distance);
+    const source = [
+      "\\documentclass{article}", "\\begin{document}",
+      `Opening ${chunk}words.`, "",
+      `Lead. ${REPEATED}${between}${REPEATED} End.`, "",
+      "\\end{document}", "",
+    ].join("\n");
+    const shortened = source.replace(chunk, "");
+
+    async function setUp() {
+      const project = await makeProject({ files: { "main.tex": source }, fakeAgent: true });
+      const server = await startServer(project.root);
+      const created = await commentAt(server, "main.tex", "Lead.", REPEATED);
+      return { project, server, created, file: path.join(project.root, "main.tex") };
+    }
+
+    // Run and accept after the restart: the first copy is rewritten, or the
+    // comment is refused, but the second copy never changes.
+    async function acceptAfterRestart(project, server, id, current) {
+      await server.stop();
+      const restarted = await startServer(project.root);
+      const finished = await runToEnd(restarted, id);
+      const file = path.join(project.root, "main.tex");
+      if (finished.status !== "proposed") {
+        assert.equal(await fs.readFile(file, "utf8"), current);
+        return;
+      }
+      await apiOk(restarted, "/api/request/accept", { method: "POST", body: { id } });
+      assert.equal(await fs.readFile(file, "utf8"), current.replace(REPEATED, REPEATED.toUpperCase()));
+    }
+
+    const storedStart = async (project, id) =>
+      JSON.parse(await fs.readFile(path.join(project.root, stateDirectory, "requests", `${id}.json`), "utf8")).absoluteStart;
+
+    it("after a save in an earlier paragraph", async () => {
+      const { project, server, created } = await setUp();
+      const document = await getDocument(server, "main.tex");
+      const block = document.blocks.find((item) => item.raw.includes("Opening"));
+      await saveBlock(server, document, block, block.raw.replace(chunk, ""));
+      assert.equal(await storedStart(project, created.id), shortened.indexOf(REPEATED), "the moved offsets are stored");
+      await acceptAfterRestart(project, server, created.id, shortened);
+    });
+
+    it("after another comment in an earlier paragraph is accepted", async () => {
+      const { project, server, created } = await setUp();
+      const other = await commentAt(server, "main.tex", "Opening", chunk);
+      await runToEnd(server, other.id);
+      const requestFile = path.join(project.root, stateDirectory, "requests", `${other.id}.json`);
+      const stored = JSON.parse(await fs.readFile(requestFile, "utf8"));
+      stored.proposal.replacementText = "";
+      await fs.writeFile(`${requestFile}.tmp`, JSON.stringify(stored), "utf8");
+      await fs.rename(`${requestFile}.tmp`, requestFile);
+      await apiOk(server, "/api/request/accept", { method: "POST", body: { id: other.id } });
+      assert.equal(await storedStart(project, created.id), shortened.indexOf(REPEATED), "the moved offsets are stored");
+      await acceptAfterRestart(project, server, created.id, shortened);
+    });
+
+    it("after an edit in another program while the server was stopped", async () => {
+      const { project, server, created, file } = await setUp();
+      await server.stop();
+      await fs.writeFile(file, shortened, "utf8");
+      await acceptAfterRestart(project, await startServer(project.root), created.id, shortened);
+    });
+  });
+
   it("after a restart, finds a comment again only by offsets that still hold or by strongly matching text", async () => {
     const source = [
       "\\documentclass{article}", "\\begin{document}",

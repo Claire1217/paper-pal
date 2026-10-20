@@ -4250,7 +4250,10 @@ function anchorWithoutHistory(source, blocks, selection, selectedText, alignment
       selectionSpanFromAbsoluteRange(blocks, suppliedAbsoluteStart, suppliedAbsoluteEnd);
     const stableStart = !selection.blockId || directMatch?.startBlock.id === selection.blockId;
     const stableEnd = !selection.endBlockId || directMatch?.endBlock.id === selection.endBlockId;
-    if (directMatch && stableStart && stableEnd) return { match: directMatch, matchCount: 1 };
+    // Same paragraph is not enough: offsets shifted by the distance between
+    // two copies in it would point at the other copy.
+    const sameOffsetInBlock = !Number.isInteger(selection.start) || directMatch?.start === Number(selection.start);
+    if (directMatch && stableStart && stableEnd && sameOffsetInBlock) return { match: directMatch, matchCount: 1 };
   }
   const direct = Number.isInteger(selection?.blockIndex)
     ? blocks[selection.blockIndex]
@@ -4614,13 +4617,9 @@ function placeAnchor(anchor, source, blocks, range, etag, changed = false) {
     } : {}),
     ...(kind === "linked" ? { blockIndex: span.startBlock.index, endBlockIndex: span.endBlock.index } : {}),
   };
-  // A comment whose paragraph only moved keeps its place inside that
-  // paragraph (block id, offsets in it) and needs no rewrite either: its
-  // absolute offsets still fit the version its etag names, and without that
-  // version the paragraph position finds it (anchorWithoutHistory).
-  const unchanged = (name) => target[name] === position[name] ||
-    (!changed && kind === "request" && ["absoluteStart", "absoluteEnd"].includes(name));
-  const same = Object.keys(position).every(unchanged) && Boolean(target.anchorChanged) === changed;
+  // Moved offsets are always stored: after a restart the stored offsets are
+  // all there is, and stale ones can point at another copy of the passage.
+  const same = Object.entries(position).every(([name, value]) => target[name] === value) && Boolean(target.anchorChanged) === changed;
   if (same && (!changed || (target.documentEtag || target.sourceEtag) === etag)) return false;
   Object.assign(target, position, { documentEtag: etag });
   if (kind === "request") {
@@ -4653,6 +4652,7 @@ async function rebaseOpenAnchors(relativePath, oldSource, newSource, { edit = nu
   const alignment = oldSource === null ? null : alignEdit(oldSource, newSource, edit);
   const entries = (await fs.readdir(requestsRoot).catch(() => [])).filter((entry) => entry.endsWith(".json"));
   const contents = await Promise.all(entries.map((name) => fs.readFile(path.join(requestsRoot, name), "utf8").catch(() => null)));
+  const writes = [];
   for (const [index, name] of entries.entries()) {
     const target = path.join(requestsRoot, name);
     let request;
@@ -4690,10 +4690,13 @@ async function rebaseOpenAnchors(relativePath, oldSource, newSource, { edit = nu
       if (searched.match) changed = placeAnchor(anchor, newSource, newBlocks, rangeOf(searched.match), newEtag) || changed;
       else if (edit && mapped.status === "changed") changed = placeAnchor(anchor, oldSource, oldBlocks, range, oldEtag, true) || changed;
     }
-    // The manuscript write has already happened; a comment that could not be
-    // updated is mapped again when it is next read.
-    if (changed) await atomicWrite(target, `${JSON.stringify(request, null, 2)}\n`).catch(() => {});
+    if (changed) writes.push([target, `${JSON.stringify(request, null, 2)}\n`]);
   }
+  // One pass over the changed files, side by side: every comment of a long
+  // file moves when an edit near its start changes its length. The
+  // manuscript write has already happened; a file that could not be written
+  // is mapped again when it is next read.
+  await Promise.all(writes.map(([target, text]) => atomicWrite(target, text).catch(() => {})));
 }
 
 // The message for a passage findSelectionAnchor no longer finds.
