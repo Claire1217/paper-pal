@@ -7938,14 +7938,18 @@ async function applyLinkedChangeSet(body) {
   // last one first so the offsets before it stay valid, and the file is
   // written once. Writing each change from the original would keep only the
   // last one and leave an undo entry that no longer matches the file.
+  // Each file is named by its real path, so its review marks are rebased and
+  // stored under the name the page uses, whatever spelling a change gave.
   const byFile = new Map();
   for (const change of prepared) {
     const key = await fs.realpath(resolveDocument(change.path));
-    if (!byFile.has(key)) byFile.set(key, []);
-    byFile.get(key).push(change);
+    if (!byFile.has(key)) {
+      byFile.set(key, { path: path.relative(realRepoRoot, key).split(path.sep).join("/"), changes: [] });
+    }
+    byFile.get(key).changes.push(change);
   }
-  for (const changes of byFile.values()) {
-    const name = path.basename(changes[0].path);
+  for (const { path: filePath, changes } of byFile.values()) {
+    const name = path.basename(filePath);
     if (changes.some((change) => change.source !== changes[0].source)) {
       throw new Error(`${name} changed while the set was being applied. Apply it again.`);
     }
@@ -7959,9 +7963,7 @@ async function applyLinkedChangeSet(body) {
   const beforeRequest = structuredClone(request);
   const reviewState = await readState();
   const beforeState = structuredClone(reviewState);
-  const files = [...byFile.values()].map((changes) => {
-    // The primary comes first in `selected`, so its spelling names the file.
-    const filePath = changes[0].path;
+  const files = [...byFile.values()].map(({ path: filePath, changes }) => {
     let current = changes[0].source;
     let beforeReview = null;
     let afterReview = null;
