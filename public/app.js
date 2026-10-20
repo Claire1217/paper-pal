@@ -3555,7 +3555,8 @@ function rawTextForDisplayEdit(source, nextDisplay) {
   ) suffix += 1;
   let oldEnd = oldDisplay.length - suffix;
   // \verb text is one unit that the page does not let the author edit. An
-  // edit that still reaches into it takes in the whole unit, which is kept.
+  // edit that still reaches into it takes in the whole unit, which stays only
+  // if its text survives unchanged.
   const sameVerbatim = (left, right) => left >= 0 && right < oldDisplay.length && isVerbatimUnit(source, left)
     && source.displayStarts[left] === source.displayStarts[right] && source.displayEnds[left] === source.displayEnds[right];
   while (sameVerbatim(prefix - 1, prefix)) prefix -= 1;
@@ -3696,22 +3697,29 @@ function displayEditKeepingMarkup(source, rawFrom, from, to, replacement) {
   const typed = (text) => { if (text) pieces.push({ text, typed: true }); };
   for (let at = from; at < to; at += 1) {
     typed(before[at - from]);
-    if (at > from && sameUnit(at)) {
-      typed(replacing[at - from]);
-      continue;
-    }
     pieces.push({ text: raw.slice(at > from ? ends[at - 1] : rawFrom, starts[at]) });
-    typed(replacing[at - from]);
     let last = at;
     while (last + 1 < to && sameUnit(last + 1)) last += 1;
-    const unitKept = kept.slice(at - from, last - from + 1);
-    const keepUnit = endsComment(at) || unitKept.every(Boolean) || (isVerbatimUnit(source, at) && unitKept.some(Boolean));
-    if (keepUnit) pieces.push({ text: raw.slice(starts[at], ends[at]) });
-    else {
-      // Part of a citation label or a macro's text was deleted: the unit goes,
-      // and the characters the author left standing stay as typed text.
-      typed(source.display.slice(at, last + 1).split("").filter((_, offset) => unitKept[offset]).join(""));
+    // A unit (a macro's text, a citation label, \verb text) stays only when
+    // its whole text survives unchanged and in one piece: new text that merely
+    // reuses some of its letters, or is typed between them, replaces it.
+    const unitKept = kept.slice(at - from, last - from + 1).every(Boolean)
+      && !before.slice(at - from + 1, last - from + 1).some(Boolean);
+    if (endsComment(at) || unitKept) {
+      typed(replacing[at - from]);
+      pieces.push({ text: raw.slice(starts[at], ends[at]) });
+    } else {
+      // The unit goes; what the author typed in its place, and the characters
+      // left standing, stay as typed text in their order.
+      let text = "";
+      for (let index = at; index <= last; index += 1) {
+        if (index > at) text += before[index - from];
+        text += replacing[index - from];
+        if (kept[index - from]) text += source.display[index];
+      }
+      typed(text);
     }
+    at = last;
   }
   typed(before[to - from]);
   return pieces;
@@ -3760,10 +3768,31 @@ function openGroupsAt(text, position) {
       if (lineEnd < 0 || lineEnd >= position) break;
       at = lineEnd;
     } else if (character === "{") {
-      open.push({ open: at, command: text.slice(0, at).match(/\\[A-Za-z]+\*?\s*$/)?.[0] || "" });
+      open.push({ open: at, command: commandBeforeGroup(text, at) });
     } else if (character === "}") open.pop();
   }
   return open;
+}
+
+// The command a "{" belongs to, with the arguments before it: "\\emph",
+// "\\textcolor{red}", "\\footnote[7]"; "" for a bare group.
+function commandBeforeGroup(text, open) {
+  let at = open;
+  for (;;) {
+    const closer = text[at - 1];
+    if (closer !== "}" && closer !== "]") break;
+    const opener = closer === "}" ? "{" : "[";
+    let depth = 0;
+    let index = at - 1;
+    for (; index >= 0; index -= 1) {
+      if (text[index] === closer && text[index - 1] !== "\\") depth += 1;
+      else if (text[index] === opener && text[index - 1] !== "\\" && (depth -= 1) === 0) break;
+    }
+    if (index < 0) return "";
+    at = index;
+  }
+  const name = text.slice(0, at).match(/\\[A-Za-z]+\*?\s*$/)?.[0];
+  return name ? text.slice(at - name.length, open) : "";
 }
 
 function closingBrace(text, open) {
@@ -3800,10 +3829,12 @@ function keepParagraphBreaksOutsideGroups(edited) {
     if (!edited.text.slice(at + 2, close).trim()) {
       const moved = edited.text.slice(at + 2, close + 1);
       spliceEdited(edited, at, close + 1, `${moved}\n\n`, [...edited.origin.slice(at + 2, close + 1), ...breakOrigin]);
-    } else if (!edited.text.slice(group.open + 1, at).trim() && group.command) {
+    } else if (!edited.text.slice(group.open + 1, at).trim() && group.command && !/^\\footnote/.test(group.command)) {
+      // Not out of a footnote: its mark would move to the next paragraph.
       const moved = edited.text.slice(commandStart, at);
       spliceEdited(edited, commandStart, at + 2, `\n\n${moved}`, [...breakOrigin, ...edited.origin.slice(commandStart, at)]);
     } else if (TEXT_STYLE_COMMAND.test(group.command.trim())) {
+      // Only a bare formatting command can be reopened as it was.
       const command = group.command.trim();
       const added = `}\n\n${command}{`;
       spliceEdited(edited, at, at + 2, added, added.split("").map(() => breakOrigin[0]));

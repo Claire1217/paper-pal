@@ -25,6 +25,7 @@ const SAVE_MAPPING = [
   "tidyEditedSource",
   "spliceEdited",
   "openGroupsAt",
+  "commandBeforeGroup",
   "closingBrace",
   "keepParagraphBreaksOutsideGroups",
   "dropEmptiedFormatting",
@@ -74,6 +75,8 @@ We use \\textbf{bold} here and more.
 The \\emph{first half second half} ends.
 
 Code \\verb|a%b| here.
+
+Set \\verb|a b| to it.
 \\end{document}
 `;
 const NOTES = `\\section{First}
@@ -185,21 +188,33 @@ describe("front end", () => {
       // Enter right after the opening of a group: the break goes before it.
       const atStart = await editAndSave("bold} here and", "use b", "use\n\nb");
       assert.match(atStart.source, /\nWe use\n\n\\textbf\{bold\} here and more\./);
+      // The same for a command with arguments before its text, except a
+      // footnote, whose mark would move to the next paragraph.
+      const tidy = (before, after) => app.tidyEditedSource([{ text: before }, { text: "\n\n", typed: true }, { text: after }]);
+      assert.equal(tidy("A \\textcolor{red}{", "word} b."), "A \n\n\\textcolor{red}{word} b.");
+      assert.equal(tidy("A\\footnote[7]{", "Note.} b."), "A\\footnote[7]{\nNote.} b.");
     });
 
-    it("keeps \\verb text whole: it is not editable, and an edit never deletes it", async () => {
+    it("keeps \\verb text only while the edit leaves all of it standing", async () => {
       const document = await getDocument(server, "main.tex");
-      const block = document.blocks.find((item) => item.raw.includes("\\verb"));
+      const block = document.blocks.find((item) => item.raw.startsWith("Code"));
       const at = block.display.indexOf("a%b");
       assert.ok(at >= 0);
+      // The page shows it but does not let the author type in it.
       assert.ok(app.isVerbatimUnit(block, at));
       assert.ok(!app.isVerbatimUnit(block, 0));
-      // The page does not let the author type in it; if a change still reaches
-      // into it, the \\verb stays as it was.
-      const inside = app.rawTextForDisplayEdit(block, block.display.replace("a%b", "a%c"));
-      assert.match(inside, /^Code \\verb\|a%b\|/);
-      const next = await editAndSave("verb", "here", "there");
+      // An edit next to it keeps it.
+      const next = await editAndSave("verb|a%b", "here", "there");
       assert.match(next.source, /\nCode \\verb\|a%b\| there\./);
+      // New text that reuses some of its letters replaces it: "a%b" did not
+      // survive, so it must not come back.
+      const reused = await editAndSave("verb|a%b", "a%b", "%e");
+      assert.match(reused.source, /\nCode \\%e here\./);
+      assert.equal(reused.display, reused.typed);
+      // Text typed between its letters replaces it as well.
+      const between = await editAndSave("verb|a b", "a b to", "a or b to");
+      assert.match(between.source, /\nSet a or b to it\./);
+      assert.equal(between.display, between.typed);
     });
 
     it("escapes a %, & or # the author types", async () => {
