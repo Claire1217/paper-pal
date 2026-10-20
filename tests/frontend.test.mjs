@@ -1023,9 +1023,21 @@ describe("editing macro calls", () => {
       stored.origin = { type: "structure" };
       stored.proposal.replacementText = PARAGRAPHS[paragraph];
       delete stored.proposalUnitReviews;
-      await fs.writeFile(requestFile, `${JSON.stringify(stored, null, 2)}\n`);
-      const unitOf = async () => (await apiOk(server, "/api/requests")).find((item) => item.id === request.id).proposal.reviewUnits[0];
-      const unit = await unitOf();
+      // Write-then-rename, as the server does: a reader must never see half a file.
+      const temporary = `${requestFile}.test.tmp`;
+      await fs.writeFile(temporary, `${JSON.stringify(stored, null, 2)}\n`);
+      await fs.rename(temporary, requestFile);
+      const proposalOf = async () => (await apiOk(server, "/api/requests")).find((item) => item.id === request.id)?.proposal;
+      const unitOf = async () => (await proposalOf())?.reviewUnits?.[0];
+      // Wait until the server reports the unit built from the new text.
+      const deadline = Date.now() + 10000;
+      let proposal = await proposalOf();
+      while (proposal?.replacementText !== PARAGRAPHS[paragraph] || !proposal.reviewUnits?.[0]) {
+        if (Date.now() > deadline) throw new Error(`no review unit for paragraph ${paragraph}`);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        proposal = await proposalOf();
+      }
+      const unit = proposal.reviewUnits[0];
       const toasts = [];
       const page = loadAppFunctions([...SAVE_MAPPING, "flushProposalUnitSave"], {
         state: { proposalEditing: null, proposalSaving: false, proposalRetries: [], requests: [] },
