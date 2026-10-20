@@ -3,12 +3,15 @@
 // the real server where block ids and display mappings matter.
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { cleanupAll, getDocument, loadAppFunctions, makeProject, saveBlock, startServer } from "./helpers.mjs";
+import { cleanupAll, getDocument, loadAppFunctions, makeProject, saveBlock, startServer, waitFor } from "./helpers.mjs";
 
 // Values made inside the vm context have that context's prototypes, which
 // deepStrictEqual rejects; compare their JSON instead.
 const plain = (value) => JSON.parse(JSON.stringify(value));
-const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+// Work the code schedules with setTimeout or after a promise runs whenever the
+// machine gets to it; poll for its result with a deadline instead of waiting
+// a fixed time, which is too short on a loaded CI runner.
+const until = (check, label) => waitFor(() => check(), { timeoutMs: 10_000, intervalMs: 1, label });
 
 const SAVE_MAPPING = [
   "DIFF_CORE_TOKEN_LIMIT",
@@ -331,8 +334,7 @@ describe("front end", () => {
       let olderDone = false;
       older.then(() => { olderDone = true; });
       pending[0].resolve([{ id: "old" }]);
-      await tick();
-      assert.equal(olderDone, true);
+      await until(() => olderDone, "the older refresh to finish on its own answer");
       pending[1].reject(new Error("server down"));
       await assert.rejects(newer, /server down/);
       assert.deepEqual(plain(app.state.requests), [{ id: "old" }]);
@@ -347,8 +349,7 @@ describe("front end", () => {
       pending[0].resolve([{ id: "old" }]);
       let done = false;
       older.then(() => { done = true; });
-      await tick();
-      assert.equal(done, true);
+      await until(() => done, "the older refresh to finish without the newer ones");
     });
   });
 
@@ -501,8 +502,8 @@ describe("front end", () => {
       clearTimeout,
     });
     app.connectEvents();
+    // The first open decides synchronously that there is nothing to catch up.
     sources[0].onopen();
-    await tick();
     assert.deepEqual(calls, []);
     page.hidden = true;
     listeners.visibilitychange();
@@ -510,7 +511,7 @@ describe("front end", () => {
     page.hidden = false;
     listeners.visibilitychange();
     sources[1].onopen();
-    await tick();
+    await until(() => calls.length >= 3, "the reconnect to re-read comments, undo and the file");
     assert.deepEqual(calls, ["requests", "undo", "reload main.tex"]);
   });
 
@@ -590,7 +591,7 @@ describe("front end", () => {
       assert.equal(await app.flushProposalUnitSave(), false);
       first.resolve({});
       await saving;
-      await tick();
+      await until(() => saved.length >= 2 && !app.state.proposalSaving, "the deferred edit to be saved");
       assert.deepEqual(saved, ["a", "b"]);
       assert.equal(app.state.proposalEditing, null);
     });
@@ -603,7 +604,7 @@ describe("front end", () => {
       await app.flushProposalUnitSave();
       first.reject(new Error("network"));
       assert.equal(await saving, false);
-      await tick();
+      await until(() => saved.length >= 3 && !app.state.proposalSaving, "the failed edit to be tried again");
       assert.deepEqual(saved, ["a", "b", "a"]);
       assert.equal(app.state.proposalEditing, null);
       assert.equal(app.state.proposalRetries.length, 0);
@@ -634,17 +635,17 @@ describe("front end", () => {
       app.state.proposalEditing = edit("b");
       pending[0].reject(new Error("network"));
       await first;
-      await tick();
+      await until(() => saved.length >= 2, "B's save");
       app.state.proposalEditing = edit("c");
       pending[1].reject(new Error("network"));
-      await tick();
+      await until(() => saved.length >= 3, "C's save");
       // C's save succeeds, and the failed edits are tried again in turn.
       pending[2].resolve({});
-      await tick();
+      await until(() => saved.length >= 4, "A tried again");
       pending[3].resolve({});
-      await tick();
-      pending[4]?.resolve({});
-      await tick();
+      await until(() => saved.length >= 5, "B tried again");
+      pending[4].resolve({});
+      await until(() => !app.state.proposalSaving && !app.state.proposalEditing, "the queue to drain");
       assert.deepEqual(saved, ["a", "b", "c", "a", "b"]);
       assert.equal(app.state.proposalEditing, null);
       assert.equal(app.state.proposalRetries.length, 0);
