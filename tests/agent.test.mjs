@@ -647,13 +647,19 @@ describe("linked change sets with several changes in one file", () => {
       .map(([name, text]) => fs.writeFile(path.join(project.root, name), text, "utf8")));
   }
 
+  // The agent run writes "proposed" first and the linked changes (or their
+  // warnings) in a second write that also adds its answer to the conversation.
+  // Wait for that answer, or a test can read, or rewrite, the half-done request.
+  const waitForProposal = (target, id) => waitForRequest(target, id, (request) =>
+    request.status === "proposed" && (request.conversation || []).some((message) => message.role === "assistant"), "proposal");
+
   // The agent attaches at most one related change per file, so a set with
   // several changes in one file is written into the stored request, as an
   // older request or two spellings of one file can leave it.
   async function proposeSet(primary, changes) {
     const created = await commentOn(server, primary.path, primary.selectedText, "Shorten this.");
     await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
-    await waitForRequest(server, created.id, (request) => request.status === "proposed", "proposal");
+    await waitForProposal(server, created.id);
     const requestFile = path.join(project.root, stateDirectory, "requests", `${created.id}.json`);
     const stored = JSON.parse(await fs.readFile(requestFile, "utf8"));
     stored.proposal.replacementText = primary.replacementText;
@@ -669,7 +675,9 @@ describe("linked change sets with several changes in one file", () => {
         selectedText: change.selectedText, replacementText: change.replacementText,
       });
     }
-    await fs.writeFile(requestFile, JSON.stringify(stored), "utf8");
+    // Write-then-rename, as the server does: a reader must never see half a file.
+    await fs.writeFile(`${requestFile}.test.tmp`, JSON.stringify(stored), "utf8");
+    await fs.rename(`${requestFile}.test.tmp`, requestFile);
     return created.id;
   }
 
@@ -815,8 +823,8 @@ describe("linked change sets with several changes in one file", () => {
     const aliasedServer = await startServer(aliased.root, { env: { FAKE_AGENT_ANSWER: answer } });
     const created = await commentOn(aliasedServer, "sec.tex", "Beta opens the result.", "Shorten this.");
     await apiOk(aliasedServer, "/api/request/process", { method: "POST", body: { id: created.id } });
-    const proposed = await waitForRequest(aliasedServer, created.id, (request) => request.status === "proposed", "proposal");
+    const proposed = await waitForProposal(aliasedServer, created.id);
     assert.deepEqual(proposed.proposal.linkedChanges ?? [], []);
-    assert.match(proposed.proposal.linkedWarnings.join("\n"), /different file/);
+    assert.match((proposed.proposal.linkedWarnings ?? []).join("\n"), /different file/);
   });
 });
