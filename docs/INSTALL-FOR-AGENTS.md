@@ -145,7 +145,7 @@ Add flags according to the answers from Step 0:
 | `--provider <id>` | The user chose a backend: `codex`, `claude`, `openai`, `anthropic`, `openrouter`, `deepseek`, `ollama`, `custom`. |
 | `--model <model-id>` | Required for every API provider, `ollama` and `custom`. Optional for `codex` and `claude` (the CLI default is used). |
 | `--chat-model <model-id>` | Optional: a different model for the project chat. |
-| `--main <file.tex>` | The entry point, relative to the paper folder. Usually not needed: setup uses `main.tex`, or else the one `.tex` file that has `\documentclass`. Pass it after exit code 4 or 5, or when the user named a file. |
+| `--main <file.tex>` | The entry point, relative to the paper folder (an absolute path inside it is stored relative). Usually not needed: setup uses `main.tex`, or else the one `.tex` file that has `\documentclass`. Pass it after exit code 4 or 5, or when the user named a file. |
 | `--no-compile` | The user does not want PDFs. `--compile` forces it on. |
 | `--review-language <name>` | Language of section reviews. Default `en`. |
 | `--no-remember` | Do not make this paper the default project of the app folder. You must then pass `--repo "<paper>"` to doctor and start. |

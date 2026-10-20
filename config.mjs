@@ -5,9 +5,22 @@ import {
   APP_NAME, CONFIG_NAME, ENV, resolveConfigPath, resolveLocalPointer, truthyEnv,
 } from "./names.mjs";
 
+// "--name value" or "--name=value"; the first occurrence wins. A missing value,
+// or one that is the next option ("--repo --port 0"), is a usage error rather
+// than a path or port silently taken from the wrong argument.
 function readArg(argv, name, fallback = null) {
-  const index = argv.indexOf(name);
-  return index >= 0 && argv[index + 1] ? argv[index + 1] : fallback;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = String(argv[index]);
+    let value;
+    if (arg === name) value = argv[index + 1];
+    else if (arg.startsWith(`${name}=`)) value = arg.slice(name.length + 1);
+    else continue;
+    if (value === undefined || value === "" || String(value).startsWith("--")) {
+      throw new Error(`${name} needs a value: use "${name} <value>" or "${name}=<value>".`);
+    }
+    return value;
+  }
+  return fallback;
 }
 
 async function readJson(target) {
@@ -48,14 +61,30 @@ function portSetting(value) {
   return port;
 }
 
+// A timeout must be a delay setTimeout honours (1 ms to about 24.8 days):
+// Node runs anything else, including 0 and negative values, after 1 ms, which
+// would end every agent run at once. Like a missing value, it gets the default.
+function timeoutSetting(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 1 && number <= 2_147_483_647 ? number : fallback;
+}
+
 function relativeSetting(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty path.`);
-  const normalized = path.posix.normalize(value.replaceAll("\\", "/")).replace(/\/$/, "") || ".";
+  const slashed = value.replaceAll("\\", "/");
+  const normalized = path.posix.normalize(slashed).replace(/\/$/, "") || ".";
+  // The absolute checks look at the value before the trailing slash is
+  // stripped, or "/" would become ".".
   if (
-    path.posix.isAbsolute(normalized) || path.win32.isAbsolute(normalized) ||
+    path.posix.isAbsolute(slashed) || path.win32.isAbsolute(normalized) ||
     normalized === ".." || normalized.startsWith("../")
   ) {
     throw new Error(`${name} must stay inside the configured project.`);
+  }
+  // On Windows "C:" and "C:main.tex" are relative to the current directory of
+  // drive C, so they leave the project too. Elsewhere "a:b.tex" is a plain name.
+  if (process.platform === "win32" && /^[A-Za-z]:/.test(slashed)) {
+    throw new Error(`${name} must stay inside the configured project; "${value}" names a Windows drive.`);
   }
   return normalized;
 }
@@ -236,11 +265,11 @@ export async function loadReviewConfig({ appRoot, argv = process.argv.slice(2), 
     promptMode: String(shared.promptMode || "minimal"),
     // Any language name or code: "en", "English", "zh", "Chinese", "German"…
     reviewLanguage: String(shared.reviewLanguage || "en"),
-    timeoutMs: Number(shared.timeoutMs) || 90_000,
+    timeoutMs: timeoutSetting(shared.timeoutMs, 90_000),
     projectReasoningEffort: String(shared.projectReasoningEffort || "medium"),
-    projectTimeoutMs: Number(shared.projectTimeoutMs) || 180_000,
+    projectTimeoutMs: timeoutSetting(shared.projectTimeoutMs, 180_000),
     chatReasoningEffort: String(shared.chatReasoningEffort || "medium"),
-    chatTimeoutMs: Number(shared.chatTimeoutMs) || 300_000,
+    chatTimeoutMs: timeoutSetting(shared.chatTimeoutMs, 300_000),
     chatConcurrency: Math.max(1, Number(shared.chatConcurrency) || 1),
     ...modelFields(raw.codex),
     // Upper bound, in characters, on the project material inlined into a

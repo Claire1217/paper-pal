@@ -234,8 +234,10 @@ if (wantsJson) {
   }
   if (ok) {
     const host = hostFromEnvironment();
+    // --repo <dir> or --repo=<dir>, as loadReviewConfig reads it.
     const repoIndex = argv.indexOf("--repo");
-    const repoHint = repoIndex >= 0 && argv[repoIndex + 1] ? ` -- --repo ${/\s/.test(argv[repoIndex + 1]) ? `"${argv[repoIndex + 1]}"` : argv[repoIndex + 1]}` : "";
+    const repoValue = repoIndex >= 0 ? argv[repoIndex + 1] : argv.find((arg) => arg.startsWith("--repo="))?.slice("--repo=".length);
+    const repoHint = repoValue ? ` -- --repo ${/\s/.test(repoValue) ? `"${repoValue}"` : repoValue}` : "";
     console.log(`\nReady. Run "npm start${repoHint}" and open http://${host}:${loaded?.port || 4317}`);
   } else {
     console.log("\nNot ready: fix the lines marked ✗, then run \"npm run doctor\" again.");

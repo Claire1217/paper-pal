@@ -10,7 +10,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
-const linePattern = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.*)$/;
+// The value keeps its leading whitespace so "KEY=   # note" can be told apart
+// from "KEY=#value": a "#" starts a comment only after whitespace.
+const linePattern = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=(.*)$/;
 
 export function parseEnv(text) {
   const values = {};
@@ -29,7 +31,7 @@ export function parseEnv(text) {
       const closing = value.match(/^'([^']*)'/);
       value = closing ? closing[1] : value.slice(1);
     } else {
-      value = value.replace(/\s+#.*$/, "").trim();
+      value = rest.replace(/\s#.*$/, "").trim();
     }
     values[name] = value;
   }

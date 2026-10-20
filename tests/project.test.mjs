@@ -35,6 +35,45 @@ describe("setup script", () => {
     const config = JSON.parse(await fs.readFile(path.join(root, configName), "utf8"));
     assert.equal(config.defaultDocument, "paper/main.tex");
   });
+
+  it("stores an absolute --main / --source inside the project as a relative path", async () => {
+    const root = await makeTempDir();
+    await fs.mkdir(path.join(root, "paper"));
+    await fs.writeFile(path.join(root, "paper", "main.tex"), "\\section{A}\nText.\n", "utf8");
+    const result = runSetup([root, "--main", path.join(root, "paper", "main.tex"), "--source", path.join(root, "paper"), "--no-compile", "--no-remember"]);
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(await fs.readFile(path.join(root, configName), "utf8"));
+    assert.equal(config.defaultDocument, "paper/main.tex");
+    assert.equal(config.sourceRoot, "paper");
+    assert.equal(config.latex.cwd, "paper");
+    assert.deepEqual(config.agent.entryPoints, ["paper/main.tex"]);
+    // The file setup wrote must also start the server.
+    await loadReviewConfig({ appRoot, argv: ["--repo", root], cwd: root, env: {} });
+  });
+
+  it("accepts --main / --source that reach the project through a symlinked spelling", async () => {
+    // macOS gives /var/... from $PWD and /private/var/... from pwd -P; any
+    // symlink to the project folder shows the same mismatch.
+    const root = await makeTempDir();
+    await fs.mkdir(path.join(root, "paper"));
+    await fs.writeFile(path.join(root, "paper", "main.tex"), "\\section{A}\nText.\n", "utf8");
+    const link = path.join(await makeTempDir(), "linked project");
+    if (!await trySymlink(root, link, "dir")) return;
+    for (const [project, spelled] of [[link, root], [root, link]]) {
+      const result = runSetup([project, "--main", path.join(spelled, "paper", "main.tex"), "--source", path.join(spelled, "paper"), "--no-compile", "--no-remember", "--force"]);
+      assert.equal(result.status, 0, result.stderr);
+      const config = JSON.parse(await fs.readFile(path.join(root, configName), "utf8"));
+      assert.equal(config.defaultDocument, "paper/main.tex");
+      assert.equal(config.sourceRoot, "paper");
+      await loadReviewConfig({ appRoot, argv: ["--repo", project], cwd: project, env: {} });
+    }
+    // A file that really is outside is still refused, and not called missing.
+    const outside = path.join(await makeTempDir(), "other.tex");
+    await fs.writeFile(outside, "x", "utf8");
+    const refused = runSetup([root, "--main", outside, "--no-compile", "--no-remember", "--force"]);
+    assert.equal(refused.status, 4);
+    assert.match(refused.stderr, /is not inside the project/);
+  });
 });
 
 describe("configuration", () => {
@@ -77,6 +116,46 @@ describe("configuration", () => {
     await assert.rejects(load({ sourceRoot: "../elsewhere" }), /inside the configured project/);
     await assert.rejects(load({ latex: { enabled: false }, agent: { terminologyFiles: ["C:/secrets.txt"] } }), /inside the configured project/);
     await assert.rejects(load({ latex: { cwd: "missing-dir" } }), /latex\.cwd does not exist/);
+  });
+
+  it("rejects the filesystem root, and drive-relative paths on Windows only", async () => {
+    await assert.rejects(load({ latex: { enabled: false }, agent: { terminologyFiles: ["/"] } }), /inside the configured project/);
+    await assert.rejects(load({ sourceRoot: "/" }), /inside the configured project/);
+    // On POSIX "a:b.tex" is an ordinary file name.
+    if (process.platform !== "win32") {
+      const { config } = await load({ latex: { enabled: false }, agent: { terminologyFiles: ["a:b.tex", "C:main.tex"] } });
+      assert.deepEqual(config.codex.terminologyFiles, ["a:b.tex", "C:main.tex"]);
+    }
+    // The Windows branch, in a child that reports win32 as its platform: the
+    // check reads process.platform when it runs, and path.win32/path.posix are
+    // used explicitly, so the rest of loading behaves as it would there.
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "main.tex"), "\\section{A}\nText.\n", "utf8");
+    const values = ["C:", "C:main.tex", "C:/", "c:\\"];
+    const script = [
+      "Object.defineProperty(process, \"platform\", { value: \"win32\" });",
+      `const { loadReviewConfig } = await import(${JSON.stringify(pathToFileURL(path.join(appRoot, "config.mjs")).href)});`,
+      "const { writeFileSync } = await import(\"node:fs\");",
+      `const [root, ...values] = process.argv.slice(1);`,
+      "const results = [];",
+      "for (const value of [...values, \"a/b.tex\"]) {",
+      `  writeFileSync(root + "/${configName}", JSON.stringify({ latex: { enabled: false }, agent: { terminologyFiles: [value] } }));`,
+      "  results.push(await loadReviewConfig({ appRoot: root, argv: [\"--repo\", root], cwd: root, env: {} }).then(() => \"ok\", (error) => error.message));",
+      "}",
+      "console.log(JSON.stringify(results));",
+    ].join("\n");
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script, root, ...values], { encoding: "utf8" });
+    assert.equal(child.status, 0, child.stderr);
+    const results = JSON.parse(child.stdout);
+    for (const [index, value] of values.entries()) assert.match(results[index], /names a Windows drive/, value);
+    assert.equal(results.at(-1), "ok");
+  });
+
+  it("uses the default timeout for a zero or negative one instead of timing out at once", async () => {
+    const { config } = await load({ latex: { enabled: false }, agent: { timeoutMs: -1, projectTimeoutMs: 0, chatTimeoutMs: -300 } });
+    assert.equal(config.codex.timeoutMs, 90_000);
+    assert.equal(config.codex.projectTimeoutMs, 180_000);
+    assert.equal(config.codex.chatTimeoutMs, 300_000);
   });
 
   it("loads the shipped example configuration", async () => {
@@ -201,6 +280,20 @@ describe("agent adapters", () => {
   it("resolve executables through PATH", () => {
     assert.ok(path.isAbsolute(resolveExecutable("node") || ""));
     assert.equal(resolveExecutable("surely-not-a-real-command-xyz"), null);
+  });
+
+  it("resolve only what a shell would run: not a directory, not a file without execute permission", async () => {
+    const bin = await makeTempDir();
+    await fs.mkdir(path.join(bin, "paper-pal-dir-cmd"));
+    assert.equal(resolveExecutable("paper-pal-dir-cmd", [bin]), null);
+    assert.equal(resolveExecutable(path.join(bin, "paper-pal-dir-cmd")), null);
+    if (process.platform !== "win32") {
+      await fs.writeFile(path.join(bin, "paper-pal-plain-cmd"), "#!/bin/sh\n", { mode: 0o644 });
+      assert.equal(resolveExecutable("paper-pal-plain-cmd", [bin]), null);
+      assert.equal(resolveExecutable(path.join(bin, "paper-pal-plain-cmd")), null);
+      await fs.chmod(path.join(bin, "paper-pal-plain-cmd"), 0o755);
+      assert.equal(resolveExecutable("paper-pal-plain-cmd", [bin]), path.join(bin, "paper-pal-plain-cmd"));
+    }
   });
 });
 
