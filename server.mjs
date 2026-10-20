@@ -4515,7 +4515,9 @@ async function createLinkedCommentRequests(sourceRequest, targets, { autoProcess
 async function validateRelatedProposalChanges(rawChanges, primaryPath) {
   const changes = [];
   const warnings = [];
-  const seenPaths = new Set([primaryPath]);
+  // Compared by real path: a symlink or another letter case would otherwise
+  // let a second change into a file that already has one.
+  const seenFiles = new Set([await fs.realpath(resolveDocument(primaryPath)).catch(() => resolveDocument(primaryPath))]);
   for (const [index, raw] of (Array.isArray(rawChanges) ? rawChanges.slice(0, 3) : []).entries()) {
     try {
       const suppliedPath = String(raw?.path || "").trim();
@@ -4528,12 +4530,13 @@ async function validateRelatedProposalChanges(rawChanges, primaryPath) {
       if (path.extname(absolutePath).toLowerCase() !== ".tex") {
         throw new Error("linked changes are limited to LaTeX source files");
       }
-      if (seenPaths.has(relatedPath)) {
-        throw new Error("each linked change must target a different file");
-      }
       const selectedText = String(raw?.selectedText || "");
       if (!selectedText) throw new Error("the related source anchor is empty");
       const source = await fs.readFile(absolutePath, "utf8");
+      const realFile = await fs.realpath(absolutePath);
+      if (seenFiles.has(realFile)) {
+        throw new Error("each linked change must target a different file");
+      }
       const matches = exactTextMatches(source, selectedText);
       if (matches.length !== 1) {
         throw new Error(`the related source anchor matched ${matches.length} locations`);
@@ -4564,7 +4567,7 @@ async function validateRelatedProposalChanges(rawChanges, primaryPath) {
         selectedText,
         replacementText,
       });
-      seenPaths.add(relatedPath);
+      seenFiles.add(realFile);
     } catch (error) {
       warnings.push(`Related change ${index + 1} was not attached: ${error.message}`);
     }
@@ -7929,17 +7932,60 @@ async function applyLinkedChangeSet(body) {
   // All or nothing: one target that cannot be written refuses the whole set.
   await assertSourcesWritable(selected.map((change) => change.path));
   const prepared = await Promise.all(selected.map(prepareSourceReplacement));
+  // Several changes can target one file, also under two spellings (a symlink,
+  // or another letter case on a case-insensitive disk). Each was anchored in
+  // the same original text, so they are applied to one copy of the file, the
+  // last one first so the offsets before it stay valid, and the file is
+  // written once. Writing each change from the original would keep only the
+  // last one and leave an undo entry that no longer matches the file.
+  const byFile = new Map();
+  for (const change of prepared) {
+    const key = await fs.realpath(resolveDocument(change.path));
+    if (!byFile.has(key)) byFile.set(key, []);
+    byFile.get(key).push(change);
+  }
+  for (const changes of byFile.values()) {
+    const name = path.basename(changes[0].path);
+    if (changes.some((change) => change.source !== changes[0].source)) {
+      throw new Error(`${name} changed while the set was being applied. Apply it again.`);
+    }
+    const ordered = [...changes].sort((a, b) => b.start - a.start);
+    for (let index = 1; index < ordered.length; index += 1) {
+      if (ordered[index].end > ordered[index - 1].start || ordered[index].start === ordered[index - 1].start) {
+        throw new Error(`Two linked changes in ${name} overlap. Reject one of them and apply the set again.`);
+      }
+    }
+  }
   const beforeRequest = structuredClone(request);
   const reviewState = await readState();
   const beforeState = structuredClone(reviewState);
-  const files = prepared.map((change) => {
-    const snapshots = updateReviewStateForReplacement(reviewState, change);
+  const files = [...byFile.values()].map((changes) => {
+    // The primary comes first in `selected`, so its spelling names the file.
+    const filePath = changes[0].path;
+    let current = changes[0].source;
+    let beforeReview = null;
+    let afterReview = null;
+    for (const change of [...changes].sort((a, b) => b.start - a.start)) {
+      const nextSource = `${current.slice(0, change.start)}${change.replacement}${current.slice(change.end)}`;
+      const snapshots = updateReviewStateForReplacement(reviewState, {
+        ...change,
+        path: filePath,
+        source: current,
+        sourceBlocks: parseBlocks(current),
+        nextSource,
+      });
+      beforeReview ??= snapshots.beforeReview;
+      afterReview = snapshots.afterReview;
+      current = nextSource;
+    }
+    assertNoNestedHeadingCommands(current);
     return {
-      path: change.path,
-      beforeSource: change.source,
-      afterSource: change.nextSource,
-      afterEtag: sha(change.nextSource),
-      ...snapshots,
+      path: filePath,
+      beforeSource: changes[0].source,
+      afterSource: current,
+      afterEtag: sha(current),
+      beforeReview,
+      afterReview,
     };
   });
 

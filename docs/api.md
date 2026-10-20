@@ -153,7 +153,7 @@ A "request" is one comment with its conversation, proposal and history.
 | POST | `/api/request/restore-unit-revision` | Restore the previous proposal after an interrupted unit revision. | `id` |
 | POST | `/api/request/review-linked-change` | Set the status of the primary or one linked (cross-file) change. | `id`, `changeId`, `status` |
 | POST | `/api/request/confirm-all-linked` | Confirm the primary and all linked changes. | `id` |
-| POST | `/api/request/apply-linked` | Apply the confirmed linked change set across files in one step. **Writes source.** | `id` |
+| POST | `/api/request/apply-linked` | Apply the confirmed linked change set across files in one step. Changes to one file are applied together and the file is written once; changes that overlap refuse the set. **Writes source.** | `id` |
 
 ### Section review
 
