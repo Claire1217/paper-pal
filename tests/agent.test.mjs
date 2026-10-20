@@ -480,7 +480,10 @@ describe("agent queue and chat runs that overlap", () => {
     const between = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
     assert.equal(between.status, "pending");
     assert.deepEqual(between.conversation.map((message) => message.role), ["user", "user"]);
-    const proposed = await waitForRequest(server, created.id, (request) => request.status === "proposed", "proposal");
+    // Wait for the end state itself: the proposal is attached one write before
+    // the assistant message (status "proposed", agent "validating" in between).
+    const proposed = await waitForRequest(server, created.id, (request) => request.status === "proposed" &&
+      request.agentStatus === "complete", "proposal for the follow-up");
     assert.deepEqual(proposed.conversation.map((message) => message.role), ["user", "user", "assistant"]);
     const task = JSON.parse(await fs.readFile(path.join(project.root, stateDirectory, "runs", created.id, "TASK.json"), "utf8"));
     assert.deepEqual(task.conversation.map((message) => message.content), ["Make it bolder.", "Make it shorter instead."]);
