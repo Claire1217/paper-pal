@@ -3665,6 +3665,7 @@ function rawTextForDisplayEdit(source, nextDisplay) {
     const edited = new Set();
     for (let index = from; index < to; index += 1) edited.add(`${starts[index]}:${ends[index]}`);
     let takesInOtherText = false;
+    let call = null;
     let rawFrom = Infinity;
     let rawTo = -Infinity;
     for (let grown = from < to; grown;) {
@@ -3675,7 +3676,13 @@ function rawTextForDisplayEdit(source, nextDisplay) {
       }
       const inside = (index) => starts[index] >= rawFrom && ends[index] <= rawTo && ends[index] > starts[index];
       const takeIn = (index) => {
-        if (!edited.has(`${starts[index]}:${ends[index]}`)) takesInOtherText = true;
+        if (!edited.has(`${starts[index]}:${ends[index]}`)) {
+          takesInOtherText = true;
+          // The call whose own text is edited: the edited unit around it.
+          for (let at = from; at < to; at += 1) {
+            if (starts[at] <= starts[index] && ends[index] <= ends[at] && (!call || ends[at] - starts[at] > call[1] - call[0])) call = [starts[at], ends[at]];
+          }
+        }
         grown = true;
       };
       while (from > 0 && inside(from - 1)) takeIn((from -= 1));
@@ -3701,7 +3708,7 @@ function rawTextForDisplayEdit(source, nextDisplay) {
     const rawEnd = to > from ? Math.max(ends[to - 1], rawTo) : rawStart;
     const replacement = nextDisplay.slice(from, nextDisplay.length - (oldDisplay.length - to));
     const changed = displayEditKeepingMarkup(source, rawStart, from, to, replacement);
-    return { rawStart, rawEnd, replacement, changed, takesInOtherText };
+    return { rawStart, rawEnd, replacement, changed, takesInOtherText, call };
   };
   let edit = attempt(prefix, oldEnd);
   if (edit.changed) {
@@ -3718,13 +3725,21 @@ function rawTextForDisplayEdit(source, nextDisplay) {
     }
   }
   if (edit.takesInOtherText) {
-    throw new Error("This edit changes text that a macro adds around its arguments. Undo it, or change that macro call in the LaTeX source.");
+    const name = /^\\[A-Za-z@]+\*?/.exec(edit.call ? source.raw.slice(edit.call[0], edit.call[1]) : "")?.[0] || "a macro";
+    throw new Error(`This edit would change only part of what ${name} shows, so undo it, or edit the whole call or the LaTeX source.`);
   }
   const changed = edit.changed ?? [{ text: edit.replacement, typed: true }];
   const pieces = [{ text: source.raw.slice(0, edit.rawStart) }, ...changed, { text: source.raw.slice(edit.rawEnd) }];
   let before = "";
   for (const piece of pieces) {
     if (piece.typed && !insideLiteralText(before)) piece.text = escapeTypedText(piece.text);
+    // A letter right after a control word joins its name: "\eg" plus a typed
+    // "s" would be the undefined "\egs", and deleting the blank in "\etal
+    // found" gives "\etalfound". An empty group ends the name; the page shows
+    // nothing for it.
+    if (/^[A-Za-z]/.test(piece.text) && /(?:^|[^\\])(?:\\\\)*\\[A-Za-z@]+$/.test(before) && !insideLiteralText(before)) {
+      piece.text = `{}${piece.text}`;
+    }
     before += piece.text;
   }
   return tidyEditedSource(pieces);

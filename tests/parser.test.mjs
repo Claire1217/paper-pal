@@ -725,6 +725,9 @@ describe("user macros that pass an argument to another command", () => {
 \newcommand{\many}{\many\many\many\many}
 \newcommand{\pA}[1]{\pB{#1}x}
 \newcommand{\pB}[1]{\pA{#1}x}
+\newcommand{\todo}[1]{\textcolor{red}{TODO: #1}}
+\providecommand{\hl}[1]{X#1X}
+\newcommand{\sq}[1]{[#1]}
 \begin{document}
 \section{Intro}\label{sec:intro}
 
@@ -737,6 +740,10 @@ Visit \link{https://example.org}{our site} or write to \mail{a@b.c} now.
 A \lbl{l:a}{bold words} and \note{red words} and \twoarg{first}{second} and \paren{term}.
 
 Self \dbl{x} and \many{} and \pA{y} end.
+
+Own \todo{check this} and \hl{marked} here.
+
+Deep \sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{\sq{y}}}}}}}}}}}} end.
 
 \begin{figure}\caption{A}\label{fig:a}\end{figure}
 \end{document}
@@ -796,5 +803,14 @@ Self \dbl{x} and \many{} and \pA{y} end.
     assert.match(block.display, /^Self x and \\many and y/);
     // Two macros that call each other stop at the depth limit.
     assert.ok(block.display.length < 60, block.display);
+  });
+
+  it("uses the author's own definition of a command Paper Pal also knows", () => {
+    // \providecommand does not replace a package's \hl.
+    assert.equal(findBlock(document, "Own ").display, "Own TODO: check this and marked here.");
+  });
+
+  it("counts only macro bodies, not arguments, toward the nesting limit", () => {
+    assert.equal(findBlock(document, "Deep ").display, `Deep ${"[".repeat(12)}y${"]".repeat(12)} end.`);
   });
 });

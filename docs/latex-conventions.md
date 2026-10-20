@@ -84,7 +84,8 @@ Inside a paragraph:
   `\colorbox`, `\fbox`, `\makebox`, `\parbox`, `\raisebox`, `\scalebox`,
   `\resizebox` show their text.
 - `\footnote{...}`, `\footnotetext`, `\marginpar`, `\thanks` are shown in
-  place, smaller, in square brackets. The text stays editable.
+  place, smaller, in square brackets. The text stays editable; the brackets
+  go only together with the whole note.
 - `\url{...}` shows the address as written (`%`, `#`, `_`, `~` included);
   `\href{url}{text}` shows the text.
 - `\todo{...}` is shown as `[TODO: ...]`, `\hl{...}` highlighted.
@@ -126,7 +127,9 @@ Inside a paragraph:
   arguments. In prose a macro is expanded **for display only**: the source is
   never rewritten. The arguments are put into the body and the result is
   shown, so `\newcommand{\figref}[1]{Figure~\ref{#1}}` shows "Figure 3" and a
-  macro around `\citet` shows the citation.
+  macro around `\citet` shows the citation. Your definition of a command
+  Paper Pal also knows (`\todo`, `\hl`) is used instead of Paper Pal's,
+  except one made with `\providecommand`.
   - Argument text that the body shows as written (`\textcolor{red}{#1}`, the
     link text of `\href{#1}{#2}`, the `#1` of `(#1)`) stays editable in place.
     An edit there changes only the argument.
@@ -139,8 +142,11 @@ Inside a paragraph:
     call shows stays (deleting only the ")" of `\paren{word}`) is not saved:
     in LaTeX it could only delete the argument as well. Undo it, or change the
     call in the source.
-  - A macro without arguments is not locked. A macro whose body calls itself
-    is shown like a command the parser does not know.
+  - A macro without arguments is not locked. A letter typed right after it is
+    written after an empty group (`\eg{}s`), so it does not join the name.
+  - A macro whose body calls itself is shown like a command the parser does
+    not know. Macros used inside each other's arguments may nest to any
+    depth; bodies that call other macros stop after six levels.
 
   In math the definitions are handed to KaTeX, so `$\norm{x}$` renders.
 - A command the parser does not know: with arguments, the text of the

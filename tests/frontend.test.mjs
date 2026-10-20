@@ -84,6 +84,10 @@ The \\emph{first half second half} ends.
 Code \\verb|a%b| here.
 
 Set \\verb|a b| to it.
+
+Text\\footnote{a note here} end.
+
+Note \\todo{add numbers} here.
 \\end{document}
 `;
 const NOTES = `\\section{First}
@@ -222,6 +226,19 @@ describe("front end", () => {
       const between = await editAndSave("verb|a b", "a b to", "a or b to");
       assert.match(between.source, /\nSet a or b to it\./);
       assert.equal(between.display, between.typed);
+    });
+
+    it("refuses deleting only the brackets of a footnote or the TODO of \\todo", async () => {
+      const document = await getDocument(server, "main.tex");
+      for (const [needle, from, to] of [["footnote", " [", " "], ["footnote", "]", ""], ["todo{", "[TODO: ", "["]]) {
+        const block = document.blocks.find((item) => item.raw.includes(needle));
+        assert.throws(() => app.rawTextForDisplayEdit(block, block.display.replace(from, to)), /would change only part of what \\(?:footnote|todo) shows/);
+      }
+      // The note's own text stays editable, and the whole note can go.
+      const edited = await editAndSave("footnote", "a note", "one note");
+      assert.match(edited.source, /\nText\\footnote\{one note here\} end\./);
+      const removed = await editAndSave("footnote", " [a note here]", "");
+      assert.match(removed.source, /\nText end\./);
     });
 
     it("escapes a %, & or # the author types", async () => {
@@ -853,6 +870,8 @@ describe("editing macro calls", () => {
 \newcommand{\lbl}[2]{\textbf{#2}\label{#1}}
 \newcommand{\term}[1]{\textbf{#1}\index{#1}}
 \newcommand{\dbl}[1]{\textbf{\dbl{#1}\dbl{#1}}}
+\newcommand{\eg}{e.g.}
+\newcommand{\etal}{et al.}
 \begin{document}
 `;
   const PARAGRAPHS = [
@@ -871,10 +890,13 @@ describe("editing macro calls", () => {
     String.raw`Idx \term{entropy} is.`,
     String.raw`Self \dbl{x} end.`,
     "Plain words for a comment.",
+    String.raw`Use \eg the first.`,
+    String.raw`Smith \etal found it.`,
+    String.raw`Use \eg{} too and \LaTeX\ is fine, \eg, here.`,
   ];
   const MAIN = `${PREAMBLE}\n${PARAGRAPHS.join("\n\n")}\n\n\\begin{figure}\\caption{A}\\label{fig:a}\\end{figure}\n\\end{document}\n`;
   const BIB = "@article{smith, author={Smith, John}, title={T}, year={2020}}\n";
-  const REFUSED = /text that a macro adds around its arguments/;
+  const REFUSED = /would change only part of what \\(?:paren|pair|fixme) shows/;
   // [paragraph, display text to replace, what the author types, source afterwards]
   // Formatting macros: every argument is edited in place, as before.
   const FORMATTING = [
@@ -901,6 +923,15 @@ describe("editing macro calls", () => {
     [4, " Figure ?", "", "See now."],
     [6, "says", "writes", String.raw`As \citeA{smith} writes.`],
     [7, " (word)", "", "X end."],
+  ];
+  // A letter typed or moved right after a macro without arguments must not
+  // join its name; other text next to it is written as before.
+  const NAMES = [
+    [15, "e.g. the", "e.g.s the", String.raw`Use \eg{}s the first.`],
+    [16, "al. found", "al.found", String.raw`Smith \etal{}found it.`],
+    [17, "e.g. too", "e.g. also", String.raw`Use \eg{} also and \LaTeX\ is fine, \eg, here.`],
+    [17, "LaTeX is", "LaTeX was", String.raw`Use \eg{} too and \LaTeX\ was fine, \eg, here.`],
+    [17, "e.g., here", "e.g.; here", String.raw`Use \eg{} too and \LaTeX\ is fine, \eg; here.`],
   ];
   // \href-style macros: the link text is edited in place, the address stays.
   const LINKS = [
@@ -943,7 +974,7 @@ describe("editing macro calls", () => {
       return result;
     }
 
-    for (const [label, cases] of [["formatting", FORMATTING], ["unit", UNITS], ["link", LINKS]]) {
+    for (const [label, cases] of [["formatting", FORMATTING], ["unit", UNITS], ["link", LINKS], ["no-argument", NAMES]]) {
       it(`writes only the edited text of a ${label} macro`, async () => {
         for (const [paragraph, from, to, expected] of cases) {
           const result = await editAndSave(paragraph, from, to);
@@ -968,6 +999,8 @@ describe("editing macro calls", () => {
         const { block } = await blockOf(paragraph);
         assert.throws(() => app.rawTextForDisplayEdit(block, block.display.replace(from, to)), REFUSED, `${from} -> ${to}`);
       }
+      const { block } = await blockOf(7);
+      assert.throws(() => app.rawTextForDisplayEdit(block, block.display.replace("word)", "word")), /part of what \\paren shows/);
     });
   });
 
@@ -1013,7 +1046,7 @@ describe("editing macro calls", () => {
       return { saved, toasts, text: after.proposal.replacementText, display: (await unitOf()).display, typed, unit };
     }
 
-    for (const [label, cases] of [["formatting", FORMATTING], ["unit", UNITS], ["link", LINKS]]) {
+    for (const [label, cases] of [["formatting", FORMATTING], ["unit", UNITS], ["link", LINKS], ["no-argument", NAMES]]) {
       it(`saves only the edited text of a ${label} macro`, async () => {
         for (const [paragraph, from, to, expected] of cases) {
           const result = await editUnit(paragraph, from, to);
