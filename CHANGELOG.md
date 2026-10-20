@@ -52,6 +52,21 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - A zero or negative `agent.timeoutMs`, `agent.projectTimeoutMs` or
   `agent.chatTimeoutMs` ended every agent run at once. Such values now use the
   default.
+- **A caption edit could be written into a commented-out caption.** With
+  `% \caption{Old}` above the real `\caption` of a table, the page showed the
+  old caption, and an accepted caption rewrite changed the comment line while
+  the compiled caption stayed the same. A commented-out `% \label{...}` above
+  the real one likewise gave a figure, table, equation or theorem the wrong
+  number from the `.aux` file. Paper Pal now ignores captions and labels inside
+  comments.
+- A table showed a commented-out row (`% A & B \\`) as a real row, and an `&`
+  in a trailing comment as an extra cell. Rows and cells are now split outside
+  comments only.
+- Rule widths and colours leaked into table cells: `\toprule[1.5pt]`,
+  `\midrule[..]`, `\bottomrule[..]`, `\cmidrule[..](lr){2-3}`,
+  `\specialrule{..}{..}{..}`, `\rowcolor{..}` and `\cellcolor{..}` showed
+  their arguments as text, and a rule after the last row added an extra row.
+  These commands and their arguments are now dropped.
 - **Codex runs failed with "the argument '--dangerously-bypass-approvals-and-sandbox'
   cannot be used with '--ask-for-approval'"** when the `codex` on PATH is a
   wrapper that adds that flag. Paper Pal now passes the approval policy as a

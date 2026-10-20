@@ -830,7 +830,7 @@ function parseBlocks(source) {
     if (block.kind === "structure") {
       // \label on its own line right under \begin{theorem} names the environment.
       const pending = wrappers.at(-1);
-      const label = pending && !pending.opened ? /\\label\{([^{}]+)\}/.exec(block.raw) : null;
+      const label = pending && !pending.opened ? /\\label\{([^{}]+)\}/.exec(maskLatex(block.raw)) : null;
       if (label) pending.label = label[1];
       continue;
     }
@@ -851,7 +851,7 @@ function parseBlocks(source) {
       if (!scope.opened) {
         block.environmentStart = true;
         if (scope.title) block.environmentTitle = scope.title;
-        const label = scope.label || /\\label\{([^{}]+)\}/.exec(block.raw)?.[1];
+        const label = scope.label || /\\label\{([^{}]+)\}/.exec(maskLatex(block.raw))?.[1];
         if (label) block.environmentLabel = label;
       }
     }
@@ -2270,8 +2270,9 @@ async function projectReferences() {
     }
     for (const block of parseBlocks(source)) {
       const pattern = /\\label\{([^}]+)\}/g;
+      const liveBlock = maskLatex(block.raw);
       let labelMatch;
-      while ((labelMatch = pattern.exec(block.raw)) !== null) {
+      while ((labelMatch = pattern.exec(liveBlock)) !== null) {
         labels[labelMatch[1]] ||= { key: labelMatch[1], number: "?", page: null, type: "reference" };
         labels[labelMatch[1]].path = relativeRepo(absolute);
         labels[labelMatch[1]].blockIndex = block.index;
@@ -2420,27 +2421,32 @@ function tableRows(raw, macros, references) {
   // A table this parser cannot read (no tabular, or one that is cut off)
   // has no rows: the page then shows the compiled-PDF note.
   const unreadable = { rows: [], formattedRows: [], headerRows: 1 };
-  const begin = /\\begin\{(tabular\*?|tabularx|longtable\*?)\}/i.exec(raw);
+  // Rows and cells are found in a masked copy of the same length, so a
+  // commented-out row ("% A & B \\") or an "&" in a trailing comment does not
+  // split anything; the cell text is then taken from the source.
+  const live = maskLatex(raw);
+  const begin = /\\begin\{(tabular\*?|tabularx|longtable\*?)\}/i.exec(live);
   if (!begin) return unreadable;
   let cursor = begin.index + begin[0].length;
   if (/^(?:tabular\*|tabularx)$/i.test(begin[1])) {
-    while (/\s/.test(raw[cursor] || "")) cursor += 1;
-    const width = braceGroupAt(raw, cursor);
+    while (/\s/.test(live[cursor] || "")) cursor += 1;
+    const width = braceGroupAt(live, cursor);
     if (!width) return unreadable;
     cursor = width.end;
   }
-  while (/\s/.test(raw[cursor] || "")) cursor += 1;
-  if (raw[cursor] === "[") {
+  while (/\s/.test(live[cursor] || "")) cursor += 1;
+  if (live[cursor] === "[") {
     // \begin{tabular}[t]{ll}
-    const positionEnd = raw.indexOf("]", cursor);
+    const positionEnd = live.indexOf("]", cursor);
     if (positionEnd >= 0 && positionEnd - cursor < 12) cursor = positionEnd + 1;
-    while (/\s/.test(raw[cursor] || "")) cursor += 1;
+    while (/\s/.test(live[cursor] || "")) cursor += 1;
   }
-  const columns = braceGroupAt(raw, cursor);
+  const columns = braceGroupAt(live, cursor);
   if (!columns) return unreadable;
-  const endAt = raw.indexOf(`\\end{${begin[1]}}`, columns.end);
+  const endAt = live.indexOf(`\\end{${begin[1]}}`, columns.end);
   if (endAt < 0) return unreadable;
   const body = raw.slice(columns.end, endAt);
+  const liveBody = live.slice(columns.end, endAt);
   const multicolumnValue = (cell) => {
     const command = /\\multicolumn\s*/.exec(cell);
     if (!command) return null;
@@ -2469,13 +2475,31 @@ function tableRows(raw, macros, references) {
     }
     return { value: groups[2], rowspan: Number.parseInt(groups[0], 10) || 1 };
   };
-  const cleanRow = (row) => row
-    .replace(/\\(?:toprule|midrule|bottomrule|cmidrule)(?:\([^)]*\))?(?:\{[^}]*\})?/g, "")
-    // longtable keeps its caption, label and head/foot markers among the rows.
-    .replace(/\\(?:caption|label)\s*(?:\[[^\]]*\])?\s*\{(?:[^{}]|\{[^{}]*\})*\}|\\end(?:first)?head(?![A-Za-z])|\\end(?:last)?foot(?![A-Za-z])/g, "")
-    .trim();
-  const splitRows = (value) => {
+  // Rules with their optional width or trim, row and cell colours, and
+  // longtable's caption, label and head/foot markers are not cell text. They
+  // are blanked, not removed, in both copies so that offsets keep matching.
+  const notCellText = new RegExp([
+    /\\(?:toprule|midrule|bottomrule)(?![A-Za-z])(?:\s*\[[^\]]*\])?/.source,
+    /\\cmidrule(?![A-Za-z])(?:\s*\[[^\]]*\])?(?:\s*\([^)]*\))?(?:\s*\{[^}]*\})?/.source,
+    /\\specialrule(?![A-Za-z])(?:\s*\{[^}]*\}){0,3}/.source,
+    /\\(?:rowcolor|cellcolor)(?![A-Za-z])(?:\s*\[[^\]]*\])?(?:\s*\{[^}]*\})?/.source,
+    /\\(?:caption|label)\s*(?:\[[^\]]*\])?\s*\{(?:[^{}]|\{[^{}]*\})*\}|\\end(?:first)?head(?![A-Za-z])|\\end(?:last)?foot(?![A-Za-z])/.source,
+  ].join("|"), "g");
+  const cleanRow = ({ text, live: liveText }) => {
+    let cleanText = text;
+    let cleanLive = liveText;
+    for (const match of liveText.matchAll(notCellText)) {
+      const end = match.index + match[0].length;
+      const blank = " ".repeat(match[0].length);
+      cleanText = `${cleanText.slice(0, match.index)}${blank}${cleanText.slice(end)}`;
+      cleanLive = `${cleanLive.slice(0, match.index)}${blank}${cleanLive.slice(end)}`;
+    }
+    return { text: cleanText, live: cleanLive };
+  };
+  // Row ranges of the masked body, applied to both copies.
+  const splitRows = (value, source) => {
     const rows = [];
+    const push = (from, to) => rows.push({ text: source.slice(from, to), live: value.slice(from, to) });
     let start = 0;
     let depth = 0;
     for (let index = 0; index < value.length; index += 1) {
@@ -2489,7 +2513,7 @@ function tableRows(raw, macros, references) {
         continue;
       }
       if (character !== "\\" || value[index + 1] !== "\\" || depth !== 0) continue;
-      rows.push(value.slice(start, index));
+      push(start, index);
       index += 1;
       if (value[index + 1] === "[") {
         const optionalEnd = value.indexOf("]", index + 2);
@@ -2497,19 +2521,27 @@ function tableRows(raw, macros, references) {
       }
       start = index + 1;
     }
-    rows.push(value.slice(start));
+    push(start, value.length);
     return rows;
   };
-  const headerBoundary = body.indexOf("\\midrule");
-  const headerRows = headerBoundary < 0 ? 1 : body
-    .slice(0, headerBoundary);
-  const headerRowCount = headerBoundary < 0 ? 1 : splitRows(headerRows)
+  const headerBoundary = liveBody.indexOf("\\midrule");
+  const headerRowCount = headerBoundary < 0 ? 1 : splitRows(liveBody.slice(0, headerBoundary), body.slice(0, headerBoundary))
     .map(cleanRow)
-    .filter(Boolean).length;
-  const formattedRows = splitRows(body)
+    .filter((row) => row.live.trim()).length;
+  const cells = (row) => {
+    const found = [];
+    let start = 0;
+    for (const match of row.live.matchAll(/(?<!\\)&/g)) {
+      found.push(row.text.slice(start, match.index));
+      start = match.index + 1;
+    }
+    found.push(row.text.slice(start));
+    return found.map((cell) => cell.trim());
+  };
+  const formattedRows = splitRows(liveBody, body)
     .map(cleanRow)
-    .filter(Boolean)
-    .map((row) => row.split(/(?<!\\)&/).map((cell) => {
+    .filter((row) => row.live.trim())
+    .map((row) => cells(row).map((cell) => {
       const multicolumn = multicolumnValue(cell);
       const multirow = multirowValue(cell);
       const source = multicolumn?.value || multirow?.value || cell.replace(/^\\quad\s*/, " ");
@@ -2699,7 +2731,9 @@ function dedentCode(text) {
 }
 
 async function semanticBlock(block, relativePath, macros, references) {
-  const label = commandArgument(block.raw, "label")?.value || null;
+  // Found in the masked copy: a commented-out "% \label{old}" above the real
+  // one must not pick the number.
+  const label = commandArgument(maskLatex(block.raw), "label")?.value || null;
   const reference = label ? references.labels[label] : null;
   const common = { label, number: reference?.number || null, page: reference?.page || null };
   if (block.kind === "math") {
@@ -2787,7 +2821,11 @@ async function semanticBlock(block, relativePath, macros, references) {
     return { ...common, items, fallback: false };
   }
   if (block.kind === "table") {
-    const captionArgument = commandArgument(block.raw, "caption") || captionOfArgument(block.raw);
+    // As for figures: offsets from the masked copy, so that a commented-out
+    // "% \caption{Old}" is neither shown nor the target of a caption edit.
+    const liveTable = maskLatex(block.raw);
+    const foundCaption = commandArgument(liveTable, "caption") || captionOfArgument(liveTable);
+    const captionArgument = foundCaption ? { ...foundCaption, value: block.raw.slice(foundCaption.start, foundCaption.contentEnd) } : null;
     const captionRaw = captionArgument?.value || "";
     const captionRendered = normalizeCaptionDisplay(renderTex(captionRaw, macros, references));
     const table = tableRows(block.raw, macros, references);
