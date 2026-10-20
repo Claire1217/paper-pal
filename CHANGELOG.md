@@ -17,6 +17,36 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - On Windows, an agent run or another save could fail with "EPERM: operation
   not permitted, rename" when the page read the same state file at that moment.
   Paper Pal now retries the rename a few times before it reports an error.
+- **A project file could widen what the Claude agent may do.** Entries of
+  `claude.allowedTools` were handed to `claude` as separate arguments, so an
+  entry that starts with `-` became an option of its own; a listed tool such as
+  `Monitor` could run commands, because only `Write`, `Edit`, `NotebookEdit`
+  and `Bash` were disallowed; and `claude.permissionMode` was passed through
+  unchecked. Start-up now refuses an entry that is not a tool name, a tool
+  other than `Read`, `Glob`, `Grep`, `LS`, `WebFetch` and `WebSearch`, and a
+  permission mode other than `default` or `plan`; the last two are allowed
+  with `PAPER_PAL_ALLOW_CUSTOM_COMMANDS=1` set outside the project.
+- **A project file could send one provider's key to another provider.**
+  `<provider>.apiKeyEnv` accepted any provider's key variable, so for example
+  `deepseek` could be told to use `OPENAI_API_KEY`. It now accepts only the
+  provider's own variable or a `PAPER_PAL_*_KEY` name; another provider's key
+  variable only when the base URL is on this machine. Anything else still needs
+  `PAPER_PAL_ALLOW_PROJECT_KEY_ENV=1`. A project that relied on the old
+  behaviour stops at start-up with a message that says which variable to use.
+- The API adapter followed HTTP redirects, and with the Anthropic protocol that
+  resent the `x-api-key` header to the redirect target. Redirects are no longer
+  followed: the run fails with the new address (when the endpoint gives one)
+  and asks you to set the base URL to it if the move is expected.
+- A base URL with a user name and password in it failed with an error that
+  repeated the whole URL, password included, and was retried. Such a URL is now
+  refused (in `.paper-pal.json` and by the adapter), `user:password@` is masked
+  in adapter messages, and only failures on the network are retried.
+- The check for credentials in `.paper-pal.json` missed names such as
+  `openaiApiKey`, `OPENAI_API_KEY`, `x-api-key`, `clientSecret` and `apiKeys`,
+  and keys given as a list or an object. Any field whose name ends in `key`,
+  `token`, `secret`, `password` and similar (singular or plural) now stops
+  start-up when it holds a value; names that end in `Env` (`apiKeyEnv`) and
+  counts such as `maxTokens` are still allowed.
 - **A caption edit could be written into a commented-out caption.** With
   `% \caption{Old}` above the real `\caption` of a table, the page showed the
   old caption, and an accepted caption rewrite changed the comment line while

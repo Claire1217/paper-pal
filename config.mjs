@@ -1,6 +1,9 @@
 import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
-import { API_PROTOCOLS, API_PROVIDERS, AGENT_PROVIDERS, CLI_PROVIDERS, PROVIDER_TABLE, isLoopbackUrl } from "./agent-providers.mjs";
+import {
+  API_PROTOCOLS, API_PROVIDERS, AGENT_PROVIDERS, CLAUDE_PERMISSION_MODE_PATTERN, CLAUDE_PROJECT_TOOLS, CLAUDE_SAFE_PERMISSION_MODES,
+  CLI_PROVIDERS, PROVIDER_TABLE, invalidClaudeTools, isLoopbackUrl, nonReadOnlyClaudeTools,
+} from "./agent-providers.mjs";
 import {
   APP_NAME, CONFIG_NAME, ENV, resolveConfigPath, resolveLocalPointer, truthyEnv,
 } from "./names.mjs";
@@ -108,15 +111,31 @@ function relativeSetting(value, name) {
 }
 
 // A project configuration is usually committed with the manuscript, so it must
-// never hold a credential. Any field that looks like one stops start-up.
-const secretFieldPattern = /^(?:api[-_]?key|key|token|secret|password|authorization|access[-_]?token|auth[-_]?token|bearer)$/i;
+// never hold a credential. Any field that looks like one stops start-up. The
+// name is compared without case, "-" or "_", by its ending, so openaiApiKey,
+// OPENAI_API_KEY, x-api-key, clientSecret and apiKeys all count. Names ending
+// in "Env" (apiKeyEnv) hold a variable NAME, and maxTokens-style names hold a
+// count; both are fine.
+const secretFieldPattern = /(?:keys?|tokens?|secrets?|passwords?|passwd|passphrases?|authorization|bearer|credentials?)$/;
+
+function looksLikeSecretField(name) {
+  const plain = String(name).toLowerCase().replace(/[-_\s]/g, "");
+  return !plain.endsWith("env") && !/^(?:max|min|num)/.test(plain) && secretFieldPattern.test(plain);
+}
+
+// An empty placeholder ("apiKey": "" or []) holds nothing and is allowed.
+function holdsValue(value) {
+  if (value === null || value === "") return false;
+  if (typeof value !== "object") return true;
+  return Object.values(value).some(holdsValue);
+}
 
 function findSecretFields(value, trail = []) {
   if (!value || typeof value !== "object") return [];
   const found = [];
   for (const [name, child] of Object.entries(value)) {
     const here = [...trail, name];
-    if (secretFieldPattern.test(name) && child !== null && child !== "" && typeof child !== "object") found.push(here.join("."));
+    if (looksLikeSecretField(name) && holdsValue(child)) found.push(here.join("."));
     else found.push(...findSecretFields(child, here));
   }
   return found;
@@ -162,6 +181,54 @@ function agentCommand(provider, value, env) {
   ].join("\n"));
 }
 
+// claude.allowedTools entries are handed to the CLI one argv element each, so
+// they must look like tool names. A tool other than the read-only ones can run
+// a command or change files (Monitor runs a shell command), and a permission
+// mode other than default/plan lets the agent act without asking: either would
+// undo the read-only run Paper Pal asks for.
+function claudeAllowedTools(value, env) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error("claude.allowedTools must be a list of tool names, for example [\"Read\", \"Grep\"].");
+  const tools = value.map(String);
+  const invalid = invalidClaudeTools(tools);
+  if (invalid.length) {
+    throw new Error(`claude.allowedTools may only list tool names such as Read or WebFetch(domain:example.org), not ${JSON.stringify(invalid[0].slice(0, 40))}.`);
+  }
+  const other = nonReadOnlyClaudeTools(tools);
+  if (other.length && !truthyEnv(env[ENV.allowCustomCommands])) {
+    throw new Error([
+      `claude.allowedTools may only list read-only tools (${CLAUDE_PROJECT_TOOLS.join(", ")}) in a project configuration, not ${JSON.stringify(other[0].slice(0, 40))}.`,
+      `To allow other tools, set ${ENV.allowCustomCommands}=1 in your shell or in Paper Pal's .env (not in the project).`,
+    ].join("\n"));
+  }
+  return tools;
+}
+
+function claudePermissionMode(value, env) {
+  if (value === undefined || value === null || value === "") return null;
+  const mode = String(value);
+  if (CLAUDE_SAFE_PERMISSION_MODES.includes(mode)) return mode;
+  if (!CLAUDE_PERMISSION_MODE_PATTERN.test(mode)) {
+    throw new Error(`claude.permissionMode ${JSON.stringify(mode.slice(0, 40))} is not a permission mode name; use ${CLAUDE_SAFE_PERMISSION_MODES.join(" or ")}.`);
+  }
+  if (truthyEnv(env[ENV.allowCustomCommands])) return mode;
+  throw new Error([
+    `claude.permissionMode is "${mode}". A project configuration may only choose ${CLAUDE_SAFE_PERMISSION_MODES.join(" or ")}, because other modes let the agent act without asking.`,
+    `To allow another mode, set ${ENV.allowCustomCommands}=1 in your shell or in Paper Pal's .env (not in the project).`,
+  ].join("\n"));
+}
+
+// fetch() refuses a URL with a user name or password and repeats the whole URL
+// in its error, so the password would end up in traces and error messages.
+function hasCredentials(url) {
+  try {
+    const parsed = new URL(url);
+    return Boolean(parsed.username || parsed.password);
+  } catch {
+    return false;
+  }
+}
+
 function modelFields(block) {
   return {
     ...(block?.model ? { model: String(block.model) } : {}),
@@ -180,6 +247,9 @@ function apiProviderBlock(provider, block, env) {
   if (block?.baseUrl !== undefined && block.baseUrl !== null && block.baseUrl !== "") {
     const baseUrl = String(block.baseUrl).replace(/\/+$/, "");
     if (!/^https?:\/\/[^\s]+$/i.test(baseUrl)) throw new Error(`${provider}.baseUrl must be an http(s) URL.`);
+    if (hasCredentials(baseUrl)) {
+      throw new Error(`${provider}.baseUrl must not contain a user name or password. Put the key in Paper Pal's .env and name it with ${provider}.apiKeyEnv.`);
+    }
     const sameAsPreset = row.baseUrl && baseUrl === row.baseUrl;
     if (!sameAsPreset && !isLoopbackUrl(baseUrl) && !truthyEnv(env.PAPER_PAL_ALLOW_PROJECT_BASE_URL)) {
       throw new Error([
@@ -196,15 +266,20 @@ function apiProviderBlock(provider, block, env) {
       throw new Error(`${provider}.apiKeyEnv must be the NAME of an environment variable (for example OPENAI_API_KEY), not a key.`);
     }
     // A project file may not choose WHICH secret is sent: only the provider's
-    // own variable, another provider key variable, or a PAPER_PAL_* name.
-    // Otherwise a cloned repository could name AWS_SECRET_ACCESS_KEY or
-    // GITHUB_TOKEN and have it posted to the API host as a bearer token.
+    // own variable or a PAPER_PAL_*_KEY name. Otherwise a cloned repository
+    // could name AWS_SECRET_ACCESS_KEY or GITHUB_TOKEN, or another provider's
+    // key (deepseek.apiKeyEnv = OPENAI_API_KEY), and have it posted to this
+    // provider's host. An endpoint on this machine (a local proxy) may use
+    // any provider key variable: the key does not leave the computer there.
     const knownKeyNames = new Set(Object.values(PROVIDER_TABLE).map((entry) => entry.apiKeyEnv).filter(Boolean));
-    const allowed = name === row.apiKeyEnv || knownKeyNames.has(name) || /^PAPER_PAL_[A-Z0-9_]*KEY$/.test(name);
+    const effectiveBaseUrl = result.baseUrl || (row.baseUrlEnv ? env[row.baseUrlEnv] : "") || row.baseUrl || "";
+    const allowed = name === row.apiKeyEnv || /^PAPER_PAL_[A-Z0-9_]*KEY$/.test(name)
+      || (knownKeyNames.has(name) && isLoopbackUrl(effectiveBaseUrl));
     if (!allowed && !truthyEnv(env.PAPER_PAL_ALLOW_PROJECT_KEY_ENV)) {
+      const own = row.apiKeyEnv ? ` (${row.apiKeyEnv})` : "";
       throw new Error([
-        `${provider}.apiKeyEnv names ${name}. A project configuration may only name a provider key variable`,
-        `(${[...knownKeyNames].join(", ")}) or a PAPER_PAL_*_KEY variable, because that variable's value is sent to the API host.`,
+        `${provider}.apiKeyEnv names ${name}. A project configuration may only name its own key variable${own}`,
+        "or a PAPER_PAL_*_KEY variable, because that variable's value is sent to this provider's host.",
         "Rename the variable in Paper Pal's .env, or set PAPER_PAL_ALLOW_PROJECT_KEY_ENV=1 there.",
       ].join("\n"));
     }
@@ -302,10 +377,8 @@ export async function loadReviewConfig({ appRoot, argv = process.argv.slice(2), 
   };
   const claude = {
     command: agentCommand("claude", raw.claude?.command, env),
-    permissionMode: raw.claude?.permissionMode ? String(raw.claude.permissionMode) : null,
-    allowedTools: Array.isArray(raw.claude?.allowedTools)
-      ? raw.claude.allowedTools.map(String)
-      : [],
+    permissionMode: claudePermissionMode(raw.claude?.permissionMode, env),
+    allowedTools: claudeAllowedTools(raw.claude?.allowedTools, env),
     ...modelFields(raw.claude),
   };
   const apiProviders = Object.fromEntries(API_PROVIDERS.map((id) => [id, apiProviderBlock(id, raw[id], env)]));

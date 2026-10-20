@@ -83,11 +83,41 @@ export const API_PROTOCOLS = Object.freeze(["openai", "anthropic"]);
 // Read-only floor for Claude. Anything outside this list is denied in print
 // mode, which is how the adapter matches the Codex read-only sandbox.
 const CLAUDE_READ_ONLY_TOOLS = ["Read", "Glob", "Grep"];
-// Every name here must exist in the installed CLI: an unknown one is a hard
-// error, not a warning, so a retired tool name takes the whole run down.
-// MultiEdit was removed from the CLI and is deliberately absent; Edit already
-// covers what it did.
-const CLAUDE_WRITE_TOOLS = ["Write", "Edit", "NotebookEdit", "Bash"];
+// Tools a project file may put in claude.allowedTools without
+// PAPER_PAL_ALLOW_CUSTOM_COMMANDS: they read files or the web and nothing else.
+// LS existed in older CLIs.
+export const CLAUDE_PROJECT_TOOLS = Object.freeze(["Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch"]);
+// Always denied, whatever allowedTools says. Some CLI versions refuse to start
+// on a name they do not know, so a tool added or retired by a later CLI would
+// take every run down: the list stays short, with names every supported CLI
+// has. MultiEdit was removed from the CLI and is deliberately absent; Edit
+// already covers what it did. The CLI has other tools that run commands
+// (Monitor, for one), so this list is not the guard: CLAUDE_PROJECT_TOOLS is,
+// because print mode denies every tool that allowedTools does not name.
+export const CLAUDE_WRITE_TOOLS = Object.freeze(["Write", "Edit", "NotebookEdit", "Bash"]);
+
+// claude.allowedTools entries become separate argv elements after
+// --allowedTools, so an entry shaped like an option ("--settings", "--add-dir")
+// would reach the CLI as a flag of its own. Only the CLI's tool syntax is
+// accepted: a name ("Read", "mcp__server__tool") with an optional
+// parenthesised specifier ("WebFetch(domain:example.org)"). Control
+// characters are refused too: spawn() rejects an argument with a NUL in it.
+const CLAUDE_TOOL_PATTERN = /^[A-Za-z][A-Za-z0-9_:*-]*(?:\([^()\x00-\x1f\x7f]*\))?$/;
+
+export function invalidClaudeTools(tools) {
+  return tools.map(String).filter((tool) => !CLAUDE_TOOL_PATTERN.test(tool));
+}
+
+/** Entries whose tool (the name before any specifier) is not read-only. */
+export function nonReadOnlyClaudeTools(tools) {
+  return tools.map(String).filter((tool) => !CLAUDE_PROJECT_TOOLS.includes(tool.replace(/\(.*$/s, "")));
+}
+
+// "default" asks before anything outside allowedTools and print mode cannot
+// ask, so it denies; "plan" is read-only by definition. Every other mode
+// (acceptEdits, auto, bypassPermissions, ...) lets the agent act on its own.
+export const CLAUDE_SAFE_PERMISSION_MODES = Object.freeze(["default", "plan"]);
+export const CLAUDE_PERMISSION_MODE_PATTERN = /^[A-Za-z]+$/;
 
 export function normalizeProvider(value, fallback = "codex") {
   const candidate = String(value || "").trim().toLowerCase();
@@ -464,6 +494,15 @@ export async function buildAgentInvocation({
     const allowedTools = Array.isArray(config.claude?.allowedTools) && config.claude.allowedTools.length
       ? config.claude.allowedTools.map(String)
       : CLAUDE_READ_ONLY_TOOLS;
+    // loadReviewConfig already refused these; check again for configurations
+    // built elsewhere, because a bad entry here becomes a CLI option.
+    if (invalidClaudeTools(allowedTools).length) {
+      throw new Error("claude.allowedTools may only list tool names such as Read or WebFetch(domain:example.org).");
+    }
+    const permissionMode = config.claude?.permissionMode ? String(config.claude.permissionMode) : null;
+    if (permissionMode && !CLAUDE_PERMISSION_MODE_PATTERN.test(permissionMode)) {
+      throw new Error(`claude.permissionMode "${permissionMode}" is not a permission mode name.`);
+    }
     const fullPrompt = schemaPath
       ? `${prompt}\n\n${schemaInstructions(await fs.readFile(schemaPath, "utf8"))}`
       : prompt;
@@ -478,9 +517,7 @@ export async function buildAgentInvocation({
     if (reasoningEffort) args.push("--effort", String(reasoningEffort));
     args.push("--allowedTools", ...allowedTools);
     args.push("--disallowedTools", ...CLAUDE_WRITE_TOOLS);
-    if (config.claude?.permissionMode) {
-      args.push("--permission-mode", String(config.claude.permissionMode));
-    }
+    if (permissionMode) args.push("--permission-mode", permissionMode);
     return { command, args, input: fullPrompt, capturesStdout: true, provider: resolved };
   }
 

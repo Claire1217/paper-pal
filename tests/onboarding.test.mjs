@@ -376,6 +376,15 @@ describe("what a project configuration may name", () => {
       { custom: { key: "abc" } },
       { agent: { token: "abc" } },
       { openrouter: { nested: { secret: "abc" } } },
+      // Suffixes, upper-case names, header spellings and arrays count too.
+      { openai: { openaiApiKey: "sk-live-0123456789" } },
+      { openai: { OPENAI_API_KEY: "sk-live-0123456789" } },
+      { custom: { headers: { "x-api-key": "sk-ant-0123456789" } } },
+      { agent: { clientSecret: "abc" } },
+      { openai: { apiKey: ["sk-live-0123456789"] } },
+      { openai: { apiKeys: ["sk-live-0123456789"] } },
+      { agent: { tokens: ["abc"] } },
+      { secrets: { openai: "sk-live-0123456789" } },
     ]) {
       await assert.rejects(load(raw), (error) => {
         assert.match(error.message, /looks like a credential/);
@@ -385,8 +394,10 @@ describe("what a project configuration may name", () => {
       });
     }
     // Naming the variable is fine; so is an empty placeholder.
-    const { config } = await load({ openai: { model: "m", apiKeyEnv: "PAPER_PAL_LAB_KEY", apiKey: "" } });
+    const { config } = await load({ openai: { model: "m", apiKeyEnv: "PAPER_PAL_LAB_KEY", apiKey: "", tokens: [] } });
     assert.equal(config.openai.apiKeyEnv, "PAPER_PAL_LAB_KEY");
+    // Ordinary settings whose names merely end in "tokens" or "Env" still load.
+    assert.equal((await load({ anthropic: { maxTokens: 1000 }, custom: { tokenEnv: "PAPER_PAL_X", keyRequired: false, tokenBudget: 5 } })).config.anthropic.maxTokens, 1000);
   });
 
   it("the server exits with that message instead of starting", async () => {
@@ -422,12 +433,53 @@ describe("what a project configuration may name", () => {
     await assert.rejects(load({ custom: { protocol: "grpc" } }), /protocol must be one of/);
     await assert.rejects(load({ custom: { apiKeyEnv: "sk-this-is-a-key-not-a-name" } }), /NAME of an environment variable/);
     // A project file may not pick an unrelated secret to send to the API host.
-    await assert.rejects(load({ openai: { model: "m", apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } }), /may only name a provider key variable/);
-    await assert.rejects(load({ openai: { model: "m", apiKeyEnv: "GITHUB_TOKEN" } }), /may only name a provider key variable/);
-    assert.equal((await load({ openai: { model: "m", apiKeyEnv: "OPENROUTER_API_KEY" } })).config.openai.apiKeyEnv, "OPENROUTER_API_KEY");
+    await assert.rejects(load({ openai: { model: "m", apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } }), /may only name its own key variable/);
+    await assert.rejects(load({ openai: { model: "m", apiKeyEnv: "GITHUB_TOKEN" } }), /may only name its own key variable/);
+    // Nor another provider's key: that key would go to this provider's host.
+    await assert.rejects(load({ deepseek: { model: "m", apiKeyEnv: "OPENAI_API_KEY" } }), /may only name its own key variable \(DEEPSEEK_API_KEY\)/);
+    await assert.rejects(load({ openai: { model: "m", apiKeyEnv: "OPENROUTER_API_KEY" } }), /may only name its own key variable/);
+    await assert.rejects(load({ ollama: { model: "m", baseUrl: "https://collector.example/v1", apiKeyEnv: "ANTHROPIC_API_KEY" } }, { PAPER_PAL_ALLOW_PROJECT_BASE_URL: "1" }), /may only name its own key variable/);
+    assert.equal((await load({ openai: { model: "m", apiKeyEnv: "OPENAI_API_KEY" } })).config.openai.apiKeyEnv, "OPENAI_API_KEY");
+    assert.equal((await load({ deepseek: { model: "m", apiKeyEnv: "PAPER_PAL_DEEPSEEK_KEY" } })).config.deepseek.apiKeyEnv, "PAPER_PAL_DEEPSEEK_KEY");
+    // A local endpoint (a proxy on this machine) may use any provider key variable.
+    assert.equal((await load({ openai: { model: "m", baseUrl: "http://127.0.0.1:8080/v1", apiKeyEnv: "OPENROUTER_API_KEY" } })).config.openai.apiKeyEnv, "OPENROUTER_API_KEY");
+    assert.equal((await load({ ollama: { model: "m", apiKeyEnv: "OPENAI_API_KEY" } })).config.ollama.apiKeyEnv, "OPENAI_API_KEY");
+    await assert.rejects(load({ ollama: { model: "m", apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } }), /may only name its own key variable/);
+    assert.equal((await load({ deepseek: { model: "m", apiKeyEnv: "OPENAI_API_KEY" } }, { PAPER_PAL_ALLOW_PROJECT_KEY_ENV: "1" })).config.deepseek.apiKeyEnv, "OPENAI_API_KEY");
     assert.equal((await load({ openai: { model: "m", apiKeyEnv: "MY_LAB_KEY" } }, { PAPER_PAL_ALLOW_PROJECT_KEY_ENV: "1" })).config.openai.apiKeyEnv, "MY_LAB_KEY");
+    // A user name or password in the base URL would end up in error messages.
+    await assert.rejects(load({ openai: { baseUrl: "http://user:hunter2@127.0.0.1:8080/v1" } }), (error) => {
+      assert.match(error.message, /must not contain a user name or password/);
+      assert.ok(!error.message.includes("hunter2"));
+      return true;
+    });
     await assert.rejects(load({ anthropic: { maxTokens: -5 } }), /positive integer/);
     await assert.rejects(load({ agent: { provider: "gemini" } }), /agent\.provider is "gemini"/);
+  });
+
+  it("accepts only read-only tools in claude.allowedTools and a read-only claude.permissionMode", async () => {
+    const tools = ["Read", "Glob", "Grep", "LS", "WebFetch(domain:example.org)", "WebSearch", "Read(./docs/**)"];
+    assert.deepEqual((await load({ claude: { allowedTools: tools } })).config.claude.allowedTools, tools);
+    // Other tools can run commands or change files (Monitor runs a shell command).
+    for (const allowedTools of [["Monitor"], ["Read", "Agent"], ["Workflow"], ["mcp__papers__search"], ["Bash(git log *)"], ["Skill"]]) {
+      await assert.rejects(load({ claude: { allowedTools } }), /claude\.allowedTools may only list read-only tools \(Read, Glob, Grep, LS, WebFetch, WebSearch\)/);
+    }
+    const custom = { PAPER_PAL_ALLOW_CUSTOM_COMMANDS: "1" };
+    assert.deepEqual((await load({ claude: { allowedTools: ["Read", "mcp__papers__search"] } }, custom)).config.claude.allowedTools, ["Read", "mcp__papers__search"]);
+    // Anything shaped like an option would reach the CLI as a flag of its own, switch or not.
+    for (const allowedTools of [["Read", "--settings", "{}"], ["--add-dir", "/"], ["-p"], ["Read)(--x"], ["Read\n--settings"], ["Read(\u0000)"], [""]]) {
+      await assert.rejects(load({ claude: { allowedTools } }), /claude\.allowedTools may only list tool names/);
+      await assert.rejects(load({ claude: { allowedTools } }, custom), /claude\.allowedTools may only list tool names/);
+    }
+    await assert.rejects(load({ claude: { allowedTools: "Read" } }), /claude\.allowedTools must be a list/);
+    for (const permissionMode of ["default", "plan", ""]) {
+      await load({ claude: { permissionMode } });
+    }
+    for (const permissionMode of ["bypassPermissions", "acceptEdits", "auto"]) {
+      await assert.rejects(load({ claude: { permissionMode } }), /claude\.permissionMode is "\w+"\. A project configuration may only choose default or plan/);
+    }
+    assert.equal((await load({ claude: { permissionMode: "acceptEdits" } }, custom)).config.claude.permissionMode, "acceptEdits");
+    await assert.rejects(load({ claude: { permissionMode: "--settings" } }, custom), /claude\.permissionMode "--settings" is not a permission mode name/);
   });
 });
 

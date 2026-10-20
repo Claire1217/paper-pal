@@ -122,8 +122,8 @@ not a number or longer than about 24 days is replaced by its default.
 | `<cli>.model` | none | Empty means the CLI's own default model. |
 | `<cli>.chatModel` | `<cli>.model` | Model for the project chat. |
 | `<cli>.models` | `[]` | Extra ids offered in the page's model menu. |
-| `claude.permissionMode` | none | Passed as `--permission-mode`. |
-| `claude.allowedTools` | `[]`, meaning `Read`, `Glob`, `Grep` | Passed as `--allowedTools`. `Write`, `Edit`, `NotebookEdit` and `Bash` are always disallowed. |
+| `claude.permissionMode` | none | Passed as `--permission-mode`. Only `default` or `plan`; another mode needs `PAPER_PAL_ALLOW_CUSTOM_COMMANDS=1`. |
+| `claude.allowedTools` | `[]`, meaning `Read`, `Glob`, `Grep` | Passed as `--allowedTools`. Only the read-only tools `Read`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch`, optionally with a specifier (`WebFetch(domain:example.org)`); another tool needs `PAPER_PAL_ALLOW_CUSTOM_COMMANDS=1`. An entry that starts with `-` or is not a tool name stops start-up even with the switch. `Write`, `Edit`, `NotebookEdit` and `Bash` are always disallowed; other CLI tools can also run commands (`Monitor`), so with the switch list only tools you trust. |
 
 ### API backends: `openai`, `anthropic`, `openrouter`, `deepseek`, `ollama`, `custom`
 
@@ -132,8 +132,8 @@ not a number or longer than about 24 days is replaced by its default.
 | `<api>.model` | none | **Required.** Without it the backend is "not ready". |
 | `<api>.chatModel` | `<api>.model` | Model for the project chat. |
 | `<api>.models` | `[]` | Extra ids offered in the page's model menu. |
-| `<api>.baseUrl` | the preset | May only be the preset's own URL or a loopback address (`127.0.0.1`, `localhost`, `::1`). Anything else needs `PAPER_PAL_ALLOW_PROJECT_BASE_URL=1`. For other hosts use the `custom` backend. |
-| `<api>.apiKeyEnv` | the preset | The **name** of the environment variable that holds the key. |
+| `<api>.baseUrl` | the preset | May only be the preset's own URL or a loopback address (`127.0.0.1`, `localhost`, `::1`). Anything else needs `PAPER_PAL_ALLOW_PROJECT_BASE_URL=1`. For other hosts use the `custom` backend. A user name or password in the URL is refused. Paper Pal does not follow HTTP redirects from the endpoint; if it has moved, set the new address here. |
+| `<api>.apiKeyEnv` | the preset | The **name** of the environment variable that holds the key. Only the backend's own variable (`deepseek`: `DEEPSEEK_API_KEY`) or a `PAPER_PAL_*_KEY` name. Another backend's key variable is accepted only when the base URL is a loopback address. Anything else needs `PAPER_PAL_ALLOW_PROJECT_KEY_ENV=1`. |
 | `<api>.protocol` | `"openai"` (`"anthropic"` for `anthropic`) | `"openai"` or `"anthropic"`. |
 | `<api>.maxTokens` | `anthropic` protocol: 8192. `openai` protocol: not sent. | Positive integer. |
 
@@ -230,9 +230,9 @@ wrote or trust.
 | Switch | Lifts |
 |---|---|
 | `PAPER_PAL_ALLOW_CUSTOM_LATEX=1` | `latex.command` may be any program. |
-| `PAPER_PAL_ALLOW_CUSTOM_COMMANDS=1` | `codex.command` and `claude.command` may be paths or contain spaces. |
+| `PAPER_PAL_ALLOW_CUSTOM_COMMANDS=1` | `codex.command` and `claude.command` may be paths or contain spaces, `claude.allowedTools` may name tools other than the read-only ones, and `claude.permissionMode` may be a mode other than `default` or `plan`. |
 | `PAPER_PAL_ALLOW_PROJECT_BASE_URL=1` | `<api>.baseUrl` may name a non-local host other than the preset. |
-| `PAPER_PAL_ALLOW_PROJECT_KEY_ENV=1` | `<api>.apiKeyEnv` may name any environment variable. Without it, only a provider key variable (`OPENAI_API_KEY`, ...) or a `PAPER_PAL_*_KEY` name is accepted, because that variable's value is sent to the API host. |
+| `PAPER_PAL_ALLOW_PROJECT_KEY_ENV=1` | `<api>.apiKeyEnv` may name any environment variable. Without it, only the backend's own key variable or a `PAPER_PAL_*_KEY` name is accepted (any provider key variable for a loopback base URL), because that variable's value is sent to the API host. |
 
 These guards are cheap by design. Compiling LaTeX already runs project-chosen
 code (`.latexmkrc`, a Makefile, `latex.args`). Set `latex.enabled` to `false`

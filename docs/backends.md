@@ -114,8 +114,17 @@ sign-in state the same way, without those variables.
   ```
 
 - Binary not on `PATH`: put `CLAUDE_BIN=/full/path/to/claude` in `.env`.
-- `claude.allowedTools` replaces the default `Read`, `Glob`, `Grep` list. The
-  write tools stay disallowed whatever you put there.
+- `claude.allowedTools` replaces the default `Read`, `Glob`, `Grep` list. In
+  `.paper-pal.json` it may only hold the read-only tools `Read`, `Glob`,
+  `Grep`, `LS`, `WebFetch` and `WebSearch`, with or without a specifier
+  (`WebFetch(domain:example.org)`). Any other tool needs
+  `PAPER_PAL_ALLOW_CUSTOM_COMMANDS=1` in `.env`. Only `Write`, `Edit`,
+  `NotebookEdit` and `Bash` are always disallowed. The CLI has other tools that
+  can run commands (`Monitor`, for one), so with the switch set, list only
+  tools you trust.
+- `claude.permissionMode` may be `default` or `plan`. Other modes let the
+  agent act without asking and need `PAPER_PAL_ALLOW_CUSTOM_COMMANDS=1` in
+  `.env`.
 - The CLI has no schema option, so the JSON Schema is appended to the prompt
   and the JSON object is extracted from the reply.
 
@@ -241,7 +250,10 @@ gateway, an Azure-style proxy that exposes `/chat/completions`, and similar.
 | `custom` | Custom API | openai, or `custom.protocol` | `PAPER_PAL_API_BASE_URL` | `PAPER_PAL_API_KEY` | no |
 
 `<api>.apiKeyEnv` in `.paper-pal.json` can name another variable, for example
-when two projects use different keys for the same provider.
+when two projects use different keys for the same provider. Use a
+`PAPER_PAL_*_KEY` name for that (`PAPER_PAL_DEEPSEEK_LAB_KEY`). Another
+provider's key variable (`OPENAI_API_KEY` for `deepseek`) is refused, because
+that key would be sent to this provider's host.
 
 ## Reasoning effort
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { after, describe, it } from "node:test";
 import {
@@ -10,7 +11,7 @@ import {
   AGENT_PROVIDERS, API_PROVIDERS, PROVIDER_TABLE, apiSettings, buildAgentInvocation, childEnvironment, describeProvider,
   firstUsableProvider, providerAvailability,
 } from "../agent-providers.mjs";
-import { answerText, buildRequest, extractJsonObject, redact, schemaForResponseFormat } from "../api-adapter.mjs";
+import { answerText, buildRequest, extractJsonObject, redact, schemaForResponseFormat, send } from "../api-adapter.mjs";
 import { loadEnvFile, parseEnv } from "../env.mjs";
 
 const KEY = "sk-mock-DO-NOT-LEAK-abcdef0123456789";
@@ -96,7 +97,12 @@ describe("API adapter: OpenAI-compatible protocol", () => {
   });
 
   it("retries once after a network error and reports it without the key", async () => {
-    const run = await runAdapter(["--base-url", "http://127.0.0.1:9/v1", "--model", "m", "--key-env", "MOCK_KEY"], { env: { MOCK_KEY: KEY } });
+    // A listener that drops every connection: a failure on the wire, and no
+    // other test can take the port while it is held.
+    const dropper = net.createServer((socket) => socket.destroy());
+    await new Promise((resolve) => dropper.listen(0, "127.0.0.1", resolve));
+    after(() => new Promise((resolve) => dropper.close(resolve)));
+    const run = await runAdapter(["--base-url", `http://127.0.0.1:${dropper.address().port}/v1`, "--model", "m", "--key-env", "MOCK_KEY"], { env: { MOCK_KEY: KEY } });
     assert.equal(run.status, 1);
     assert.match(run.stderr, /retrying once/);
     assert.match(run.stderr, /network error/);
@@ -143,6 +149,46 @@ describe("API adapter: OpenAI-compatible protocol", () => {
     assert.equal(run.status, 0, run.stderr);
     assert.equal(mock.requests[0].body.reasoning_effort, "low");
     assert.equal(mock.requests[1].body.reasoning_effort, undefined);
+  });
+
+  it("does not follow a redirect, so the key never reaches another host", async () => {
+    for (const protocol of ["openai", "anthropic"]) {
+      const elsewhere = await startMockApi();
+      const mock = await startMockApi((record) => ({ status: 307, headers: { Location: `${elsewhere.origin}${record.url}?moved=1` }, body: "" }));
+      const run = await runAdapter(["--protocol", protocol, "--base-url", `${mock.origin}/v1`, "--model", "m", "--key-env", "MOCK_KEY"], { env: { MOCK_KEY: KEY } });
+      assert.equal(run.status, 1, protocol);
+      assert.equal(elsewhere.requests.length, 0, `${protocol}: the redirect target received nothing`);
+      assert.equal(mock.requests.length, 1, `${protocol}: a redirect is not retried`);
+      assert.match(run.stderr, /redirect/i);
+      assert.match(run.stderr, new RegExp(`set the base URL to ${elsewhere.origin.replace(/[.]/g, "[.]")}/v1`));
+      assert.ok(!run.stderr.includes("moved=1"), "the query string of the new address is not repeated");
+      assert.ok(!run.stderr.includes(KEY));
+    }
+  });
+
+  it("reports a redirect without a Location as a redirect, not as a new address", async () => {
+    const mock = await startMockApi(() => ({ status: 300, body: "" }));
+    const run = await runAdapter(["--base-url", `${mock.origin}/v1`, "--model", "m", "--key-optional"]);
+    assert.equal(run.status, 1);
+    assert.match(run.stderr, /the endpoint answered with a redirect; check the base URL/);
+    assert.ok(!run.stderr.includes(`set the base URL to ${mock.origin}`));
+  });
+
+  it("refuses a base URL with a user name or password and never prints it", async () => {
+    const mock = await startMockApi();
+    const run = await runAdapter(["--base-url", `http://user:hunter2-secret@127.0.0.1:${mock.port}/v1`, "--model", "m", "--key-optional"]);
+    assert.equal(run.status, 2);
+    assert.match(run.stderr, /must not contain a user name or password/);
+    assert.ok(!run.stderr.includes("hunter2-secret"), run.stderr);
+    assert.equal(mock.requests.length, 0);
+  });
+
+  it("retries only real network errors", async () => {
+    // fetch() refuses such a URL before connecting; trying again cannot help.
+    const logged = [];
+    const request = { url: "http://user:hunter2-secret@127.0.0.1:9/v1/chat/completions", headers: {}, body: {}, optional: [] };
+    await assert.rejects(send(request, { timeoutMs: 5000, backoffMs: 10, log: (line) => logged.push(line) }), /network error/);
+    assert.deepEqual(logged, []);
   });
 
   it("identifies itself to OpenRouter as Paper Pal and to nobody else", () => {
@@ -206,6 +252,7 @@ describe("JSON extraction and redaction", () => {
   it("redacts the key and bearer tokens", () => {
     assert.equal(redact(`key=${KEY}`, KEY), "key=[redacted]");
     assert.equal(redact("Authorization: Bearer abcdefghijklmnop", null), "Authorization: Bearer [redacted]");
+    assert.equal(redact("fetch http://user:hunter2@127.0.0.1:8080/v1 failed", null), "fetch http://[redacted]@127.0.0.1:8080/v1 failed");
   });
 
   it("simplifies only schema keywords, not property names", () => {

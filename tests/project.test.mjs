@@ -222,6 +222,26 @@ describe("agent adapters", () => {
     assert.equal(claude.args[1], "--output-format");
   });
 
+  it("never turns a claude.allowedTools entry into a Claude CLI option", async () => {
+    const invocation = await buildAgentInvocation({ provider: "claude", config: { claude: { allowedTools: ["Read", "WebFetch(domain:example.org)"] } }, prompt: "hi", outputPath: "/tmp/o", repoRoot: "/tmp" });
+    const start = invocation.args.indexOf("--allowedTools");
+    assert.deepEqual(invocation.args.slice(start, start + 3), ["--allowedTools", "Read", "WebFetch(domain:example.org)"]);
+    assert.equal(invocation.args[start + 3], "--disallowedTools");
+    // Exactly these four: some CLI versions refuse to start on a tool name they
+    // do not know, so the deny list must not grow by accident. The read-only
+    // allowlist for project files is what keeps other tools out.
+    assert.deepEqual(invocation.args.slice(start + 4), ["Write", "Edit", "NotebookEdit", "Bash"]);
+    // A configuration that did not come through loadReviewConfig is checked again here.
+    await assert.rejects(
+      buildAgentInvocation({ provider: "claude", config: { claude: { allowedTools: ["Read", "--add-dir", "/"] } }, prompt: "hi", outputPath: "/tmp/o", repoRoot: "/tmp" }),
+      /claude\.allowedTools may only list tool names/,
+    );
+    await assert.rejects(
+      buildAgentInvocation({ provider: "claude", config: { claude: { permissionMode: "--settings" } }, prompt: "hi", outputPath: "/tmp/o", repoRoot: "/tmp" }),
+      /claude\.permissionMode/,
+    );
+  });
+
   it("gives Codex a schema that strict structured output accepts", async () => {
     // The CLI passes --output-schema to the provider's strict mode, which refuses
     // the request outright over minLength, maxItems or $schema.

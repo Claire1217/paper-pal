@@ -66,10 +66,12 @@ class UsageError extends Error {}
 export function redact(text, key) {
   let value = String(text ?? "");
   if (key && key.length >= 4) value = value.split(key).join("[redacted]");
-  // Belt and braces: anything that looks like a bearer token or a vendor key.
+  // Belt and braces: anything that looks like a bearer token or a vendor key,
+  // and the user:password part of a URL.
   return value
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi, "$1[redacted]")
-    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "[redacted]");
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "[redacted]")
+    .replace(/(\/\/)[^/\s@]+@/g, "$1[redacted]@");
 }
 
 /**
@@ -212,6 +214,19 @@ export function answerText(protocol, payload) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// The new address of a redirect, without its query string, for the message.
+// No Location at all gives "": resolving "" would name the request URL itself.
+function redirectTarget(response, requestUrl) {
+  const location = String(response.headers.get("location") || "").trim();
+  if (!location) return "";
+  try {
+    const target = new URL(location, requestUrl);
+    return `${target.origin}${target.pathname}`;
+  } catch {
+    return "";
+  }
+}
+
 class RequestFailure extends Error {
   constructor(message, { retryable = false, status = null, body = "" } = {}) {
     super(message);
@@ -227,16 +242,28 @@ async function attempt(request, remainingMs) {
   try {
     let response;
     try {
+      // Redirects are not followed: fetch would resend the request, x-api-key
+      // header included, to whatever host the Location names.
       response = await fetch(request.url, {
         method: "POST",
         headers: request.headers,
         body: JSON.stringify(request.body),
         signal: controller.signal,
+        redirect: "manual",
       });
     } catch (error) {
       if (controller.signal.aborted) throw new RequestFailure("timeout", { retryable: false });
       const cause = error?.cause?.code || error?.cause?.message || "";
-      throw new RequestFailure(`network error: ${error.message}${cause ? ` (${cause})` : ""}`, { retryable: true });
+      // Only a failure on the wire (ECONNREFUSED, ECONNRESET, ...) carries a
+      // cause code. A request fetch() refuses to build fails the same way again.
+      throw new RequestFailure(`network error: ${error.message}${cause ? ` (${cause})` : ""}`, { retryable: Boolean(error?.cause?.code) });
+    }
+    if (response.status >= 300 && response.status < 400) {
+      const target = redirectTarget(response, request.url);
+      const message = target
+        ? `the endpoint redirects to ${target}. Redirects are not followed, so the key is not sent to another address; if the endpoint has moved, set the base URL to ${target.replace(/\/(?:chat\/completions|messages)$/, "")}`
+        : "the endpoint answered with a redirect; check the base URL";
+      throw new RequestFailure(`HTTP ${response.status}: ${message}`, { retryable: false, status: response.status });
     }
     let text;
     try {
@@ -315,6 +342,15 @@ async function main() {
   if (!["openai", "anthropic"].includes(options.protocol)) return fail(2, `Unknown protocol "${options.protocol}". Use openai or anthropic.`);
   if (!options.baseUrl) return fail(2, "No base URL given (--base-url).");
   if (!/^https?:\/\//i.test(options.baseUrl)) return fail(2, "The base URL must start with http:// or https://.");
+  let parsedBase;
+  try {
+    parsedBase = new URL(options.baseUrl);
+  } catch {
+    return fail(2, "The base URL is not a valid URL.");
+  }
+  if (parsedBase.username || parsedBase.password) {
+    return fail(2, "The base URL must not contain a user name or password. Put the key in .env and name it with --key-env.");
+  }
   if (!options.model) return fail(2, "No model configured. Set <provider>.model in .paper-pal.json.");
   if (!key && !options.keyOptional) {
     return fail(2, `${options.keyEnv || "The API key variable"} is not set. Put it in the .env file next to Paper Pal's package.json (never in .paper-pal.json).`);

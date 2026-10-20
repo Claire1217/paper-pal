@@ -45,7 +45,8 @@ your browser.
   See `.env.example`.
 - Paper Pal never reads `.env` from the manuscript project, and refuses to
   start when the project's `.paper-pal.json` contains a field that looks like
-  a credential (`apiKey`, `key`, `token`, `secret`, `password`, ...). That file
+  a credential (a name ending in `key`, `token`, `secret`, `password`, ...,
+  such as `apiKey`, `OPENAI_API_KEY` or `clientSecret`). That file
   may only name the variable (`"apiKeyEnv": "OPENAI_API_KEY"`).
 - A key is handed to exactly one child process: the bundled `api-adapter.mjs`,
   and only the one variable the selected provider needs. Agent CLIs (`codex`,
@@ -58,8 +59,13 @@ your browser.
   A project file that points `baseUrl` anywhere else is rejected unless you set
   `PAPER_PAL_ALLOW_PROJECT_BASE_URL=1` yourself.
 - A project file also cannot choose which secret is sent: `apiKeyEnv` may only
-  name a provider key variable or a `PAPER_PAL_*_KEY` name, unless you set
-  `PAPER_PAL_ALLOW_PROJECT_KEY_ENV=1` yourself.
+  name that provider's own key variable or a `PAPER_PAL_*_KEY` name (any
+  provider key variable when the base URL is on this machine), unless you set
+  `PAPER_PAL_ALLOW_PROJECT_KEY_ENV=1` yourself. A project for `deepseek`
+  therefore cannot send your `OPENAI_API_KEY` to DeepSeek.
+- The API adapter does not follow HTTP redirects, so a key header is never
+  resent to the address in a `Location` header. A base URL with a user name or
+  password in it is refused, because it would appear in error messages.
 
 ## What a project configuration can make the app run
 
@@ -72,6 +78,14 @@ write like any other code you are about to run.
 - `codex.command` / `claude.command` must be a bare program name (no path, no
   spaces) unless `PAPER_PAL_ALLOW_CUSTOM_COMMANDS=1` is set the same way. Use
   `CODEX_BIN` / `CLAUDE_BIN` to point at a specific binary.
+- `claude.allowedTools` may only list the read-only tools `Read`, `Glob`,
+  `Grep`, `LS`, `WebFetch` and `WebSearch`, and `claude.permissionMode` may
+  only be `default` or `plan`, unless `PAPER_PAL_ALLOW_CUSTOM_COMMANDS=1` is
+  set. An entry that is not a tool name is refused in every case, so it cannot
+  become a command-line option of the Claude CLI. The read-only list is the
+  guard: `Write`, `Edit`, `NotebookEdit` and `Bash` are always disallowed, but
+  the CLI has other tools that can run commands, so with the switch set a
+  project's tool list can give the agent a shell.
 - These guards are deliberately cheap. Compiling LaTeX is itself code
   execution: `latexmk` reads a `.latexmkrc` from the project, `make` runs the
   project's Makefile, and `latex.args` are passed through as written. Set
