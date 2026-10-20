@@ -562,3 +562,149 @@ See Table~\ref{tab:live}, Figure~\ref{fig:live} and Eq.~\eqref{eq:live}.
     assert.deepEqual(reloaded.semantic.rows.at(-1), ["Last", "3", "done"]);
   });
 });
+
+describe("inline images, one-line definitions and escaped line breaks", () => {
+  const source = String.raw`\documentclass{article}
+\begin{document}
+\section{The \texorpdfstring{$\alpha$}{alpha} case}
+
+First line\\$x+1$ is math.
+
+\section{Results\\}
+A paragraph below a heading that ends in a line break.
+
+The logo below marks the link in
+\includegraphics[height=1em]{icon.png} this hard-wrapped sentence.
+
+\section{Code \verb|\\}| here}
+
+Our code is online \raisebox{-0.2em}{\includegraphics[height=1em]{logo.png}} and more prose here.
+
+\newcommand{\localmacro}{y}
+A paragraph right below a one-line definition.
+
+\newcommand{\splitdef}
+  {bar baz}
+Prose after a split definition.
+
+\begin{minipage}{0.48\linewidth}\centering\scalebox{0.5}{\includegraphics{b.png}}\captionof{figure}{Accuracy of \textbf{\textsc{Ours}} versus $\frac{a}{b^{2}}$.}\end{minipage}
+
+\begin{minipage}{\linewidth}
+\begin{tabular}{ll}
+a & b \\
+\end{tabular}
+\footnotesize Note: bold is best.
+\end{minipage}
+
+\begin{minipage}{0.3\linewidth}
+\includegraphics{panel.png}\quad(a)
+\end{minipage}
+
+\begin{minipage}{\linewidth}
+\begin{tabular}{ll}
+c & d \\
+\end{tabular} Source: own data.
+\end{minipage}
+
+\begin{figure}
+\includegraphics{plot.png}
+\caption{A plot.}
+\label{fig:plot}
+\end{figure}
+\end{document}
+`;
+  let project;
+  let server;
+  let document;
+
+  before(async () => {
+    project = await makeProject({ files: { "main.tex": source } });
+    server = await startServer(project.root);
+    document = await getDocument(server, "main.tex");
+  });
+  after(cleanupAll);
+
+  it("covers the source with non-overlapping blocks at exact offsets", () => {
+    let cursor = 0;
+    for (const block of document.blocks) {
+      assert.ok(block.start >= cursor, "blocks must not overlap");
+      assert.equal(document.source.slice(block.start, block.end), block.raw);
+      assert.equal(document.source.slice(cursor, block.start).trim(), "", "only whitespace may sit between blocks");
+      cursor = block.end;
+    }
+    assert.equal(document.source.slice(cursor).trim(), "");
+  });
+
+  it("reads math right after a \\\\ line break", () => {
+    const block = findBlock(document, "First line");
+    assert.ok(block.annotations.some((annotation) => annotation.type === "math" && annotation.latex === "x+1"));
+    assert.doesNotMatch(block.display, /\$/);
+  });
+
+  it("shows only the first argument of \\texorpdfstring", () => {
+    const heading = findBlock(document, "texorpdfstring");
+    assert.equal(heading.kind, "heading");
+    assert.equal(heading.display, "The \\alpha case");
+  });
+
+  it("ends a heading at a } that follows \\\\", async () => {
+    const heading = findBlock(document, "\\section{Results");
+    assert.equal(heading.kind, "heading");
+    assert.equal(heading.display, "Results");
+    assert.ok(!heading.raw.includes("A paragraph below"));
+    assert.equal(findBlock(document, "A paragraph below a heading").kind, "paragraph");
+    const outline = await apiOk(server, "/api/outline");
+    assert.deepEqual(outline.items.map((item) => item.title).slice(1), ["Results", "Code \\\\} here"]);
+  });
+
+  it("keeps a sentence with an inline image as prose, and a float as a figure", () => {
+    const block = findBlock(document, "Our code is online");
+    assert.equal(block.kind, "paragraph");
+    assert.equal(block.hidden, false);
+    assert.match(block.display, /^Our code is online\s+and more prose here\.$/);
+    // Also when the image happens to start a hard-wrapped line of the sentence.
+    const wrapped = findBlock(document, "this hard-wrapped sentence");
+    assert.equal(wrapped.kind, "paragraph");
+    assert.match(wrapped.display, /marks the link in\s+this hard-wrapped sentence\.$/);
+    assert.equal(findBlock(document, "\\begin{figure}").kind, "figure");
+  });
+
+  it("splits a one-line \\newcommand off the paragraph right below it", () => {
+    const definition = findBlock(document, "\\newcommand{\\localmacro}");
+    assert.equal(definition.kind, "structure");
+    assert.ok(!definition.raw.includes("A paragraph right below"));
+    const below = findBlock(document, "A paragraph right below");
+    assert.equal(below.kind, "paragraph");
+    assert.equal(below.hidden, false);
+    // A definition whose body is on the next line is not cut in two.
+    const split = findBlock(document, "\\newcommand{\\splitdef}");
+    assert.ok(split.raw.includes("{bar baz}"));
+    assert.ok(!visible(document).some((block) => block.display.includes("bar baz")));
+  });
+
+  it("keeps a picture with a caption, a panel label or a note read-only", () => {
+    assert.equal(findBlock(document, "\\scalebox{0.5}").kind, "figure");
+    assert.equal(findBlock(document, "Note: bold is best.").kind, "table");
+    assert.equal(findBlock(document, "\\quad(a)").kind, "figure");
+    assert.equal(findBlock(document, "Source: own data.").kind, "table");
+  });
+
+  it("writes an edit back to exactly the edited construct", async () => {
+    const edits = [
+      ["First line", "is math", "is a formula"],
+      ["\\section{Results", "Results", "Findings"],
+      ["A paragraph below a heading", "A paragraph below", "Text below"],
+      ["Our code is online", "more prose here", "more text here"],
+      ["A paragraph right below", "right below", "just below"],
+    ];
+    let expected = await fs.readFile(path.join(project.root, "main.tex"), "utf8");
+    for (const [needle, from, to] of edits) {
+      const current = await getDocument(server, "main.tex");
+      const block = findBlock(current, needle);
+      assert.equal(expected.split(from).length, 2, `${from} must be unique in the fixture`);
+      await saveBlock(server, current, block, block.raw.replace(from, to));
+      expected = expected.replace(from, to);
+      assert.equal(await fs.readFile(path.join(project.root, "main.tex"), "utf8"), expected, `edit of ${JSON.stringify(needle)} changed something else`);
+    }
+  });
+});
