@@ -14,6 +14,23 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- **Accept could rewrite a paragraph the author never commented on.** When a
+  commented sentence also appears elsewhere in the file and the commented copy
+  was edited away, the comment moved to the other copy, and Accept rewrote that
+  paragraph. Comments no longer search for their text: every write Paper Pal
+  makes (a save, Accept, a linked change set, a tracked-change resolve, Undo,
+  a structure revert) moves the stored position of the other open comments
+  with the edit, and an edit in another program is followed by comparing the
+  file with the last version Paper Pal saw (also across a CRLF/LF conversion,
+  and to a paragraph moved by cut and paste). A comment whose own text was
+  edited is refused with "The commented text was edited, so select the passage
+  again and leave a new comment." Undo brings it back.
+- A comment on repeated text stopped working after a small edit nearby in its
+  paragraph ("matched 2 current locations"), or after another comment in that
+  paragraph was accepted (409 on every Accept). Such comments now stay on
+  their text. "Generate reviewable edit" from Chat now checks the discussed
+  text itself: it no longer refuses after edits around the passage, and it
+  refuses when the passage was edited, which it never did before.
 - **A macro that passes an argument to `\ref` or `\cite` was shown garbled,
   and deleting text a macro adds could delete its argument.**
   `\newcommand{\figref}[1]{Figure~\ref{#1}}` showed `\figref{fig:a}` as
