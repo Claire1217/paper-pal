@@ -461,6 +461,17 @@ function declaredTheoremNames(masked) {
 // these at the top of a block is split off so it cannot hide the prose below.
 const standaloneLinePattern = /^(?:%[^\n]*|\\(?:begin|end)\{document\}|\\(?:label|input|include|subfile|bibliographystyle|bibliography|addbibresource)\s*\{[^{}\n]*\}|\\(?:import|subimport)\s*\{[^{}\n]*\}\s*\{[^{}\n]*\}|\\(?:maketitle|tableofcontents|printbibliography|appendix|clearpage|newpage|FloatBarrier)(?![A-Za-z@])(?:\[[^\]\n]*\])?)[ \t]*(?:%[^\n]*)?$/;
 
+// A macro definition that is complete on one line (comments blanked): the
+// name, any [n] and [default], and the body group all there. Split off like
+// the lines above, so \newcommand right above a paragraph does not make the
+// paragraph a hidden definition block. A body on the next line is not split.
+const ONE_LINE_DEFINITION_HEAD = /^\\(?:(?:newcommand|renewcommand|providecommand|DeclareRobustCommand|DeclareMathOperator)\*?\s*(?:\{\s*\\[A-Za-z@]+\s*\}|\\[A-Za-z@]+)\s*(?:\[[^\]]*\]\s*){0,2}|(?:def|gdef|edef|xdef)\s*\\[A-Za-z@]+[^{}\\]*)\{/;
+function oneLineDefinition(line) {
+  const head = ONE_LINE_DEFINITION_HEAD.exec(line);
+  const body = head ? braceGroupAt(line, head[0].length - 1) : null;
+  return Boolean(body) && !line.slice(body.end).trim();
+}
+
 // Environments whose body is not LaTeX prose: nothing inside them is a
 // comment, a heading, math or an \input.
 const VERBATIM_ENVIRONMENTS = /^(?:verbatim\*?|Verbatim\*?|BVerbatim|LVerbatim|lstlisting|minted|comment|filecontents\*?|CCSXML)$/;
@@ -672,14 +683,15 @@ function parseBlocks(source) {
         return;
       }
     }
-    // Comment lines, \label{...}, \FloatBarrier and similar one-line commands
-    // glued directly above a heading or a paragraph would otherwise classify
-    // the whole block as structure and hide it; split such a prefix off.
+    // Comment lines, \label{...}, \FloatBarrier, one-line macro definitions
+    // and similar one-line commands glued directly above a heading or a
+    // paragraph would otherwise classify the whole block as structure and
+    // hide it; split such a prefix off.
     let prefixEnd = leading;
     while (prefixEnd < raw.length) {
       const newline = raw.indexOf("\n", prefixEnd);
       const lineEnd = newline < 0 ? raw.length : newline + 1;
-      if (!standaloneLinePattern.test(raw.slice(prefixEnd, lineEnd).trim())) break;
+      if (!standaloneLinePattern.test(raw.slice(prefixEnd, lineEnd).trim()) && !oneLineDefinition(scan.slice(prefixEnd, lineEnd).trim())) break;
       prefixEnd = lineEnd;
     }
     if (prefixEnd > leading && raw.slice(prefixEnd).trim()) {
@@ -692,8 +704,8 @@ function parseBlocks(source) {
       const open = leading + headingMatch[0].lastIndexOf("{");
       let depth = 0;
       for (let offset = open; offset < scan.length; offset += 1) {
-        if (scan[offset] === "{" && scan[offset - 1] !== "\\") depth += 1;
-        if (scan[offset] === "}" && scan[offset - 1] !== "\\") {
+        if (scan[offset] === "{" && !escapedAt(scan, offset)) depth += 1;
+        if (scan[offset] === "}" && !escapedAt(scan, offset)) {
           depth -= 1;
           if (depth === 0) {
             const headingEnd = offset + 1;
@@ -875,10 +887,10 @@ function classifyBlock(raw, patterns = defaultWrapperPatterns) {
   if (/^\\begin\{(?:comment|CCSXML|filecontents\*?)\}/.test(value)) return "structure";
   // A bare tabular or \includegraphics outside a float environment (for
   // example inside a box or minipage) is rendered as a table or figure rather
-  // than as raw source text.
+  // than as raw source text, unless it sits inside a sentence.
   const live = maskLatex(value);
-  if (/\\begin\{(?:tabular\*?|tabularx)\}/.test(live) && !/^%/.test(value)) return "table";
-  if (/\\includegraphics\b/.test(live) && !/^%/.test(value)) return "figure";
+  const tabular = /\\begin\{(?:tabular\*?|tabularx)\}/.test(live);
+  if ((tabular || /\\includegraphics\b/.test(live)) && !/^%/.test(value) && pictureOrTable(live)) return tabular ? "table" : "figure";
   if (/^\\begin\{minipage\b/.test(value)) return "paragraph";
   if (/^\}?\]/.test(value)) return "structure";
   if (patterns.line.test(live.trim())) return "structure";
@@ -893,10 +905,16 @@ function classifyBlock(raw, patterns = defaultWrapperPatterns) {
 // True when the display conversion of `value` shows anything besides the
 // names of commands it does not know.
 function hasVisibleText(value) {
+  return Boolean(visibleText(value));
+}
+
+// What the display conversion of `value` shows besides the names of commands
+// it does not know, trimmed.
+function visibleText(value) {
   const rendered = latexToDisplay(value, "paragraph");
-  if (!rendered.display.trim()) return false;
+  if (!rendered.display.trim()) return "";
   const chips = (rendered.styles || []).filter((style) => style.type === "command");
-  if (!chips.length) return true;
+  if (!chips.length) return rendered.display.trim();
   let text = "";
   let cursor = 0;
   for (const chip of chips) {
@@ -904,7 +922,71 @@ function hasVisibleText(value) {
     cursor = Math.max(cursor, chip.end);
   }
   text += rendered.display.slice(cursor);
-  return Boolean(text.trim());
+  return text.trim();
+}
+
+// Whether a block (masked) with a tabular or an \includegraphics is that
+// picture or table rather than prose. It is when one of them starts its line
+// outside any argument (a hand-made caption or a table note may follow), or
+// when nothing but captions shows around them. A picture that starts a line
+// is still prose when words follow it on that line before a \\ break (an icon
+// at the start of a hard-wrapped sentence); a panel label such as "(a)" does
+// not count. An image inside a sentence (words before it on its line, or a
+// logo in \raisebox) leaves the block prose.
+function pictureOrTable(masked) {
+  const pattern = /\\begin\{(tabular\*?|tabularx)\}|\\includegraphics\*?(?![A-Za-z@])|\\(caption|captionof|subcaption)\*?(?![A-Za-z@])/g;
+  // The end of the arguments after `at`: [optional] groups and `wanted` {groups}.
+  const argumentsEnd = (at, wanted) => {
+    while (wanted > 0) {
+      while (/\s/.test(masked[at] || "")) at += 1;
+      const close = masked[at] === "[" ? bracketEnd(masked, at) : -1;
+      if (close >= 0) {
+        at = close + 1;
+        continue;
+      }
+      const group = braceGroupAt(masked, at);
+      if (!group) return -1;
+      at = group.end;
+      wanted -= 1;
+    }
+    return at;
+  };
+  let rest = "";
+  let cursor = 0;
+  let depth = 0;
+  let depthAt = 0;
+  let match;
+  while ((match = pattern.exec(masked)) !== null) {
+    let end;
+    if (match[1]) {
+      const close = environmentEnd(masked, match[1], match.index + match[0].length);
+      end = close < 0 ? masked.length : close;
+    } else {
+      end = argumentsEnd(match.index + match[0].length, match[2] === "captionof" ? 2 : 1);
+      if (end < 0) continue;
+    }
+    if (!match[2]) {
+      for (; depthAt < match.index; depthAt += 1) {
+        if (masked[depthAt] === "{" && !escapedAt(masked, depthAt)) depth += 1;
+        else if (masked[depthAt] === "}" && !escapedAt(masked, depthAt)) depth -= 1;
+      }
+      const lineStart = masked.lastIndexOf("\n", match.index - 1) + 1;
+      if (depth <= 0 && !hasVisibleText(masked.slice(lineStart, match.index))) {
+        if (match[1]) return true;
+        const newline = masked.indexOf("\n", end);
+        const after = visibleText(masked.slice(end, newline < 0 ? masked.length : newline).split("\\\\")[0]);
+        if (!after || /^[([]?[A-Za-z0-9]{1,4}[)\].:]?$/.test(after)) return true;
+      }
+      // \includegraphics shows nothing in prose already.
+      if (!match[1]) continue;
+    }
+    // \relax keeps a wrapper's argument non-empty, so an unknown
+    // \subfloat[...]{...} around the picture still shows nothing.
+    rest += `${masked.slice(cursor, match.index)}\\relax `;
+    cursor = end;
+    pattern.lastIndex = end;
+  }
+  return !hasVisibleText(rest + masked.slice(cursor));
 }
 
 function headingArgument(raw) {
@@ -913,8 +995,8 @@ function headingArgument(raw) {
   const open = match[0].lastIndexOf("{");
   let depth = 0;
   for (let index = open; index < raw.length; index += 1) {
-    if (raw[index] === "{" && raw[index - 1] !== "\\") depth += 1;
-    if (raw[index] === "}" && raw[index - 1] !== "\\") {
+    if (raw[index] === "{" && !escapedAt(raw, index)) depth += 1;
+    if (raw[index] === "}" && !escapedAt(raw, index)) {
       depth -= 1;
       if (depth === 0) return raw.slice(open + 1, index);
     }
@@ -1132,6 +1214,8 @@ defineTextCommands("url nolinkurl path", { sig: "m", show: [0], style: "url", ve
 defineTextCommands("caption subcaption", { sig: "om", show: [1] });
 defineTextCommands("keywords", { sig: "m", show: [0], before: "Keywords: " });
 defineTextCommands("IEEEPARstart", { sig: "mm", show: [0, 1], sep: "" });
+// The second argument is only for PDF bookmarks.
+defineTextCommands("texorpdfstring", { sig: "mm", show: [0] });
 // Hidden, with their arguments: anchors, spacing, files, counters.
 defineTextCommands("label vspace hspace addvspace phantom hphantom vphantom index glsadd nocite bibliographystyle bibliography input include subfile includeonly pagestyle thispagestyle pagenumbering stepcounter refstepcounter enlargethispage cline theoremstyle date subtitle titlerunning authorrunning institute email orcid orcidID orcidlink inst city country institution department streetaddress state postcode pacs preprint icmltitle icmltitlerunning icmlkeywords shortauthors setcopyright copyrightyear acmYear acmDOI acmISBN acmJournal acmVolume acmNumber acmArticle acmMonth acmPrice acmBooktitle acmSubmissionID Description IEEEauthorblockA printAffiliationsAndNotice lstset captionsetup geometry hypersetup graphicspath", { sig: "m" });
 defineTextCommands("addlinespace footnotemark linebreak pagebreak nopagebreak nolinebreak printbibliography tableofcontents", { sig: "o" });
@@ -1242,7 +1326,7 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
       braceMatches = new Map();
       const open = [];
       for (let cursor = 0; cursor < scan.length; cursor += 1) {
-        if (scan[cursor - 1] === "\\") continue;
+        if (escapedAt(scan, cursor)) continue;
         if (scan[cursor] === "{") open.push(cursor);
         else if (scan[cursor] === "}" && open.length) braceMatches.set(open.pop(), cursor);
       }
@@ -1375,7 +1459,9 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
       cursor += length;
       continue;
     }
-    if (character === "$" && raw[cursor - 1] !== "\\") {
+    // An escaped \$ was consumed with its backslash, so a "$" here opens math
+    // even right after a \\ line break.
+    if (character === "$") {
       const delimiterLength = raw[cursor + 1] === "$" ? 2 : 1;
       const closeToken = delimiterLength === 2 ? "$$" : "$";
       let close = scan.indexOf(closeToken, cursor + delimiterLength);
@@ -1904,12 +1990,20 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
   };
 }
 
+// True when the character at `index` is escaped by an odd run of backslashes
+// before it. In "\\}" the two backslashes are a line break and the brace is real.
+function escapedAt(value, index) {
+  let count = 0;
+  for (let at = index - 1; at >= 0 && value[at] === "\\"; at -= 1) count += 1;
+  return count % 2 === 1;
+}
+
 function braceGroupAt(value, openAt) {
   if (value[openAt] !== "{") return null;
   let depth = 0;
   for (let cursor = openAt; cursor < value.length; cursor += 1) {
-    if (value[cursor] === "{" && value[cursor - 1] !== "\\") depth += 1;
-    if (value[cursor] === "}" && value[cursor - 1] !== "\\") {
+    if (value[cursor] === "{" && !escapedAt(value, cursor)) depth += 1;
+    if (value[cursor] === "}" && !escapedAt(value, cursor)) {
       depth -= 1;
       if (depth === 0) {
         return {
@@ -2936,10 +3030,12 @@ function headingTitle(raw, macros = new Map()) {
   const match = raw.match(HEADING_OPEN_PATTERN);
   if (!match) return "";
   const open = match[0].lastIndexOf("{");
+  // Braces are matched where TeX reads them: not inside \verb or a comment.
+  const scan = maskLatex(raw);
   let depth = 0;
   for (let cursor = open; cursor < raw.length; cursor += 1) {
-    if (raw[cursor] === "{" && raw[cursor - 1] !== "\\") depth += 1;
-    if (raw[cursor] === "}" && raw[cursor - 1] !== "\\") {
+    if (scan[cursor] === "{" && !escapedAt(scan, cursor)) depth += 1;
+    if (scan[cursor] === "}" && !escapedAt(scan, cursor)) {
       depth -= 1;
       if (depth === 0) return latexToDisplay(raw.slice(open + 1, cursor), "paragraph", macros).display.trim();
     }

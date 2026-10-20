@@ -14,6 +14,23 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- **A heading whose title ends in `\\` swallowed the paragraph below it**
+  (`\section{Results\\}`), and the section was missing from the outline. The
+  `}` after `\\` is no longer read as an escaped brace.
+- **A paragraph with an inline image or tabular disappeared.** A logo in
+  `\raisebox{...}{\includegraphics{...}}` inside a sentence made the whole
+  paragraph a read-only figure. A picture or tabular inside a sentence (after
+  words on its line, inside `\raisebox` and similar, or an icon followed by
+  words at the start of a wrapped line) now leaves the block prose. One that
+  starts its own line, with a caption, a panel label or a note around it, is
+  still a figure or table.
+- **A paragraph directly below a one-line `\newcommand`, `\renewcommand` or
+  `\def` was hidden** as part of the definition. A definition that is complete
+  on its line is now a block of its own.
+- Inline math right after a `\\` line break (`First line\\$x+1$`) showed as
+  text with a stray `$`. It is now math.
+- `\texorpdfstring{...}{...}` showed both arguments. It now shows the first one;
+  the second is only for PDF bookmarks.
 - On Windows, an agent run or another save could fail with "EPERM: operation
   not permitted, rename" when the page read the same state file at that moment.
   Paper Pal now retries the rename a few times before it reports an error.
