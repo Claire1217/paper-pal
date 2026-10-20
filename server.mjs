@@ -2447,33 +2447,21 @@ function tableRows(raw, macros, references) {
   if (endAt < 0) return unreadable;
   const body = raw.slice(columns.end, endAt);
   const liveBody = live.slice(columns.end, endAt);
-  const multicolumnValue = (cell) => {
-    const command = /\\multicolumn\s*/.exec(cell);
-    if (!command) return null;
-    let at = command.index + command[0].length;
+  // \multicolumn{n}{spec}{text} and \multirow{n}{width}{text}: found in the
+  // masked cell, so a commented-out one is not a span; the text is the source's.
+  const spanValue = (cell, command) => {
+    const found = new RegExp(`\\\\${command}\\s*`).exec(cell.live);
+    if (!found) return null;
+    let at = found.index + found[0].length;
     const groups = [];
     for (let index = 0; index < 3; index += 1) {
-      while (/\s/.test(cell[at] || "")) at += 1;
-      const group = braceGroupAt(cell, at);
+      while (/\s/.test(cell.live[at] || "")) at += 1;
+      const group = braceGroupAt(cell.live, at);
       if (!group) return null;
-      groups.push(group.value);
+      groups.push(cell.text.slice(group.start, group.contentEnd));
       at = group.end;
     }
-    return { value: groups[2], colspan: Number.parseInt(groups[0], 10) || 1 };
-  };
-  const multirowValue = (cell) => {
-    const command = /\\multirow\s*/.exec(cell);
-    if (!command) return null;
-    let at = command.index + command[0].length;
-    const groups = [];
-    for (let index = 0; index < 3; index += 1) {
-      while (/\s/.test(cell[at] || "")) at += 1;
-      const group = braceGroupAt(cell, at);
-      if (!group) return null;
-      groups.push(group.value);
-      at = group.end;
-    }
-    return { value: groups[2], rowspan: Number.parseInt(groups[0], 10) || 1 };
+    return { value: groups[2], span: Number.parseInt(groups[0], 10) || 1 };
   };
   // Rules with their optional width or trim, row and cell colours, and
   // longtable's caption, label and head/foot markers are not cell text. They
@@ -2482,7 +2470,8 @@ function tableRows(raw, macros, references) {
     /\\(?:toprule|midrule|bottomrule)(?![A-Za-z])(?:\s*\[[^\]]*\])?/.source,
     /\\cmidrule(?![A-Za-z])(?:\s*\[[^\]]*\])?(?:\s*\([^)]*\))?(?:\s*\{[^}]*\})?/.source,
     /\\specialrule(?![A-Za-z])(?:\s*\{[^}]*\}){0,3}/.source,
-    /\\(?:rowcolor|cellcolor)(?![A-Za-z])(?:\s*\[[^\]]*\])?(?:\s*\{[^}]*\})?/.source,
+    /\\(?:rowcolor|cellcolor|arrayrulecolor)(?![A-Za-z])(?:\s*\[[^\]]*\])?(?:\s*\{[^}]*\})?/.source,
+    /\\(?:hhline|Xhline)(?![A-Za-z])(?:\s*\{[^}]*\})?|\\morecmidrules(?![A-Za-z])/.source,
     /\\(?:caption|label)\s*(?:\[[^\]]*\])?\s*\{(?:[^{}]|\{[^{}]*\})*\}|\\end(?:first)?head(?![A-Za-z])|\\end(?:last)?foot(?![A-Za-z])/.source,
   ].join("|"), "g");
   const cleanRow = ({ text, live: liveText }) => {
@@ -2531,27 +2520,27 @@ function tableRows(raw, macros, references) {
   const cells = (row) => {
     const found = [];
     let start = 0;
-    for (const match of row.live.matchAll(/(?<!\\)&/g)) {
-      found.push(row.text.slice(start, match.index));
+    for (const match of [...row.live.matchAll(/(?<!\\)&/g), { index: row.live.length }]) {
+      found.push({ text: row.text.slice(start, match.index), live: row.live.slice(start, match.index) });
       start = match.index + 1;
     }
-    found.push(row.text.slice(start));
-    return found.map((cell) => cell.trim());
+    return found;
   };
   const formattedRows = splitRows(liveBody, body)
     .map(cleanRow)
     .filter((row) => row.live.trim())
     .map((row) => cells(row).map((cell) => {
-      const multicolumn = multicolumnValue(cell);
-      const multirow = multirowValue(cell);
-      const source = multicolumn?.value || multirow?.value || cell.replace(/^\\quad\s*/, " ");
+      const multicolumn = spanValue(cell, "multicolumn");
+      const multirow = spanValue(cell, "multirow");
+      const quad = /^\s*\\quad\s*/.exec(cell.live);
+      const source = multicolumn?.value || multirow?.value || (quad ? ` ${cell.text.slice(quad[0].length)}` : cell.text.trim());
       const rendered = renderTex(source, macros, references);
       return {
         text: rendered.display,
         annotations: rendered.annotations || [],
         styles: rendered.styles || [],
-        colspan: multicolumn?.colspan || 1,
-        rowspan: multirow?.rowspan || 1,
+        colspan: multicolumn?.span || 1,
+        rowspan: multirow?.span || 1,
       };
     }))
     .filter((row) => row.some((cell) => cell.text));
@@ -2821,10 +2810,10 @@ async function semanticBlock(block, relativePath, macros, references) {
     return { ...common, items, fallback: false };
   }
   if (block.kind === "table") {
-    // As for figures: offsets from the masked copy, so that a commented-out
-    // "% \caption{Old}" is neither shown nor the target of a caption edit.
-    const liveTable = maskLatex(block.raw);
-    const foundCaption = commandArgument(liveTable, "caption") || captionOfArgument(liveTable);
+    // As for figures: the float's own caption, not a subtable's, at offsets
+    // from the masked copy, so that a commented-out "% \caption{Old}" is
+    // neither shown nor the target of a caption edit.
+    const foundCaption = floatCaptionArgument(block.raw);
     const captionArgument = foundCaption ? { ...foundCaption, value: block.raw.slice(foundCaption.start, foundCaption.contentEnd) } : null;
     const captionRaw = captionArgument?.value || "";
     const captionRendered = normalizeCaptionDisplay(renderTex(captionRaw, macros, references));

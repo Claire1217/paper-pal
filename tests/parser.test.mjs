@@ -418,6 +418,29 @@ Last & 2 & done \\
 \end{tabular}
 \end{table}
 
+\begin{table}
+\begin{tabular}{lll}
+\arrayrulecolor{gray}\Xhline{1pt}
+% \multicolumn{2}{c}{Old span} \\
+New & cell & one \\
+\hhline{|=|=|=|}
+% \multirow{2}{*}{OldRow} & q \\
+\multicolumn{2}{c}{Live span} & two \\
+\cmidrule{1-2}\morecmidrules\cmidrule{1-2}
+\quad Indented & x & three \\
+\end{tabular}
+\end{table}
+
+\begin{table}
+\begin{subtable}{0.45\linewidth}
+\caption{Left part}
+\begin{tabular}{ll}
+a & b \\
+\end{tabular}
+\end{subtable}
+\caption{Whole table}
+\end{table}
+
 \begin{figure}
 \centering
 %\label{fig:old}
@@ -481,6 +504,23 @@ See Table~\ref{tab:live}, Figure~\ref{fig:live} and Eq.~\eqref{eq:live}.
       ["Last", "2", "done"],
     ]);
     assert.equal(table.semantic.headerRows, 1);
+  });
+
+  it("does not take a span from a commented-out row and drops more rule commands", () => {
+    const table = document.blocks.filter((block) => block.kind === "table")[1];
+    assert.deepEqual(table.semantic.rows, [
+      ["New", "cell", "one"],
+      ["Live span", "two"],
+      ["Indented", "x", "three"],
+    ]);
+    assert.deepEqual(table.semantic.formattedRows.map((row) => row.map((cell) => cell.colspan)), [[1, 1, 1], [2, 1], [1, 1, 1]]);
+    assert.deepEqual(table.semantic.formattedRows.flat().map((cell) => cell.rowspan), [1, 1, 1, 1, 1, 1, 1, 1]);
+  });
+
+  it("takes a table's own caption, not its subtable's", () => {
+    const table = document.blocks.filter((block) => block.kind === "table")[2];
+    assert.equal(table.semantic.caption, "Whole table");
+    assert.equal(document.source.slice(table.semantic.captionSource.absoluteStart, table.semantic.captionSource.absoluteEnd), "Whole table");
   });
 
   it("uses the live \\caption and \\label, not the commented-out ones", () => {
