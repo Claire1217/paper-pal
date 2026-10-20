@@ -151,6 +151,39 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - A `null` entry in `proposal.sections` (`/api/structure/confirm`) or in
   `segments` (`/api/confirm`, `/api/unconfirm`, `/api/rewrite`) answered 500
   "Internal error". It now answers 400.
+- **Editing words across inline formatting could delete a closing brace.**
+  Changing "big dog" to "small cat" in `The \textbf{big} dog` saved
+  `The \textbf{small cat`, whose open group ran to the end of the file. Markup
+  inside the edited stretch is now kept (`The \textbf{small} cat`), and an edit
+  next to a `% comment` no longer writes text into the comment.
+- **A comment could be sent for the wrong passage.** Selecting other text
+  while the composer was open (to copy it, say) made Comment send that
+  selection instead of the quoted one. The composer's passage is now sent.
+- **Ask in Chat sent no selection after a drag that started at the very end of
+  a paragraph** (or a triple-click), so the reply and "Generate reviewable
+  edit" were tied to the previous passage. The selection now carries the ids of
+  the paragraphs it was moved into.
+- **Comments and edits made while the tab was in the background did not show
+  when coming back to it.** The card kept saying "drafting…". Paper Pal now
+  re-reads the comments, the undo state and the open file on every reconnect.
+- Comment cards were numbered differently from the badges in the text once a
+  comment lost its anchor, and the "Anchor changed" card sorted first. Both now
+  use the same numbers, and that card is listed last.
+- An older comment list could replace a newer one when several updates arrived
+  during an agent run. Only the newest answer is used now.
+- Typing on while a save was in flight showed a false "The paragraph changed"
+  conflict. The next save now continues from the saved paragraph.
+- After one text selection, every outside change to the open file showed the
+  "source changed" banner instead of reloading quietly.
+- "Confirm section" in a file the main file does not `\input` confirmed up to
+  the end of the file. It now stops at the next heading of the same or a higher
+  level.
+- Enter that picks a Chinese or Japanese IME candidate inserted a paragraph
+  break in the source, or was swallowed in a proposal unit. It is now left to
+  the input method.
+- A proposal-unit edit left while another unit was still saving was never
+  saved, and the manuscript stopped repainting. It is now saved once the first
+  save finishes.
 - **Citations showed "key (n.d.)" for entries exported by the ACL Anthology,
   JabRef and many hand-kept `.bib` files.** Values in double quotes
   (`title = "..."`), bare numbers (`year = 2019`), `@string` names

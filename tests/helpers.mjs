@@ -2,11 +2,12 @@
 // port, and a small API client that sends the headers the server requires.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 
 export const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const samplePaper = path.join(appRoot, "examples", "sample-paper");
@@ -262,6 +263,39 @@ export async function waitForRequest(server, id, predicate, label) {
     if (request?.agentStatus === "failed") throw new Error(`agent run failed: ${request.agentError}`);
     return request && predicate(request) ? request : null;
   }, { label });
+}
+
+/**
+ * Runs named top-level functions and constants of public/app.js, copied
+ * unchanged, in a fresh node:vm context whose globals are `globals` (the
+ * stubs: `state`, `dom`, `api`, ...). The page is a script with no exports
+ * that touches the DOM as it loads, so it cannot be imported; the pieces are
+ * cut out by name instead. A definition starts at column 0 with
+ * `function name(`, `async function name(` or `const name =`; a function runs
+ * to the next line that is exactly "}", a constant to the first line at
+ * column 0 that ends in ";". A name that is missing, defined twice or never
+ * closed throws, so a renamed function fails the test loudly. Returns the
+ * context: functions are its properties, and the tests change `state` through it.
+ */
+let appSourceLines = null;
+export function loadAppFunctions(names, globals = {}) {
+  appSourceLines ??= readFileSync(path.join(appRoot, "public", "app.js"), "utf8").split("\n");
+  const lines = appSourceLines;
+  const pieces = names.map((name) => {
+    const heads = [`function ${name}(`, `async function ${name}(`, `const ${name} =`];
+    const found = lines.flatMap((line, index) => (heads.some((head) => line.startsWith(head)) ? [index] : []));
+    if (found.length !== 1) throw new Error(`public/app.js: expected one top-level definition of ${name}, found ${found.length}`);
+    const start = found[0];
+    const isFunction = !lines[start].startsWith("const ");
+    let end = start;
+    const closes = (index) => (isFunction ? lines[index] === "}" : /^\S.*;$/.test(lines[index]));
+    while (end < lines.length && !closes(end)) end += 1;
+    if (end === lines.length) throw new Error(`public/app.js: could not find where ${name} ends`);
+    return lines.slice(start, end + 1).join("\n");
+  });
+  const context = vm.createContext({ ...globals });
+  vm.runInContext(pieces.join("\n\n"), context, { filename: "public/app.js" });
+  return context;
 }
 
 export async function cleanupAll() {

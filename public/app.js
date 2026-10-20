@@ -138,6 +138,8 @@ const state = {
   externalChange: false,
   saveConflict: false,
   requests: [],
+  requestsToken: 0,
+  requestsRefresh: null,
   compiledOutline: null,
   outlineScrollTimer: null,
   outlineSelectionLockUntil: 0,
@@ -1294,9 +1296,12 @@ function requestRangeForBlock(request, block) {
 function compareCurrentReviewRequests(left, right) {
   const leftLink = linkedChangeForCurrentDocument(left);
   const rightLink = linkedChangeForCurrentDocument(right);
-  const leftBlock = Number(leftLink?.resolvedBlockIndex ?? leftLink?.blockIndex ?? resolvedRequestBlockIndex(left));
-  const rightBlock = Number(rightLink?.resolvedBlockIndex ?? rightLink?.blockIndex ?? resolvedRequestBlockIndex(right));
-  if (Number.isFinite(leftBlock) && Number.isFinite(rightBlock) && leftBlock !== rightBlock) return leftBlock - rightBlock;
+  // A comment without a block (its anchor is gone) sorts after the others
+  // instead of as block 0, which is Number(null).
+  const blockOrder = (value) => (value === null || value === undefined ? Infinity : Number(value));
+  const leftBlock = blockOrder(leftLink?.resolvedBlockIndex ?? leftLink?.blockIndex ?? resolvedRequestBlockIndex(left));
+  const rightBlock = blockOrder(rightLink?.resolvedBlockIndex ?? rightLink?.blockIndex ?? resolvedRequestBlockIndex(right));
+  if (!Number.isNaN(leftBlock) && !Number.isNaN(rightBlock) && leftBlock !== rightBlock) return leftBlock < rightBlock ? -1 : 1;
   const leftRange = left.path === state.document?.path ? resolvedRequestAbsoluteRange(left) : null;
   const rightRange = right.path === state.document?.path ? resolvedRequestAbsoluteRange(right) : null;
   const leftStart = Number(leftRange?.start ?? left.absoluteStart ?? 0);
@@ -1500,8 +1505,16 @@ function createProposalAddition(request) {
   return addition;
 }
 
+// Enter (and other keys) during IME composition picks a Chinese or Japanese
+// candidate; it is not an edit. keyCode 229 covers Safari, which reports the
+// Enter that ends a composition with isComposing already false.
+function isImeComposing(event) {
+  return event.isComposing || event.keyCode === 229;
+}
+
 function handleProposalUnitKeydown(event) {
   event.stopPropagation();
+  if (isImeComposing(event)) return;
   if (event.key === "Enter") {
     event.preventDefault();
     showToast("Keep this as one review unit. Use the structure proposal to add another paragraph.", 3600);
@@ -1539,21 +1552,7 @@ async function flushProposalUnitSave() {
       setSaveState("Saved", false);
       return true;
     }
-    let prefix = 0;
-    while (prefix < oldDisplay.length && prefix < nextDisplay.length && oldDisplay[prefix] === nextDisplay[prefix]) prefix += 1;
-    let suffix = 0;
-    while (
-      suffix < oldDisplay.length - prefix &&
-      suffix < nextDisplay.length - prefix &&
-      oldDisplay[oldDisplay.length - 1 - suffix] === nextDisplay[nextDisplay.length - 1 - suffix]
-    ) suffix += 1;
-    const oldEnd = oldDisplay.length - suffix;
-    const rawStart = prefix < oldDisplay.length
-      ? editing.unit.displayStarts[prefix]
-      : (editing.unit.displayEnds.at(-1) ?? editing.unit.raw.length);
-    const rawEnd = oldEnd > prefix ? editing.unit.displayEnds[oldEnd - 1] : rawStart;
-    const replacement = nextDisplay.slice(prefix, nextDisplay.length - suffix);
-    const nextRaw = `${editing.unit.raw.slice(0, rawStart)}${replacement}${editing.unit.raw.slice(rawEnd)}`;
+    const nextRaw = rawTextForDisplayEdit(editing.unit, nextDisplay);
     await api("/api/request/edit-unit", {
       method: "POST",
       body: JSON.stringify({
@@ -1586,6 +1585,10 @@ async function flushProposalUnitSave() {
     return false;
   } finally {
     state.proposalSaving = false;
+    // An edit in another unit that was left while this save ran was turned
+    // away by the guard at the top, and its blur will not come again.
+    const deferred = state.proposalEditing;
+    if (deferred && deferred !== editing && !deferred.element.matches(":focus")) setTimeout(flushProposalUnitSave, 0);
     setTimeout(flushPendingRender, 0);
   }
 }
@@ -3051,9 +3054,18 @@ function currentSectionReviewScope() {
   if (!payload || !item) return null;
   const start = Number(item.blockIndex);
   const level = Number(item.level || 1);
-  const next = (state.compiledOutline?.items || [])
+  // A file the compiled outline does not cover (not \input by the main file)
+  // is outlined by its own headings, as in currentSectionOutlineItem; the
+  // section has to end at the next of those, not at the end of the file.
+  const compiled = (state.compiledOutline?.items || [])
+    .filter((candidate) => candidate.path === payload.path && Number.isInteger(Number(candidate.blockIndex)));
+  const outline = compiled.length
+    ? compiled
+    : payload.blocks
+      .filter((block) => block.kind === "heading" && !block.hidden && block.display?.trim())
+      .map((block) => ({ blockIndex: block.index, level: outlineLevel(block.raw) }));
+  const next = outline
     .filter((candidate) =>
-      candidate.path === payload.path &&
       Number(candidate.blockIndex) > start &&
       Number(candidate.level || 1) <= level
     )
@@ -3222,6 +3234,7 @@ async function loadDocument(relativePath, { quiet = false, discardEditing = fals
 }
 
 function handleBlockKeydown(event) {
+  if (isImeComposing(event)) return;
   if (event.key === "Enter" && !event.metaKey && !event.ctrlKey) {
     event.preventDefault();
     document.execCommand("insertText", false, "\n\n");
@@ -3502,6 +3515,104 @@ async function settlePendingEdits() {
   return saved || !state.editing;
 }
 
+// The source of a block (or proposal unit) after the author turned its display
+// text into nextDisplay. Only the stretch between the common prefix and suffix
+// is rewritten.
+function rawTextForDisplayEdit(source, nextDisplay) {
+  const oldDisplay = source.display;
+  let prefix = 0;
+  while (prefix < oldDisplay.length && prefix < nextDisplay.length && oldDisplay[prefix] === nextDisplay[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < oldDisplay.length - prefix &&
+    suffix < nextDisplay.length - prefix &&
+    oldDisplay[oldDisplay.length - 1 - suffix] === nextDisplay[nextDisplay.length - 1 - suffix]
+  ) suffix += 1;
+  const oldEnd = oldDisplay.length - suffix;
+  let rawStart = prefix < oldDisplay.length
+    ? source.displayStarts[prefix]
+    : (source.displayEnds.at(-1) ?? source.raw.length);
+  // Never start between a "% comment" and the line break that ends it: the
+  // new text would be written into the comment. Start before the comment.
+  if (prefix < oldDisplay.length && endsSourceComment(source, prefix)) {
+    rawStart = prefix > 0 ? source.displayEnds[prefix - 1] : 0;
+  }
+  const rawEnd = oldEnd > prefix ? source.displayEnds[oldEnd - 1] : rawStart;
+  const replacement = nextDisplay.slice(prefix, nextDisplay.length - suffix);
+  const changed = displayEditKeepingMarkup(source, rawStart, prefix, oldEnd, replacement) ?? replacement;
+  return `${source.raw.slice(0, rawStart)}${changed}${source.raw.slice(rawEnd)}`;
+}
+
+// The display character at `index` is the line break that ends a "% comment":
+// the last line of the hidden source before it holds a "%" that is not "\%".
+// A "%" that is displayed (inside \url, say) is not in that hidden source.
+function endsSourceComment(source, index) {
+  const start = source.displayStarts[index];
+  if (source.raw[start] !== "\n") return false;
+  const hidden = source.raw.slice(index > 0 ? source.displayEnds[index - 1] : 0, start);
+  return /(?:^|[^\\])(?:\\\\)*%/.test(hidden.slice(hidden.lastIndexOf("\n") + 1));
+}
+
+// The changed display stretch [from, to) as source, keeping the markup that sits
+// between two of its characters: the "}" that closes \textbf{ or an "\emph{" has
+// no display character, so the author cannot have meant to delete it. Replacing
+// the whole stretch turned "The \textbf{big} dog" edited to "The small cat" into
+// "The \textbf{small cat", whose open brace swallows the rest of the file. A word
+// diff places the new text next to the words it replaces instead, here giving
+// "The \textbf{small} cat". The source from rawFrom up to the first character
+// is markup as well. Null when there is no such markup (the plain replacement
+// is exact) or the characters do not map to the source in order.
+function displayEditKeepingMarkup(source, rawFrom, from, to, replacement) {
+  const { raw, displayStarts: starts, displayEnds: ends } = source;
+  // Characters produced together (a macro's expansion, a citation label) share
+  // one source range and are kept or dropped as a whole.
+  const sameUnit = (index) => starts[index] === starts[index - 1] && ends[index] === ends[index - 1];
+  // A comment's closing line break is markup too: deleting it would comment out
+  // the text after it.
+  const endsComment = (index) => endsSourceComment(source, index);
+  let hasMarkup = from < to && rawFrom < starts[from];
+  for (let index = from; index < to; index += 1) {
+    if (!(ends[index] >= starts[index])) return null;
+    if (endsComment(index)) hasMarkup = true;
+    if (index === from || sameUnit(index)) continue;
+    if (starts[index] < ends[index - 1]) return null;
+    if (starts[index] > ends[index - 1]) hasMarkup = true;
+  }
+  if (!hasMarkup) return null;
+  const kept = new Array(to - from).fill(false);
+  const inserted = new Array(to - from + 1).fill("");
+  let index = from;
+  for (const operation of diffTextOperations(source.display.slice(from, to), replacement)) {
+    if (operation.type === "insert") {
+      inserted[index - from] += operation.text;
+      continue;
+    }
+    for (let count = 0; count < operation.text.length; count += 1) {
+      kept[index - from] = operation.type === "equal";
+      index += 1;
+    }
+  }
+  if (index !== to) return null;
+  let output = "";
+  for (let at = from; at < to; at += 1) {
+    // Text typed in place of a deleted word goes before the markup that
+    // followed that word, so it stays inside the same group.
+    output += inserted[at - from];
+    if (at > from && sameUnit(at)) continue;
+    output += raw.slice(at > from ? ends[at - 1] : rawFrom, starts[at]);
+    let last = at;
+    while (last + 1 < to && sameUnit(last + 1)) last += 1;
+    const unitKept = kept.slice(at - from, last - from + 1);
+    if (endsComment(at) || unitKept.every(Boolean)) output += raw.slice(starts[at], ends[at]);
+    else {
+      // Part of a citation label or a macro's text was deleted: the unit goes,
+      // and the characters the author left standing stay as typed text.
+      output += source.display.slice(at, last + 1).split("").filter((_, offset) => unitKept[offset]).join("");
+    }
+  }
+  return output + inserted[to - from];
+}
+
 async function performSave({ force = false } = {}) {
   const editing = state.editing;
   const documentAtStart = state.document;
@@ -3511,26 +3622,11 @@ async function performSave({ force = false } = {}) {
   let failed = false;
   setSaveState("Saving…", true);
   try {
-    const oldDisplay = editing.block.display;
     const nextDisplay = unwrapPastedHeadingCommand(
       canonicalEditableText(editing.element),
       editing.block,
     );
-    let prefix = 0;
-    while (prefix < oldDisplay.length && prefix < nextDisplay.length && oldDisplay[prefix] === nextDisplay[prefix]) prefix += 1;
-    let suffix = 0;
-    while (
-      suffix < oldDisplay.length - prefix &&
-      suffix < nextDisplay.length - prefix &&
-      oldDisplay[oldDisplay.length - 1 - suffix] === nextDisplay[nextDisplay.length - 1 - suffix]
-    ) suffix += 1;
-    const oldEnd = oldDisplay.length - suffix;
-    const rawStart = prefix < oldDisplay.length
-      ? editing.block.displayStarts[prefix]
-      : (editing.block.displayEnds.at(-1) ?? editing.block.raw.length);
-    const rawEnd = oldEnd > prefix ? editing.block.displayEnds[oldEnd - 1] : rawStart;
-    const replacement = nextDisplay.slice(prefix, nextDisplay.length - suffix);
-    const nextRaw = `${editing.block.raw.slice(0, rawStart)}${replacement}${editing.block.raw.slice(rawEnd)}`;
+    const nextRaw = rawTextForDisplayEdit(editing.block, nextDisplay);
     const nextDocument = await api("/api/save", {
       method: "POST",
       body: JSON.stringify({
@@ -3556,6 +3652,18 @@ async function performSave({ force = false } = {}) {
     const sameShape = nextDocument.blocks.length === state.document.blocks.length;
     const reviewPreviewWasHidden = editing.element.dataset.reviewPreviewHidden === "true";
     state.document = nextDocument;
+    // The author may have typed on while this save was on its way. That edit
+    // was captured against the block as it was before this save; sent as is,
+    // it fails as "the paragraph changed". It continues from the saved block.
+    const savedBlock = sameShape ? nextDocument.blocks[editing.blockIndex] : null;
+    if (savedBlock) {
+      editing.element.dataset.blockId = savedBlock.id;
+      editing.element.reviewBlock = savedBlock;
+      if (state.editing?.element === editing.element) {
+        state.editing.block = savedBlock;
+        state.editing.blockId = savedBlock.id;
+      }
+    }
     await refreshCompiledOutline({ render: false });
     if (reviewPreviewWasHidden) {
       await refreshRequests();
@@ -3764,13 +3872,15 @@ function selectionContext() {
     }))
     .filter((segment) => segment.end > segment.start);
   if (!segments.length || absoluteEnd <= absoluteStart) return null;
+  // The endpoints may have been pulled inward above, so the ids come from the
+  // blocks the range now starts and ends in, not the elements under the drag.
   return {
     blockIndex: startBlockIndex,
-    blockId: startBlock.dataset.blockId,
+    blockId: firstBlock.id,
     start,
     end,
     endBlockIndex,
-    endBlockId: endBlock.dataset.blockId,
+    endBlockId: lastBlock.id,
     absoluteStart,
     absoluteEnd,
     segments,
@@ -3805,6 +3915,9 @@ function selectionActionRect(range) {
 
 function showSelectionToolbar() {
   const context = selectionContext();
+  // A selection that is gone must not linger: hasLocalDocumentState() reads it
+  // and would keep turning a quiet reload into the external-change banner.
+  if (!context) state.selection = null;
   if (!context || state.editing) {
     dom.selectionToolbar.hidden = true;
     return;
@@ -3936,7 +4049,7 @@ function updateComposerOptionsSummary() {
 function updateScopeHint() {
   updateComposerOptionsSummary();
   if (!dom.scopeHint) return;
-  const selected = state.selection?.selectedText || "";
+  const selected = state.commentDraft?.selectedText || "";
   const short = selected.length > 0 && selected.length < SHORT_SELECTION_CHARS;
   const bySelection = dom.rewriteScope?.value !== "paragraph";
   if (!short || !bySelection) {
@@ -4211,7 +4324,9 @@ async function askCommentQuestionInChat() {
 }
 
 async function submitComment({ responseMode = "rewrite" } = {}) {
-  const selection = state.selection;
+  // The passage the composer quotes and highlights, not the live selection:
+  // selecting other text while writing (to copy it, say) moves state.selection.
+  const selection = state.commentDraft;
   const comment = dom.commentInput.value.trim();
   if (!selection || !comment) {
     showToast("Write a rewrite instruction first.");
@@ -5444,21 +5559,33 @@ function renderRequestLists() {
   for (const card of dom.requestList.querySelectorAll(".request-card")) {
     commentCardResizeObserver?.observe(card);
   }
-  decorateReviewCards(new Map(current.map((request, index) => [request.id, index + 1])));
+  // The same numbers as the badges in the text, which leave out a comment whose
+  // anchor is gone; counting it here shifted every later card by one.
+  decorateReviewCards(currentReviewNumberMap());
   tickRunningStatuses();
   commentCardResizeObserver?.observe(dom.commentComposer);
   applyCommentMarkers();
   positionCommentCards({ restoreScrollTop: previousScrollTop });
 }
 
-async function refreshRequests() {
-  const requests = await api("/api/requests");
-  state.requests = Array.isArray(requests) ? requests : [];
-  // The cards always update. The manuscript re-renders only when that cannot
-  // destroy a selection or an edit in progress; otherwise it is replayed later.
-  renderRequestLists();
-  renderDocumentWhenSafe();
-  if (state.chat && !dom.codexChat.hidden) renderChatSession({ scroll: false });
+// Every agent status change sends a "request" event, so several refreshes are
+// often in flight at once and can resolve out of order. Only the newest may
+// replace the list; a caller of an older one waits for the newest instead, so
+// what it reads afterwards is current.
+function refreshRequests() {
+  const token = (state.requestsToken = (state.requestsToken || 0) + 1);
+  const refresh = (async () => {
+    const requests = await api("/api/requests");
+    if (token !== state.requestsToken) return state.requestsRefresh;
+    state.requests = Array.isArray(requests) ? requests : [];
+    // The cards always update. The manuscript re-renders only when that cannot
+    // destroy a selection or an edit in progress; otherwise it is replayed later.
+    renderRequestLists();
+    renderDocumentWhenSafe();
+    if (state.chat && !dom.codexChat.hidden) renderChatSession({ scroll: false });
+  })();
+  state.requestsRefresh = refresh;
+  return refresh;
 }
 
 function appendInlineMarkdown(container, text) {
@@ -5980,6 +6107,7 @@ function connectEvents() {
   let events = null;
   let retryTimer = null;
   let attempts = 0;
+  let everOpened = false;
   const disconnect = () => {
     clearTimeout(retryTimer);
     retryTimer = null;
@@ -6003,7 +6131,10 @@ function connectEvents() {
     const source = new EventSource("/api/events");
     events = source;
     events.onopen = () => {
-      const reconnected = attempts > 0 || dom.connectionStatus?.classList.contains("offline");
+      // Every open after the first is a reconnect, including the one after the
+      // stream was closed on purpose while the tab was hidden.
+      const reconnected = everOpened || attempts > 0 || dom.connectionStatus?.classList.contains("offline");
+      everOpened = true;
       attempts = 0;
       setConnectionStatus(true);
       // Events sent while the stream was down are gone; re-read what they
@@ -6011,6 +6142,7 @@ function connectEvents() {
       if (reconnected) {
         refreshRequests().catch(() => {});
         refreshUndo();
+        followMissedDocumentChange();
       }
       // A server restart can interrupt a local Codex process without emitting
       // its final chat event. Re-read persisted state as soon as SSE reconnects
@@ -6026,9 +6158,10 @@ function connectEvents() {
     };
     events.addEventListener("compile", (event) => applyCompileState(JSON.parse(event.data)));
     events.addEventListener("undo", (event) => applyUndoStatus(JSON.parse(event.data)));
-    events.addEventListener("request", () => refreshRequests());
+    // While the server is down these fetches fail; the reconnect re-reads.
+    events.addEventListener("request", () => refreshRequests().catch(() => {}));
     events.addEventListener("chat", () => {
-      refreshChat({ scroll: !dom.codexChat.hidden });
+      refreshChat({ scroll: !dom.codexChat.hidden }).catch(() => {});
     });
     events.addEventListener("structure-plan", (event) => {
       state.structurePlan = JSON.parse(event.data);
@@ -6066,6 +6199,25 @@ function connectEvents() {
   });
   window.addEventListener("pagehide", disconnect);
   connect();
+}
+
+// A "document" event lost while the stream was down: compare the open file with
+// the disk and do what that event would have done.
+async function followMissedDocumentChange() {
+  const path = state.document?.path;
+  const etag = state.document?.etag;
+  if (!path) return;
+  let disk;
+  try {
+    disk = await api(`/api/document?path=${encodeURIComponent(path)}`);
+  } catch {
+    return;
+  }
+  // Our own save (or another load) has moved the document on meanwhile.
+  if (state.document?.path !== path || state.document?.etag !== etag || state.savePromise) return;
+  if (!disk?.etag || disk.etag === etag) return;
+  if (!hasLocalDocumentState()) reloadDocumentQuietly(path);
+  else showExternalChangeBanner();
 }
 
 // Local state that a reload from disk would discard or confuse: an unsaved
