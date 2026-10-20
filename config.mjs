@@ -74,13 +74,17 @@ function relativeSetting(value, name) {
   const slashed = value.replaceAll("\\", "/");
   const normalized = path.posix.normalize(slashed).replace(/\/$/, "") || ".";
   // The absolute checks look at the value before the trailing slash is
-  // stripped, or "/" would become ".". "C:" and "C:main.tex" are relative to
-  // the current directory of drive C on Windows, so they leave the project too.
+  // stripped, or "/" would become ".".
   if (
-    path.posix.isAbsolute(slashed) || path.win32.isAbsolute(normalized) || /^[A-Za-z]:/.test(slashed) ||
+    path.posix.isAbsolute(slashed) || path.win32.isAbsolute(normalized) ||
     normalized === ".." || normalized.startsWith("../")
   ) {
     throw new Error(`${name} must stay inside the configured project.`);
+  }
+  // On Windows "C:" and "C:main.tex" are relative to the current directory of
+  // drive C, so they leave the project too. Elsewhere "a:b.tex" is a plain name.
+  if (process.platform === "win32" && /^[A-Za-z]:/.test(slashed)) {
+    throw new Error(`${name} must stay inside the configured project; "${value}" names a Windows drive.`);
   }
   return normalized;
 }

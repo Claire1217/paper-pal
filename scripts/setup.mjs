@@ -5,7 +5,7 @@
 //
 // Exit codes: 0 ok · 2 usage · 3 project not found · 4 no main .tex found ·
 //             5 several candidates (listed) · 6 configuration already exists
-import { existsSync, promises as fs } from "node:fs";
+import { existsSync, promises as fs, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -176,19 +176,38 @@ if (!main) {
     mainDetection = "documentclass";
   }
 }
-const absoluteMain = path.resolve(repoRoot, main);
-if (!isInside(repoRoot, absoluteMain) || !existsSync(absoluteMain)) {
-  fail(EXIT.noMain, "no_main_tex", `Manuscript entry point does not exist inside the project: ${main}`);
-}
 // The configuration only accepts paths relative to the project, so an absolute
 // --main or --source that points inside it is stored relative (with "/").
-const projectRelative = (absolute) => path.relative(repoRoot, absolute).split(path.sep).join("/") || ".";
-main = projectRelative(absoluteMain);
-let sourceRoot = (values["--source"] || ".").replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "") || ".";
-if (!existsSync(path.resolve(repoRoot, sourceRoot)) || !isInside(repoRoot, path.resolve(repoRoot, sourceRoot))) {
-  fail(EXIT.usage, "usage", `--source does not exist inside the project: ${sourceRoot}`);
+// The project may be spelled through a symlink (/var and /private/var on
+// macOS, `$PWD` versus `pwd -P`): when the lexical check fails, the real paths
+// decide. Only the parent is resolved, so a symlinked main.tex stays itself.
+// Returns null for a path outside the project.
+function projectRelative(absolute) {
+  let root = repoRoot;
+  let target = absolute;
+  if (!isInside(root, target)) {
+    try {
+      root = realpathSync(repoRoot);
+      target = path.join(realpathSync(path.dirname(absolute)), path.basename(absolute));
+    } catch {
+      return null;
+    }
+    if (!isInside(root, target)) return null;
+  }
+  return path.relative(root, target).split(path.sep).join("/") || ".";
 }
-sourceRoot = projectRelative(path.resolve(repoRoot, sourceRoot));
+const mainRelative = existsSync(path.resolve(repoRoot, main)) ? projectRelative(path.resolve(repoRoot, main)) : null;
+if (mainRelative === null) {
+  const reason = existsSync(path.resolve(repoRoot, main)) ? "is not inside the project" : "does not exist inside the project";
+  fail(EXIT.noMain, "no_main_tex", `Manuscript entry point ${reason}: ${main}`);
+}
+main = mainRelative;
+const absoluteMain = path.resolve(repoRoot, main);
+const sourceValue = (values["--source"] || ".").replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "") || ".";
+const sourceRoot = existsSync(path.resolve(repoRoot, sourceValue)) ? projectRelative(path.resolve(repoRoot, sourceValue)) : null;
+if (sourceRoot === null) {
+  fail(EXIT.usage, "usage", `--source does not exist inside the project: ${sourceValue}`);
+}
 if (!isInside(path.resolve(repoRoot, sourceRoot), absoluteMain)) {
   fail(EXIT.usage, "usage", "The manuscript entry point must be inside --source.");
 }
