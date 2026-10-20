@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { promises as fs, readFileSync } from "node:fs";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import vm from "node:vm";
-import { api, apiOk, appRoot, cleanupAll, commentOn, getDocument, makeProject, saveBlock, startServer, stateDirectory, waitForRequest } from "./helpers.mjs";
+import { api, apiOk, cleanupAll, commentOn, getDocument, loadAppFunctions, makeProject, saveBlock, startServer, stateDirectory, waitForRequest } from "./helpers.mjs";
 
 after(cleanupAll);
 
@@ -587,30 +586,6 @@ describe("reverting a structure plan across several files", () => {
   });
 });
 
-// Named top-level functions and constants of public/app.js, copied unchanged
-// into a node:vm context whose globals are `globals`. The page is a script with
-// no exports, so the pieces are cut out by name: a definition starts at column
-// 0 with "function name(", "async function name(" or "const name =", and runs
-// to the next line that is exactly "}" (a constant: to the first line at
-// column 0 ending in ";"). A missing or doubled name throws. Same rules as
-// loadAppFunctions in the front-end tests; use that once it is in helpers.mjs.
-function appFunctions(names, globals = {}) {
-  const lines = readFileSync(path.join(appRoot, "public", "app.js"), "utf8").split("\n");
-  const pieces = names.map((name) => {
-    const heads = [`function ${name}(`, `async function ${name}(`, `const ${name} =`];
-    const found = lines.flatMap((line, index) => (heads.some((head) => line.startsWith(head)) ? [index] : []));
-    if (found.length !== 1) throw new Error(`public/app.js: expected one top-level definition of ${name}, found ${found.length}`);
-    const isFunction = !lines[found[0]].startsWith("const ");
-    let end = found[0];
-    while (end < lines.length && !(isFunction ? lines[end] === "}" : /^\S.*;$/.test(lines[end]))) end += 1;
-    if (end === lines.length) throw new Error(`public/app.js: could not find where ${name} ends`);
-    return lines.slice(found[0], end + 1).join("\n");
-  });
-  const context = vm.createContext({ ...globals });
-  vm.runInContext(pieces.join("\n\n"), context, { filename: "public/app.js" });
-  return context;
-}
-
 describe("tracked changes: ✓/✕ resolves the change that was clicked", () => {
   const PARAGRAPHS = [
     "Tilde \\chdel{old}~\\chadd{new} and later \\chadd{more}.",
@@ -757,7 +732,7 @@ describe("tracked changes: ✓/✕ resolves the change that was clicked", () => 
 
   it("page: places one ✓/✕ after each server group", async () => {
     const { block } = await paragraph("Tilde");
-    const app = appFunctions(["trackedChangeControlsByEnd"]);
+    const app = loadAppFunctions(["trackedChangeControlsByEnd"]);
     const ends = [...app.trackedChangeControlsByEnd(block).keys()];
     assert.deepEqual(ends.map((end) => block.display.slice(0, end)), ["Tilde old new", "Tilde old new and later more"]);
   });
@@ -766,7 +741,7 @@ describe("tracked changes: ✓/✕ resolves the change that was clicked", () => 
     const { document, block } = await paragraph("Typed");
     const sent = [];
     let savedEtag = null;
-    const app = appFunctions(["currentTrackedChangeTarget", "resolveTrackedChangeGroup"], {
+    const app = loadAppFunctions(["currentTrackedChangeTarget", "resolveTrackedChangeGroup"], {
       state: { document },
       // The author typed at the start of the paragraph, which moves the change.
       settlePendingEdits: async () => {
@@ -789,7 +764,7 @@ describe("tracked changes: ✓/✕ resolves the change that was clicked", () => 
     assert.equal(sent[0].etag, savedEtag);
     assert.equal(await paragraphOnDisk("Typed"), "Typed, indeed, new results here.");
 
-    const skipped = appFunctions(["currentTrackedChangeTarget", "resolveTrackedChangeGroup"], {
+    const skipped = loadAppFunctions(["currentTrackedChangeTarget", "resolveTrackedChangeGroup"], {
       state: { document },
       settlePendingEdits: async () => false,
       api: async () => assert.fail("no resolve while the edit is unsaved"),
@@ -806,7 +781,7 @@ describe("tracked changes: ✓/✕ resolves the change that was clicked", () => 
     });
     const root = { nodes: [textNode("Caret "), textNode("b", ["latex-chadd"]), textNode("✓", ["tracked-change-actions"]), textNode("✕", ["tracked-change-actions"]), textNode(" c d e.")] };
     let placed = null;
-    const app = appFunctions(["NON_SOURCE_NODE_SELECTOR", "restoreEditableCaret"], {
+    const app = loadAppFunctions(["NON_SOURCE_NODE_SELECTOR", "restoreEditableCaret"], {
       NodeFilter: { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 },
       window: { getSelection: () => ({ removeAllRanges() {}, addRange(range) { placed = range; } }) },
       document: {

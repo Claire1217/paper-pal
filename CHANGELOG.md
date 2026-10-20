@@ -14,25 +14,6 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
-- **✓/✕ on a tracked change could resolve a different change than the one
-  clicked.** This happened when changes were joined by `~` or a comment line,
-  or when a commented-out `\chadd`/`\chdel` stood earlier in the paragraph,
-  which was then edited instead. The server now sends each group's
-  source range with the document, the page sends it back with the group's
-  text, and the server refuses (409) a range that is not a current group.
-- A `\\` at the end of a `\chadd{...}` or `\chdel{...}` made that change and
-  every later one in the paragraph impossible to resolve ("This tracked change
-  no longer exists"). Such a change now closes at its brace.
-- Accept or Reject on a tracked change while typing in the same paragraph
-  dropped the typing or brought the resolved macro back after a save
-  conflict. The typing is now saved first, then the change is resolved.
-- Clicking into a paragraph with tracked changes put the caret two characters
-  early for each change before the click point. The ✓/✕ buttons no longer
-  count as text.
-- With the page out of date and a paragraph that appears more than once in
-  the file, ✓/✕ could change another copy after a paragraph above was removed
-  on disk. The page now sends the document's etag, and the server refuses
-  (409) when it is stale and the paragraph's text is not unique.
 - **Editing words across inline formatting could delete a closing brace.**
   Changing "big dog" to "small cat" in `The \textbf{big} dog` saved
   `The \textbf{small cat`, whose open group ran to the end of the file. Markup
@@ -45,7 +26,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   group, where it split the paragraph into two blocks with unclosed braces.
 - **Typing inside `\verb|...|` deleted the command.** `\verb` (and
   `\lstinline`, `\mintinline`) text is now shown but not editable, like math
-  and citations, and an edit next to it keeps it.
+  and citations. An edit next to it keeps it, and new text that only reuses
+  some of its letters no longer brings deleted text back.
 - **Typing `%` turned the rest of the line into a LaTeX comment.** "50% of
   sites" was written as is, so everything after the `%` disappeared from the
   PDF; a typed `&` or `#` stopped the compile. Paper Pal now writes `\%`, `\&`
@@ -78,6 +60,25 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - A proposal-unit edit left while another unit was still saving was never
   saved, and the manuscript stopped repainting. It is now saved once the first
   save finishes, and edits whose saves failed are kept and tried again in turn.
+- **✓/✕ on a tracked change could resolve a different change than the one
+  clicked.** This happened when changes were joined by `~` or a comment line,
+  or when a commented-out `\chadd`/`\chdel` stood earlier in the paragraph,
+  which was then edited instead. The server now sends each group's
+  source range with the document, the page sends it back with the group's
+  text, and the server refuses (409) a range that is not a current group.
+- A `\\` at the end of a `\chadd{...}` or `\chdel{...}` made that change and
+  every later one in the paragraph impossible to resolve ("This tracked change
+  no longer exists"). Such a change now closes at its brace.
+- Accept or Reject on a tracked change while typing in the same paragraph
+  dropped the typing or brought the resolved macro back after a save
+  conflict. The typing is now saved first, then the change is resolved.
+- Clicking into a paragraph with tracked changes put the caret two characters
+  early for each change before the click point. The ✓/✕ buttons no longer
+  count as text.
+- With the page out of date and a paragraph that appears more than once in
+  the file, ✓/✕ could change another copy after a paragraph above was removed
+  on disk. The page now sends the document's etag, and the server refuses
+  (409) when it is stale and the paragraph's text is not unique.
 - **A follow-up sent while the agent was still answering a comment was
   dropped**, and the answer to the earlier instruction was shown as if it
   replied to the follow-up. The comment now runs again with the follow-up once
