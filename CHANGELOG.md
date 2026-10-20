@@ -268,6 +268,24 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - A zero or negative `agent.timeoutMs`, `agent.projectTimeoutMs` or
   `agent.chatTimeoutMs` ended every agent run at once. Such values now use the
   default.
+- **"Keep my edit" could overwrite a different paragraph.** After a co-author
+  added or removed a paragraph above the one being edited, the forced save
+  replaced whatever paragraph now sat at the old position. It now replaces the
+  edited paragraph wherever it moved, and refuses when that paragraph is gone.
+- **An edit to a paragraph that was deleted on disk was merged into the next
+  paragraph.** The save now fails with "The paragraph no longer exists". A
+  merge only runs when the block at the old position is still mostly the same
+  text.
+- A save after a change on disk wrote into the first paragraph with the same
+  text when a paragraph appears more than once. It now writes into the copy
+  that was being edited.
+- Confirming one copy of a repeated paragraph showed every copy as confirmed,
+  and editing one copy removed the confirmation of the other. A confirmation
+  now belongs to one copy only.
+- Splitting a paragraph with a blank line dropped the confirmation of the text
+  after the split. It now stays on the new paragraph.
+- A merge with two or more conflicting places failed with "Automatic merge is
+  unavailable." It is now reported as a conflict, like a single one.
 - **Codex runs failed with "the argument '--dangerously-bypass-approvals-and-sandbox'
   cannot be used with '--ask-for-approval'"** when the `codex` on PATH is a
   wrapper that adds that flag. Paper Pal now passes the approval policy as a

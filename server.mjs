@@ -3508,7 +3508,9 @@ async function documentPayload(relativePath) {
   const approvedByDefault = config.approvedDocuments.includes(relativePath);
   const references = await cachedProjectReferences();
   const macros = documentMacros(source, references);
-  const blocks = await Promise.all(parseBlocks(source).map(async (block) => {
+  const parsedBlocks = parseBlocks(source);
+  const anchorIds = new Map(selections.map((item) => [item, selectionAnchorBlock(item, parsedBlocks)?.id]));
+  const blocks = await Promise.all(parsedBlocks.map(async (block) => {
     const rawSemantic = await semanticBlock(block, relativePath, macros, references);
     const semantic = rawSemantic?.captionSource && !rawSemantic.captionSource.etag
       ? { ...rawSemantic, captionSource: { ...rawSemantic.captionSource, etag: sha(source) } }
@@ -3552,10 +3554,10 @@ async function documentPayload(relativePath) {
       editable: encoding.valid,
       status: paragraphStates[block.id]?.status || (approvedByDefault ? "accepted" : "draft"),
       acceptedRanges: selections
-        .filter((item) => item.status === "accepted" && selectionAnchorsToBlock(item, block))
+        .filter((item) => item.status === "accepted" && anchorIds.get(item) === block.id)
         .map((item) => ({ id: item.id, start: item.start, end: item.end, quote: item.quote })),
       humanRanges: selections
-        .filter((item) => item.status === "human" && selectionAnchorsToBlock(item, block))
+        .filter((item) => item.status === "human" && anchorIds.get(item) === block.id)
         .map((item) => ({ id: item.id, start: item.start, end: item.end, quote: item.quote })),
     };
   }));
@@ -6766,7 +6768,10 @@ async function mergeBlockText(baseText, localText, diskText) {
     ]);
     const result = await execFilePromise("git", ["merge-file", "--stdout", localPath, basePath, diskPath], { cwd: mergeRoot });
     if (result.code === 0) return { clean: true, text: result.stdout };
-    if (Number(result.code) === 1) return { clean: false, text: result.stdout };
+    // git merge-file exits with the number of conflicts (capped at 127), so
+    // two conflicting hunks exit with 2; only a missing git or a crash is not
+    // a conflict.
+    if (Number.isInteger(result.code) && result.code > 0 && result.code < 128) return { clean: false, text: result.stdout };
     throw new Error((result.stderr || "Automatic merge is unavailable.").trim());
   } finally {
     await fs.rm(mergeRoot, { recursive: true, force: true });
@@ -6791,19 +6796,46 @@ function blockContentHash(blockId) {
   return hash || null;
 }
 
+// The candidate nearest to `index`; null when there is none, or when two are
+// equally near and picking either would be a guess.
+function nearestBlock(candidates, index) {
+  if (candidates.length === 1) return candidates[0];
+  const position = Number(index);
+  if (!candidates.length || !Number.isFinite(position)) return null;
+  let best = null;
+  let bestDistance = Infinity;
+  let tied = false;
+  for (const candidate of candidates) {
+    const distance = Math.abs(candidate.index - position);
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+      tied = false;
+    } else if (distance === bestDistance) tied = true;
+  }
+  return tied ? null : best;
+}
+
 // A block id is "<position>-<content hash>", so moving an untouched paragraph
 // changes its id and used to drop every confirmation on it. Fall back to the
 // content hash: identical text keeps its review state wherever it sits, while
-// genuinely edited text still lapses, which is the behaviour we want.
-function selectionAnchorsToBlock(selection, block) {
-  if (selection.blockId === block.id) return true;
-  if (!selection.blockId) return selection.blockIndex === block.index;
+// genuinely edited text still lapses, which is the behaviour we want. A
+// paragraph that appears more than once shares its hash with every copy, so
+// the fallback anchors to one block only, the copy nearest the recorded
+// position; otherwise confirming one copy would show all of them confirmed.
+function selectionAnchorBlock(selection, blocks) {
+  if (!selection.blockId) return Number.isInteger(selection.blockIndex) ? blocks[selection.blockIndex] || null : null;
+  const atIndex = blocks[selection.blockIndex];
+  if (atIndex?.id === selection.blockId) return atIndex;
+  const exact = blocks.find((block) => block.id === selection.blockId);
+  if (exact) return exact;
   const hash = blockContentHash(selection.blockId);
-  return Boolean(hash) && hash === blockContentHash(block.id);
+  if (!hash) return null;
+  return nearestBlock(blocks.filter((block) => blockContentHash(block.id) === hash), selection.blockIndex);
 }
 
-function selectionMatchesBlock(selection, relativePath, block) {
-  return selection.path === relativePath && selectionAnchorsToBlock(selection, block);
+function selectionMatchesBlock(selection, relativePath, block, blocks) {
+  return selection.path === relativePath && selectionAnchorBlock(selection, blocks)?.id === block.id;
 }
 
 function reviewSelection(relativePath, block, start, end, status, template = {}) {
@@ -6825,30 +6857,6 @@ function reviewSelection(relativePath, block, start, end, status, template = {})
   };
 }
 
-function rebaseReviewSelections(state, relativePath, oldBlock, newBlock, oldStart, oldEnd, newEnd) {
-  const next = [];
-  for (const selection of state.selections) {
-    if (!["accepted", "human"].includes(selection.status) || !selectionMatchesBlock(selection, relativePath, oldBlock)) {
-      next.push(selection);
-      continue;
-    }
-    const pieces = [];
-    const leftEnd = Math.min(selection.end, oldStart);
-    if (leftEnd > selection.start) pieces.push({ start: selection.start, end: leftEnd });
-    const rightStart = Math.max(selection.start, oldEnd);
-    if (selection.end > rightStart) {
-      pieces.push({
-        start: newEnd + (rightStart - oldEnd),
-        end: newEnd + (selection.end - oldEnd),
-      });
-    }
-    for (const piece of pieces) {
-      if (piece.end > piece.start) next.push(reviewSelection(relativePath, newBlock, piece.start, piece.end, selection.status, selection));
-    }
-  }
-  state.selections = next;
-}
-
 function splitAbsoluteReviewRange(relativePath, blocks, absoluteStart, absoluteEnd, status, template = {}) {
   const ranges = [];
   for (const block of blocks) {
@@ -6867,7 +6875,7 @@ function rebaseDocumentReviewSelections(state, relativePath, oldBlocks, newBlock
       next.push(selection);
       continue;
     }
-    const oldBlock = oldBlocks.find((block) => selectionMatchesBlock(selection, relativePath, block));
+    const oldBlock = selectionAnchorBlock(selection, oldBlocks);
     if (!oldBlock) {
       next.push(selection);
       continue;
@@ -6980,6 +6988,45 @@ async function resolveTrackedChange(body) {
   });
 }
 
+// Where the edited paragraph sits now when its text is unchanged on disk: at
+// the editor's position if the text is still there, else the copy of that
+// text nearest the position, because paragraphs above it may have been added
+// or removed and the same text can appear more than once. Null when no block
+// has the text any more.
+function unchangedEditedBlock(blocks, body) {
+  const atIndex = blocks[body.blockIndex];
+  if (atIndex?.raw === body.baseText) return atIndex;
+  const copies = blocks.filter((block) => block.raw === body.baseText);
+  if (!copies.length) return null;
+  const nearest = nearestBlock(copies, body.blockIndex);
+  if (!nearest) {
+    throw new Error("The document changed and the paragraph you edited now appears more than once. Use the disk version and edit it again.");
+  }
+  return nearest;
+}
+
+// Share of words two versions of a paragraph have in common (Dice coefficient
+// over the word multisets). A co-author's edit keeps most of a paragraph; a
+// different paragraph that slid into the edited one's position shares few.
+function sharedWordRatio(left, right) {
+  const words = (text) => text.split(/\s+/).filter(Boolean);
+  const leftWords = words(left);
+  const rightWords = words(right);
+  if (!leftWords.length || !rightWords.length) return 0;
+  const counts = new Map();
+  for (const word of leftWords) counts.set(word, (counts.get(word) || 0) + 1);
+  let shared = 0;
+  for (const word of rightWords) {
+    const count = counts.get(word);
+    if (!count) continue;
+    shared += 1;
+    counts.set(word, count - 1);
+  }
+  return (2 * shared) / (leftWords.length + rightWords.length);
+}
+
+const SAME_PARAGRAPH_MIN_SHARED_WORDS = 0.6;
+
 async function saveBlock(body) {
   const absolutePath = resolveDocument(body.path);
   await assertSourcesWritable([body.path]);
@@ -6990,21 +7037,32 @@ async function saveBlock(body) {
   let block = blocks[body.blockIndex];
   let replacementText = body.text;
   let mergeApplied = false;
-  if (fileChanged && !body.force) {
-    const unchangedBlock = typeof body.baseText === "string"
-      ? blocks.find((candidate) => candidate.raw === body.baseText)
-      : null;
+  if (fileChanged) {
+    // Paragraphs above the edited one may have been added or removed, so the
+    // old position alone does not say which block the author edited. This
+    // holds for "Keep my edit" (force) too: it overrides the co-author's
+    // version of this paragraph, never a different paragraph.
+    const unchangedBlock = typeof body.baseText === "string" ? unchangedEditedBlock(blocks, body) : null;
     if (unchangedBlock) block = unchangedBlock;
     else {
       if (!block || (body.blockKind && block.kind !== body.blockKind)) {
         throw new Error("The document structure changed at this location. Use the disk version and edit it again.");
       }
-      const merged = await mergeBlockText(String(body.baseText || ""), body.text, block.raw);
-      if (!merged.clean) {
-        throw new Error("The paragraph changed in overlapping text. Automatic merge could not safely combine both versions; choose which version to keep.");
+      // The block at the old position is the edited paragraph, changed on
+      // disk, only if it still shares most of its words. Otherwise the
+      // paragraph was deleted or replaced, and merging into the block that
+      // took its place would rewrite that one.
+      if (sharedWordRatio(String(body.baseText || ""), block.raw) < SAME_PARAGRAPH_MIN_SHARED_WORDS) {
+        throw new Error("The paragraph no longer exists. Use the disk version and edit it again.");
       }
-      replacementText = merged.text;
-      mergeApplied = true;
+      if (!body.force) {
+        const merged = await mergeBlockText(String(body.baseText || ""), body.text, block.raw);
+        if (!merged.clean) {
+          throw new Error("The paragraph changed in overlapping text. Automatic merge could not safely combine both versions; choose which version to keep.");
+        }
+        replacementText = merged.text;
+        mergeApplied = true;
+      }
     }
   }
   if (!block) throw new Error("The paragraph no longer exists. Use the disk version and edit it again.");
@@ -7028,9 +7086,12 @@ async function saveBlock(body) {
   if (nextBlock) {
     const edit = contiguousEdit(savedBlock.raw, replacementText);
     if (edit) {
-      rebaseReviewSelections(state, body.path, savedBlock, nextBlock, edit.oldStart, edit.oldEnd, edit.newEnd);
+      // Rebase in file offsets: an edit that adds a blank line splits the
+      // paragraph, and text after the split belongs to the next block.
+      const offset = savedBlock.start;
+      rebaseDocumentReviewSelections(state, body.path, blocks, nextBlocks, offset + edit.oldStart, offset + edit.oldEnd, offset + edit.newEnd);
       if (edit.newEnd > edit.newStart) {
-        state.selections.push(reviewSelection(body.path, nextBlock, edit.newStart, edit.newEnd, "human"));
+        state.selections.push(...splitAbsoluteReviewRange(body.path, nextBlocks, offset + edit.newStart, offset + edit.newEnd, "human"));
       }
     }
     delete state.paragraphs[body.path][savedBlock.id];
@@ -7080,11 +7141,11 @@ function validatedSelectionSegments(payload, body, errorMessage) {
   return segments;
 }
 
-function acceptedRangesByBlock(state, relativePath, segments) {
+function acceptedRangesByBlock(state, relativePath, segments, blocks) {
   return Object.fromEntries(segments.map(({ block }) => [
     block.index,
     state.selections
-      .filter((item) => item.path === relativePath && item.status === "accepted" && selectionMatchesBlock(item, relativePath, block))
+      .filter((item) => item.path === relativePath && item.status === "accepted" && selectionMatchesBlock(item, relativePath, block, blocks))
       .map((item) => ({ id: item.id, start: item.start, end: item.end, quote: item.quote })),
   ]));
 }
@@ -7099,7 +7160,7 @@ async function confirmSelection(body) {
   for (const { block, start, end } of segments) {
     const quote = block.raw.slice(start, end);
     let selection = state.selections.find((item) =>
-      item.path === body.path && item.status === "accepted" && selectionMatchesBlock(item, body.path, block) &&
+      item.path === body.path && item.status === "accepted" && selectionMatchesBlock(item, body.path, block, payload.blocks) &&
       item.start === start && item.end === end && item.quote === quote
     );
     if (!selection) {
@@ -7126,7 +7187,7 @@ async function confirmSelection(body) {
   return {
     ...acceptedSelections[0],
     selections: acceptedSelections,
-    acceptedRangesByBlock: acceptedRangesByBlock(state, body.path, segments),
+    acceptedRangesByBlock: acceptedRangesByBlock(state, body.path, segments, payload.blocks),
   };
 }
 
@@ -7140,7 +7201,7 @@ async function unconfirmSelection(body) {
   const removedIds = [];
   let splitCounter = 0;
   for (const selection of state.selections) {
-    const segment = segments.find(({ block }) => selectionMatchesBlock(selection, body.path, block));
+    const segment = segments.find(({ block }) => selectionMatchesBlock(selection, body.path, block, payload.blocks));
     const sameBlock = selection.path === body.path && selection.status === "accepted" && segment;
     const overlaps = sameBlock && selection.end > segment.start && selection.start < segment.end;
     if (!overlaps) {
@@ -7181,7 +7242,7 @@ async function unconfirmSelection(body) {
     beforeReview,
     afterReview,
   });
-  const acceptedRangesByBlockValue = acceptedRangesByBlock(state, body.path, segments);
+  const acceptedRangesByBlockValue = acceptedRangesByBlock(state, body.path, segments, payload.blocks);
   const acceptedRanges = acceptedRangesByBlockValue[segments[0].block.index] || [];
   emit("state", { path: body.path, reason: "unconfirmed" });
   return { removedIds, acceptedRanges, acceptedRangesByBlock: acceptedRangesByBlockValue };
