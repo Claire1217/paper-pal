@@ -84,7 +84,8 @@ Inside a paragraph:
   `\colorbox`, `\fbox`, `\makebox`, `\parbox`, `\raisebox`, `\scalebox`,
   `\resizebox` show their text.
 - `\footnote{...}`, `\footnotetext`, `\marginpar`, `\thanks` are shown in
-  place, smaller, in square brackets. The text stays editable.
+  place, smaller, in square brackets. The text stays editable; the brackets
+  go only together with the whole note.
 - `\url{...}` shows the address as written (`%`, `#`, `_`, `~` included);
   `\href{url}{text}` shows the text.
 - `\todo{...}` is shown as `[TODO: ...]`, `\hl{...}` highlighted.
@@ -124,8 +125,35 @@ Inside a paragraph:
   (with `[n]` and an optional default), `\def\name#1#2{...}`,
   `\DeclareMathOperator`, and `\NewDocumentCommand` with `m`, `o`, `O{...}`
   arguments. In prose a macro is expanded **for display only**: the source is
-  never rewritten. The text of an argument stays editable in place; a macro
-  without arguments, and one whose body contains math, is one read-only unit.
+  never rewritten. The arguments are put into the body and the result is
+  shown, so `\newcommand{\figref}[1]{Figure~\ref{#1}}` shows "Figure 3" and a
+  macro around `\citet` shows the citation. Your definition of a text or
+  formatting command Paper Pal also knows (`\todo`, `\hl`, `\footnote`,
+  `\textbf`) is used instead of Paper Pal's, except one made with
+  `\providecommand`, so `\renewcommand{\todo}[1]{}` hides every `\todo`, as
+  in the PDF. Redefinitions of `\cite`, `\ref`, `\eqref` and the other
+  citation and reference commands, `\verb`, `\item`, `\frac` and accents are
+  not used. A copy made with `\let\oldfootnote\footnote` (or
+  `\let\x=\y`, `\LetLtxMacro`) works like the original, so a redefinition
+  that calls the copy still shows a footnote.
+  - Argument text that the body shows as written (`\textcolor{red}{#1}`, the
+    link text of `\href{#1}{#2}`, the `#1` of `(#1)`) stays editable in place.
+    An edit there changes only the argument.
+  - Text that a call with arguments adds itself or builds from a key ("Figure
+    3", the ", " of `(#1, #2)`, the "TODO: " of
+    `\textcolor{blue}{TODO: #1}`) is one unit. It is shown but cannot be
+    typed in, in the manuscript and in a proposal unit, and edits next to it
+    keep the call. Deleting all the text of a call removes the call.
+  - An edit that removes or changes part of that text while an argument the
+    call shows stays (deleting only the ")" of `\paren{word}`) is not saved:
+    in LaTeX it could only delete the argument as well. Undo it, or change the
+    call in the source.
+  - A macro without arguments is not locked. A letter typed right after it is
+    written after an empty group (`\eg{}s`), so it does not join the name.
+  - A macro whose body calls itself is shown like a command the parser does
+    not know. Macros used inside each other's arguments may nest to any
+    depth; bodies that call other macros stop after six levels.
+
   In math the definitions are handed to KaTeX, so `$\norm{x}$` renders.
 - A command the parser does not know: with arguments, the text of the
   arguments is shown and the name is not; without arguments, the command is

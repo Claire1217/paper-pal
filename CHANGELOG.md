@@ -14,6 +14,29 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- **A macro that passes an argument to `\ref` or `\cite` was shown garbled,
+  and deleting text a macro adds could delete its argument.**
+  `\newcommand{\figref}[1]{Figure~\ref{#1}}` showed `\figref{fig:a}` as
+  "Figure \reffig:a", a macro around `\citet` showed `\citetacl`, and one
+  around `\href{#1}{#2}` ran the address into the link text. Paper Pal now puts
+  the arguments into the macro's body and shows the result: "Figure 3", the
+  citation, the link text. Argument text that is shown as written stays
+  editable in place, as before. Text that the macro adds or builds from a key
+  ("Figure 3", "TODO: ") is shown but not editable, in the manuscript and in a
+  proposal unit, and edits next to it keep the call. Deleting only the ")" of
+  `\paren{word}` used to delete "word" from the source too; such an edit is
+  now refused with a message that names the macro, and so is deleting only the
+  "[" or "]" of a `\footnote` or the "TODO: " of `\todo`, which left an
+  unbalanced brace. A letter typed right after a macro without arguments
+  joined its name (`\eg` plus "s" saved `\egs`); it now follows an empty
+  group. A text or formatting command you define yourself, such as
+  `\newcommand{\todo}`, is now shown with your definition instead of the
+  built-in one; `\renewcommand{\todo}[1]{}` therefore hides every `\todo`
+  from the page, as from the PDF. A copy made with `\let` (`\let\x\y`,
+  `\let\x=\y`, `\LetLtxMacro`) works like the command it copies, so
+  redefining `\footnote` to call `\oldfootnote` still shows the footnote. A
+  macro whose body calls itself is shown like an unknown command instead of
+  repeating.
 - **"Keep my edit" could overwrite a different paragraph.** After a co-author
   added or removed a paragraph above the one being edited, the forced save
   replaced whatever paragraph now sat at the old position. It now finds the

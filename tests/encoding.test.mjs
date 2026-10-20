@@ -597,8 +597,8 @@ describe("tracked changes: ✓/✕ resolves the change that was clicked", () => 
     "Macro \\pt{\\chadd{x}} end.",
     "Body \\added{} then \\chadd{real} end.",
   ];
-  // \pt has math in its body, so its argument is substituted as text; \added
-  // has a tracked change in its body, which is not in the paragraph's source.
+  // \pt's argument is substituted into its body, next to math; \added has a
+  // tracked change in its body, which is not in the paragraph's source.
   const PREAMBLE = "\\documentclass{article}\n\\newcommand{\\pt}[1]{#1 $\\star$}\n\\newcommand{\\added}{\\chadd{zz}}\n\\begin{document}\n\n";
   const sourceOf = (paragraphs) => `${PREAMBLE}${paragraphs.join("\n\n")}\n\n\\end{document}\n`;
   const MAIN = sourceOf(PARAGRAPHS);

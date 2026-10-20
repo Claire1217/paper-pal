@@ -1044,18 +1044,37 @@ function bracketEnd(value, openAt) {
 // \renewcommand, \providecommand, \DeclareRobustCommand (with or without
 // braces around the name, with [n] and [default]), \def\name#1#2{...},
 // \DeclareMathOperator and simple \NewDocumentCommand signatures. Anything
-// cleverer is left alone.
-function collectMacros(source) {
+// cleverer is left alone. \let\copy\name (also \let\copy=\name and
+// \LetLtxMacro) copies a macro defined before it in this source, records
+// { let: "name" } for a command latexToDisplay knows, or else copies the
+// macro from `known`, so a later \renewcommand{\name}{... \copy ...} keeps
+// the old behaviour.
+function collectMacros(source, known = null) {
   const macros = new Map();
-  if (!/\\(?:newcommand|renewcommand|providecommand|DeclareRobustCommand|DeclareMathOperator|def|gdef|NewDocumentCommand|RenewDocumentCommand|ProvideDocumentCommand)/.test(source)) return macros;
+  if (!/\\(?:newcommand|renewcommand|providecommand|DeclareRobustCommand|DeclareMathOperator|def|gdef|NewDocumentCommand|RenewDocumentCommand|ProvideDocumentCommand|let|LetLtxMacro)/.test(source)) return macros;
   const text = maskLatex(source);
-  const pattern = /\\(newcommand|renewcommand|providecommand|DeclareRobustCommand|DeclareMathOperator|def|gdef|NewDocumentCommand|RenewDocumentCommand|ProvideDocumentCommand)(\*?)(?![A-Za-z@])/g;
+  const pattern = /\\(newcommand|renewcommand|providecommand|DeclareRobustCommand|DeclareMathOperator|def|gdef|NewDocumentCommand|RenewDocumentCommand|ProvideDocumentCommand|let|LetLtxMacro)(\*?)(?![A-Za-z@])/g;
   const skipSpace = (at) => {
     while (/[ \t\r\n]/.test(text[at] || "")) at += 1;
     return at;
   };
   let match;
   while ((match = pattern.exec(text)) !== null) {
+    if (match[1] === "let" || match[1] === "LetLtxMacro") {
+      const pair = /^\s*\{?\s*\\([A-Za-z@]+)\s*\}?\s*=?\s*\{?\s*\\([A-Za-z@]+)/.exec(text.slice(pattern.lastIndex, pattern.lastIndex + 160));
+      if (!pair) continue;
+      const [, name, original] = pair;
+      // `known` holds the project's definitions as they end up, not as they
+      // were at this point, so a built-in is taken as built in: the file may
+      // redefine it later to call this copy.
+      const copied = macros.get(original) ?? (displayedCommand(original) ? { let: original } : known?.get(original));
+      if (copied !== undefined) {
+        const { provide, ...definition } = typeof copied === "string" ? { body: copied, params: 0, optional: null } : copied;
+        macros.set(name, definition);
+      }
+      pattern.lastIndex += pair[0].length;
+      continue;
+    }
     let at = skipSpace(match.index + match[0].length);
     const braced = text[at] === "{";
     if (braced) at = skipSpace(at + 1);
@@ -1144,7 +1163,9 @@ function katexMacros(macros) {
   let count = 0;
   for (const [name, macro] of macros) {
     if (count >= 400) break;
-    if (!macro || /[$]|\\\(|\\\[|\\begin\{(?:equation|align|gather|multline)/.test(macro.body)) continue;
+    // A \let copy of a built-in is left out: KaTeX knows the original, and the
+    // original may be redefined to call the copy.
+    if (!macro || macro.let || /[$]|\\\(|\\\[|\\begin\{(?:equation|align|gather|multline)/.test(macro.body)) continue;
     result[`\\${name}`] = macro.body || "{}";
     count += 1;
   }
@@ -1269,6 +1290,12 @@ const LABEL_PREFIX_TYPES = {
   fig: "figure", tab: "table", tbl: "table", eq: "equation", eqn: "equation", sec: "section", subsec: "section", ssec: "section", app: "appendix",
   thm: "theorem", lem: "lemma", prop: "proposition", cor: "corollary", def: "definition", alg: "algorithm", lst: "listing", ch: "chapter", chap: "chapter",
 };
+// Commands that latexToDisplay handles itself, which a \let copy can stand for.
+const SPECIAL_COMMANDS = new Set(["verb", "lstinline", "mintinline", "ensuremath", "frac", "chadd", "chdel", "item", "captionof", "iffalse"]);
+function displayedCommand(name) {
+  return TEXT_COMMANDS.has(name) || Object.hasOwn(CITE_MODES, name) || REFERENCE_COMMANDS.has(name)
+    || Object.hasOwn(ACCENT_MARKS, name) || SPECIAL_COMMANDS.has(name);
+}
 const MAX_MACRO_DEPTH = 6;
 // Macro expansions left for the block being converted. Together with the
 // depth limit this stops \newcommand{\a}{\a\a\a} from running away.
@@ -1278,7 +1305,11 @@ let macroExpansionsLeft = MAX_MACRO_EXPANSIONS;
 const MAX_DISPLAY_NESTING = 120;
 let displayNesting = 0;
 
-function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labels: {}, citations: {} }, depth = 0, keepEdges = false) {
+// `fromArguments` ({ spans, depth }) marks the stretches of `raw` that are
+// arguments substituted into a macro body, with the depth of that macro's
+// call: a macro written inside an argument is as deep as the call around it,
+// so only bodies count toward MAX_MACRO_DEPTH.
+function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labels: {}, citations: {} }, depth = 0, keepEdges = false, fromArguments = null) {
   if (kind === "structure") return { display: "", displayStarts: [], displayEnds: [], hidden: true };
   if (depth === 0) {
     macroExpansionsLeft = MAX_MACRO_EXPANSIONS;
@@ -1341,10 +1372,21 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
   };
   const appendNested = (nested, offsetOf, displayRange = null, landings = []) => {
     const displayOffset = display.length;
+    // Text from a macro body maps to the whole call (displayRange), except a
+    // character that lies wholly inside an argument substituted into the body
+    // (`landings`): it maps back into that argument, so it stays editable in
+    // place.
+    const landingOf = (start, end) => landings.find((item) => start >= item.at && end <= item.at + item.length);
     for (let cursor = 0; cursor < nested.display.length; cursor += 1) {
       display.push(nested.display[cursor]);
-      displayStarts.push(displayRange ? displayRange[0] : offsetOf + nested.displayStarts[cursor]);
-      displayEnds.push(displayRange ? displayRange[1] : offsetOf + nested.displayEnds[cursor]);
+      const landing = displayRange ? landingOf(nested.displayStarts[cursor], nested.displayEnds[cursor]) : null;
+      if (landing) {
+        displayStarts.push(landing.source - landing.at + nested.displayStarts[cursor]);
+        displayEnds.push(landing.source - landing.at + nested.displayEnds[cursor]);
+      } else {
+        displayStarts.push(displayRange ? displayRange[0] : offsetOf + nested.displayStarts[cursor]);
+        displayEnds.push(displayRange ? displayRange[1] : offsetOf + nested.displayEnds[cursor]);
+      }
     }
     for (const annotation of nested.annotations || []) {
       const shifted = { ...annotation, start: displayOffset + annotation.start, end: displayOffset + annotation.end };
@@ -1382,19 +1424,34 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
       }
       return;
     }
+    const spans = (fromArguments?.spans || [])
+      .filter(([from, to]) => from < end && to > start)
+      .map(([from, to]) => [Math.max(from, start) - start, Math.min(to, end) - start]);
     displayNesting += 1;
     try {
-      appendNested(latexToDisplay(raw.slice(start, end), "paragraph", macros, referenceContext, Math.max(depth, 1)), start);
+      appendNested(latexToDisplay(raw.slice(start, end), "paragraph", macros, referenceContext, Math.max(depth, 1), false,
+        spans.length ? { spans, depth: fromArguments.depth } : null), start);
     } finally {
       displayNesting -= 1;
     }
   };
-  // Text that is not in the source (a macro body): converted, and every
-  // character maps to the source range of the command that produced it.
-  const appendExpanded = (text, rawStart, rawEnd, keepSpaces = false, landings = []) => {
-    if (depth >= MAX_MACRO_DEPTH || macroExpansionsLeft <= 0) return;
+  // The macro depth of a command at `at`: that of the call whose argument it
+  // sits in, or this text's own.
+  const macroDepthAt = (at) => (fromArguments?.spans.some(([from, to]) => at >= from && at < to) ? fromArguments.depth : depth);
+  // Text that is not in the source (a macro body, expanded at `bodyDepth`):
+  // converted, and every character maps to the source range of the command
+  // that produced it.
+  const appendExpanded = (text, rawStart, rawEnd, keepSpaces = false, landings = [], bodyDepth = depth) => {
+    if (bodyDepth >= MAX_MACRO_DEPTH || macroExpansionsLeft <= 0 || displayNesting >= MAX_DISPLAY_NESTING) return;
     macroExpansionsLeft -= 1;
-    appendNested(latexToDisplay(text, "paragraph", macros, referenceContext, depth + 1, keepSpaces), 0, [rawStart, rawEnd], landings);
+    const spans = landings.map((item) => [item.at, item.at + item.length]);
+    displayNesting += 1;
+    try {
+      appendNested(latexToDisplay(text, "paragraph", macros, referenceContext, bodyDepth + 1, keepSpaces,
+        spans.length ? { spans, depth: bodyDepth } : null), 0, [rawStart, rawEnd], landings);
+    } finally {
+      displayNesting -= 1;
+    }
   };
   const appendStyled = (style, write) => {
     const start = display.length;
@@ -1570,7 +1627,10 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
       cursor += escaped === undefined ? 1 : 2;
       continue;
     }
-    const command = commandMatch[1];
+    // A \let copy (\let\oldfootnote\footnote) works like the command it was
+    // made from, even after that command is redefined to call the copy.
+    const letOf = macros.get(commandMatch[1])?.let;
+    const command = letOf ?? commandMatch[1];
     const commandEnd = cursor + commandMatch[0].length;
     let argumentStart = skipBlanks(commandEnd);
 
@@ -1862,8 +1922,10 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
         continue;
       }
     }
-    // A symbol name the author redefined (\newcommand{\P}{\mathbb{P}}) is theirs.
-    const spec = TEXT_COMMANDS.get(command)?.text !== undefined && macros.has(command) ? null : TEXT_COMMANDS.get(command);
+    // A command the author defined (\newcommand{\P}{\mathbb{P}}, their own
+    // \todo) is theirs; \providecommand does not replace a package's.
+    const own = letOf === undefined ? macros.get(command) : undefined;
+    const spec = own !== undefined && !own?.provide ? null : TEXT_COMMANDS.get(command);
     if (spec) {
       if (spec.text !== undefined) {
         appendStyled(spec.style, () => appendReplacement(spec.text, cursor, commandEnd));
@@ -1901,7 +1963,9 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
       const shown = (spec.show || []).map((position) => parsed.found[position]).filter(Boolean);
       if (shown.length) {
         appendStyled(spec.style, () => {
-          if (spec.before) appendReplacement(spec.before, cursor, shown[0].start);
+          // The text the command adds maps to the whole call: deleting the
+          // "[" of a footnote must not delete "\footnote{" alone.
+          if (spec.before) appendReplacement(spec.before, cursor, parsed.end);
           for (const [position, argument] of shown.entries()) {
             if (position > 0 && spec.sep !== "") appendReplacement(spec.sep ?? " ", shown[position - 1].end, argument.start);
             if (spec.verbatim) {
@@ -1911,15 +1975,20 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
               }
             } else appendInner(argument.start, argument.end);
           }
-          if (spec.after) appendReplacement(spec.after, shown.at(-1).end, parsed.end);
+          if (spec.after) appendReplacement(spec.after, cursor, parsed.end);
         });
       }
       cursor = parsed.end;
       continue;
     }
-    if (macros.has(command) && depth < MAX_MACRO_DEPTH) {
-      const macro = macros.get(command);
-      const body = typeof macro === "string" ? macro : String(macro?.body ?? "");
+    // A macro is expanded while the depth and expansion limits allow. One
+    // whose body calls itself would only repeat itself until they stop it, so
+    // it is shown like a command this parser does not know, as is any macro
+    // once the limits are reached.
+    const macroDepth = macroDepthAt(cursor);
+    const macro = own !== undefined && macroDepth < MAX_MACRO_DEPTH && macroExpansionsLeft > 0 && displayNesting < MAX_DISPLAY_NESTING ? own : null;
+    const body = macro === null ? "" : typeof macro === "string" ? macro : String(macro?.body ?? "");
+    if (macro !== null && !new RegExp(`\\\\${command}(?![A-Za-z@])`).test(body)) {
       const params = typeof macro === "string" ? 0 : macro.params || 0;
       const optional = typeof macro === "string" ? null : macro.optional ?? null;
       // An operator or a bare math macro used in prose shows its name.
@@ -1935,14 +2004,17 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
           : { range: null, text: position === 0 && optional !== null ? optional : "" }));
         const alias = /^\\([A-Za-z@]+)\s*\{\s*#1\s*\}$/.exec(body);
         if (!values.length) {
-          appendExpanded(body, cursor, parsed.end);
+          appendExpanded(body, cursor, parsed.end, false, [], macroDepth);
         } else if (alias && values.length === 1 && values[0].range && TEXT_COMMANDS.get(alias[1])?.show?.length === 1 && TEXT_COMMANDS.get(alias[1]).sig === "m") {
           // \newcommand{\term}[1]{\emph{#1}}: the argument stays editable and keeps the style.
           appendStyled(TEXT_COMMANDS.get(alias[1]).style, () => appendInner(values[0].range.start, values[0].range.end));
-        } else if (/[$]|\\\(|\\\[|\\ensuremath|\\begin\b|\\verb/.test(body)) {
-          // Arguments may sit inside math: substitute as text, show as one unit.
-          // Where each argument lands is kept, so a tracked change inside one
-          // still names its own source range.
+        } else {
+          // The arguments are substituted into the body and the result is
+          // converted as a whole, so a command in the body keeps its argument:
+          // Figure~\ref{#1} shows "Figure 3", not "\ref" and a bare key.
+          // Text the body adds, and text built from an argument that is not
+          // shown as it is (a \ref key, a \cite key), map to the whole call.
+          // Text of an argument that is shown maps to its own source range.
           const landings = [];
           let substituted = "";
           let last = 0;
@@ -1953,17 +2025,8 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
             substituted += value?.text ?? "";
             last = placeholder.index + placeholder[0].length;
           }
-          appendExpanded(`${substituted}${body.slice(last)}`, cursor, parsed.end, false, landings);
-        } else {
-          // Literal pieces map to the command; each argument keeps its own range.
-          for (const piece of body.split(/(#[1-9])/)) {
-            const value = /^#[1-9]$/.test(piece) ? values[Number(piece[1]) - 1] : null;
-            if (!value) {
-              // The blanks of "[#1: #2]" are part of the text.
-              if (!/^#[1-9]$/.test(piece)) appendExpanded(piece, cursor, parsed.end, true);
-            } else if (value.range) appendInner(value.range.start, value.range.end);
-            else appendExpanded(value.text, cursor, parsed.end);
-          }
+          // The blanks of "[#1: #2]" are part of the text.
+          appendExpanded(`${substituted}${body.slice(last)}`, cursor, parsed.end, true, landings, macroDepth);
         }
         cursor = parsed.end;
         continue;
@@ -2002,7 +2065,7 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
     }
     const filled = groups.filter((group) => raw.slice(group.start, group.end).trim());
     if (!filled.length) {
-      appendStyled("command", () => appendReplacement(`\\${command}`, cursor, commandEnd));
+      appendStyled("command", () => appendReplacement(`\\${commandMatch[1]}`, cursor, commandEnd));
       cursor = commandEnd;
       continue;
     }
@@ -2472,7 +2535,7 @@ async function projectMacros() {
     // Definitions and included files in source order: a later one wins.
     let cursor = 0;
     for (const event of events) {
-      for (const [name, macro] of collectMacros(source.slice(cursor, event.index))) {
+      for (const [name, macro] of collectMacros(source.slice(cursor, event.index), macros)) {
         if (!(macro.provide && macros.has(name))) macros.set(name, macro);
       }
       cursor = event.index;
@@ -2480,7 +2543,7 @@ async function projectMacros() {
         for (const base of [compileRoot, path.dirname(normalized)]) await visit(path.resolve(base, target), depth + 1);
       }
     }
-    for (const [name, macro] of collectMacros(source.slice(cursor))) {
+    for (const [name, macro] of collectMacros(source.slice(cursor), macros)) {
       if (!(macro.provide && macros.has(name))) macros.set(name, macro);
     }
   }
@@ -2491,7 +2554,7 @@ async function projectMacros() {
 // The macros that apply to one file: the project's, then the file's own.
 function documentMacros(source, references) {
   const macros = new Map(references?.macros || []);
-  for (const [name, macro] of collectMacros(source)) {
+  for (const [name, macro] of collectMacros(source, macros)) {
     if (!(macro.provide && macros.has(name))) macros.set(name, macro);
   }
   return macros;
@@ -2725,7 +2788,7 @@ async function resolveIncludedArtifact(relativePath, target, macros, references,
     // Without a telling file name, only a file that holds nothing but the
     // float counts: a section file that happens to contain a figure does not.
     if (onlyArtifacts && includedBlocks.some((item) => !["table", "figure", "structure"].includes(item.kind))) continue;
-    const includedMacros = new Map([...macros, ...collectMacros(includedSource)]);
+    const includedMacros = new Map([...macros, ...collectMacros(includedSource, macros)]);
     const includedPath = relativeRepo(candidate);
     const semantic = await semanticBlock(artifact, includedPath, includedMacros, references);
     if (!semantic) continue;
