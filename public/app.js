@@ -132,6 +132,7 @@ const state = {
   editing: null,
   proposalEditing: null,
   proposalSaving: false,
+  proposalRetry: null,
   saveTimer: null,
   saving: false,
   toastTimer: null,
@@ -139,7 +140,7 @@ const state = {
   saveConflict: false,
   requests: [],
   requestsToken: 0,
-  requestsRefresh: null,
+  requestsShownToken: 0,
   compiledOutline: null,
   outlineScrollTimer: null,
   outlineSelectionLockUntil: 0,
@@ -1572,13 +1573,22 @@ async function flushProposalUnitSave() {
       if (savedRequest && savedUnit) {
         editing.element.proposalRequest = savedRequest;
         editing.element.proposalUnit = savedUnit;
+        // Typing that went on during the save was captured against the old unit.
+        if (state.proposalEditing?.element === editing.element) {
+          state.proposalEditing.request = savedRequest;
+          state.proposalEditing.unit = savedUnit;
+        }
       }
     }
     setSaveState("Saved", false);
     showToast("Your edit was saved to the proposal and this unit was confirmed. LaTeX is still unchanged.", 4400);
     return true;
   } catch (error) {
-    state.proposalEditing = editing;
+    // An edit made in another unit meanwhile stays the pending one; this one
+    // waits behind it and is tried again once that one is saved. Typing on in
+    // this same unit already holds all of its text.
+    if (!state.proposalEditing) state.proposalEditing = editing;
+    else if (state.proposalEditing.element !== editing.element) state.proposalRetry = editing;
     editing.element.classList.add("save-conflict");
     setSaveState("Proposal edit not saved", false);
     showToast(error.message, 5200);
@@ -1587,6 +1597,10 @@ async function flushProposalUnitSave() {
     state.proposalSaving = false;
     // An edit in another unit that was left while this save ran was turned
     // away by the guard at the top, and its blur will not come again.
+    if (!state.proposalEditing && state.proposalRetry && state.proposalRetry !== editing) {
+      state.proposalEditing = state.proposalRetry;
+      state.proposalRetry = null;
+    }
     const deferred = state.proposalEditing;
     if (deferred && deferred !== editing && !deferred.element.matches(":focus")) setTimeout(flushProposalUnitSave, 0);
     setTimeout(flushPendingRender, 0);
@@ -3539,8 +3553,15 @@ function rawTextForDisplayEdit(source, nextDisplay) {
   }
   const rawEnd = oldEnd > prefix ? source.displayEnds[oldEnd - 1] : rawStart;
   const replacement = nextDisplay.slice(prefix, nextDisplay.length - suffix);
-  const changed = displayEditKeepingMarkup(source, rawStart, prefix, oldEnd, replacement) ?? replacement;
-  return `${source.raw.slice(0, rawStart)}${changed}${source.raw.slice(rawEnd)}`;
+  const changed = displayEditKeepingMarkup(source, rawStart, prefix, oldEnd, replacement)
+    ?? [{ text: replacement, typed: true }];
+  const pieces = [{ text: source.raw.slice(0, rawStart) }, ...changed, { text: source.raw.slice(rawEnd) }];
+  let before = "";
+  for (const piece of pieces) {
+    if (piece.typed && !insideLiteralText(before)) piece.text = escapeTypedText(piece.text);
+    before += piece.text;
+  }
+  return withoutEmptiedFormatting(pieces);
 }
 
 // The display character at `index` is the line break that ends a "% comment":
@@ -3553,15 +3574,44 @@ function endsSourceComment(source, index) {
   return /(?:^|[^\\])(?:\\\\)*%/.test(hidden.slice(hidden.lastIndexOf("\n") + 1));
 }
 
-// The changed display stretch [from, to) as source, keeping the markup that sits
-// between two of its characters: the "}" that closes \textbf{ or an "\emph{" has
-// no display character, so the author cannot have meant to delete it. Replacing
-// the whole stretch turned "The \textbf{big} dog" edited to "The small cat" into
-// "The \textbf{small cat", whose open brace swallows the rest of the file. A word
-// diff places the new text next to the words it replaces instead, here giving
-// "The \textbf{small} cat". The source from rawFrom up to the first character
-// is markup as well. Null when there is no such markup (the plain replacement
-// is exact) or the characters do not map to the source in order.
+// Escapes the text the author typed. The page shows "\%", "\&" and "\#" as
+// %, & and #, so a typed "%" written as is would start a comment that hides
+// the rest of the line, and "&" or "#" would stop the compile. A backslash the
+// author typed in front keeps the character as it is. $, _ and ^ are left
+// alone on purpose: authors type inline math and subscripts as source
+// ("$x_1$"), and escaping them would break that.
+function escapeTypedText(text) {
+  return text.replace(/(\\*)([%&#])/g, (match, slashes, character) => (
+    slashes.length % 2 ? match : `${slashes}\\${character}`
+  ));
+}
+
+// True when text written right after `before` lands in a URL or verbatim
+// text, where %, & and # are shown as they are written and stay unescaped.
+function insideLiteralText(before) {
+  const command = [...before.matchAll(/\\(?:url|nolinkurl|path|href)\s*\{/g)].at(-1);
+  if (command) {
+    let depth = 1;
+    for (let at = command.index + command[0].length; at < before.length && depth > 0; at += 1) {
+      if (before[at] === "{") depth += 1;
+      else if (before[at] === "}") depth -= 1;
+    }
+    if (depth > 0) return true;
+  }
+  const verb = [...before.matchAll(/\\verb\*?([^a-zA-Z\s*])/g)].at(-1);
+  return Boolean(verb && !before.slice(verb.index + verb[0].length).includes(verb[1]));
+}
+
+// The changed display stretch [from, to) as source pieces, keeping the markup
+// that sits between two of its characters: the "}" that closes \textbf{ or an
+// "\emph{" has no display character, so the author cannot have meant to
+// delete it. Replacing the whole stretch turned "The \textbf{big} dog" edited
+// to "The small cat" into "The \textbf{small cat", whose open brace swallows
+// the rest of the file. A word diff places the new text next to the words it
+// replaces instead, here giving "The \textbf{small} cat". The source from
+// rawFrom up to the first character is markup as well. Pieces the author
+// typed are marked `typed`. Null when there is no such markup (the plain
+// replacement is exact) or the characters do not map to the source in order.
 function displayEditKeepingMarkup(source, rawFrom, from, to, replacement) {
   const { raw, displayStarts: starts, displayEnds: ends } = source;
   // Characters produced together (a macro's expansion, a citation label) share
@@ -3580,37 +3630,96 @@ function displayEditKeepingMarkup(source, rawFrom, from, to, replacement) {
   }
   if (!hasMarkup) return null;
   const kept = new Array(to - from).fill(false);
-  const inserted = new Array(to - from + 1).fill("");
+  // Text inserted before a character goes in front of the markup before that
+  // character, staying with the text before it. Text that replaces a deleted
+  // run goes where the run started, after that markup: in "Urban
+  // \textbf{songbirds} are", typing "birds" over "songbirds are" keeps
+  // "birds" inside \textbf, where the page showed it.
+  const before = new Array(to - from + 1).fill("");
+  const replacing = new Array(to - from).fill("");
   let index = from;
+  let runStart = -1;
   for (const operation of diffTextOperations(source.display.slice(from, to), replacement)) {
     if (operation.type === "insert") {
-      inserted[index - from] += operation.text;
+      if (runStart >= 0 && !endsComment(runStart)) replacing[runStart - from] += operation.text;
+      else before[index - from] += operation.text;
       continue;
     }
+    runStart = operation.type === "delete" ? index : -1;
     for (let count = 0; count < operation.text.length; count += 1) {
       kept[index - from] = operation.type === "equal";
       index += 1;
     }
   }
   if (index !== to) return null;
-  let output = "";
+  const pieces = [];
+  const typed = (text) => { if (text) pieces.push({ text, typed: true }); };
   for (let at = from; at < to; at += 1) {
-    // Text typed in place of a deleted word goes before the markup that
-    // followed that word, so it stays inside the same group.
-    output += inserted[at - from];
-    if (at > from && sameUnit(at)) continue;
-    output += raw.slice(at > from ? ends[at - 1] : rawFrom, starts[at]);
+    typed(before[at - from]);
+    if (at > from && sameUnit(at)) {
+      typed(replacing[at - from]);
+      continue;
+    }
+    pieces.push({ text: raw.slice(at > from ? ends[at - 1] : rawFrom, starts[at]) });
+    typed(replacing[at - from]);
     let last = at;
     while (last + 1 < to && sameUnit(last + 1)) last += 1;
     const unitKept = kept.slice(at - from, last - from + 1);
-    if (endsComment(at) || unitKept.every(Boolean)) output += raw.slice(starts[at], ends[at]);
+    if (endsComment(at) || unitKept.every(Boolean)) pieces.push({ text: raw.slice(starts[at], ends[at]) });
     else {
       // Part of a citation label or a macro's text was deleted: the unit goes,
       // and the characters the author left standing stay as typed text.
-      output += source.display.slice(at, last + 1).split("").filter((_, offset) => unitKept[offset]).join("");
+      typed(source.display.slice(at, last + 1).split("").filter((_, offset) => unitKept[offset]).join(""));
     }
   }
-  return output + inserted[to - from];
+  typed(before[to - from]);
+  return pieces;
+}
+
+// Joins source pieces, dropping a formatting command whose text the edit
+// deleted entirely: "\textbf{}" keeps invisible formatting at that spot and
+// clutters the source. When the author's new text sits right before or after
+// it, the text moves inside instead, so it keeps the formatting the page showed
+// there. A command that was already empty in the source (both braces in one
+// piece) is left as it was.
+const EMPTIABLE_FORMATTING = /\\(?:textbf|textit|textsl|textsc|texttt|textsf|textrm|textup|textmd|textnormal|emph|underline)\{\}/g;
+
+function withoutEmptiedFormatting(pieces) {
+  let text = "";
+  let origin = [];
+  for (const [index, piece] of pieces.entries()) {
+    text += piece.text;
+    for (let count = 0; count < piece.text.length; count += 1) origin.push(piece.typed ? -1 - index : index);
+  }
+  const isTyped = (at) => origin[at] < 0;
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const match of text.matchAll(EMPTIABLE_FORMATTING)) {
+      const start = match.index;
+      const close = start + match[0].length - 1;
+      if (origin[close - 1] === origin[close]) continue;
+      // The new text next to the command, preferring the text before it: that
+      // is where a replacement for the deleted run was put.
+      let moveFrom = start;
+      while (moveFrom > 0 && isTyped(moveFrom - 1) && origin[moveFrom - 1] === origin[start - 1]) moveFrom -= 1;
+      let moveTo = close + 1;
+      if (moveFrom === start) {
+        while (moveTo < text.length && isTyped(moveTo) && origin[moveTo] === origin[close + 1]) moveTo += 1;
+      }
+      const moved = moveFrom < start ? text.slice(moveFrom, start) : text.slice(close + 1, moveTo);
+      const movedOrigin = moveFrom < start ? origin.slice(moveFrom, start) : origin.slice(close + 1, moveTo);
+      const command = text.slice(start, close);
+      const commandOrigin = origin.slice(start, close);
+      const replacement = moved ? `${command}${moved}}` : "";
+      const replacementOrigin = moved ? [...commandOrigin, ...movedOrigin, origin[close]] : [];
+      const end = moveFrom < start ? close + 1 : moveTo;
+      text = `${text.slice(0, moveFrom)}${replacement}${text.slice(end)}`;
+      origin = [...origin.slice(0, moveFrom), ...replacementOrigin, ...origin.slice(end)];
+      changed = true;
+      break;
+    }
+  }
+  return text;
 }
 
 async function performSave({ force = false } = {}) {
@@ -5569,23 +5678,21 @@ function renderRequestLists() {
 }
 
 // Every agent status change sends a "request" event, so several refreshes are
-// often in flight at once and can resolve out of order. Only the newest may
-// replace the list; a caller of an older one waits for the newest instead, so
-// what it reads afterwards is current.
-function refreshRequests() {
+// often in flight at once and can resolve out of order. An answer is shown
+// unless one to a later request is already on screen. Each caller waits for
+// its own fetch only and gets its own result or error; what it reads
+// afterwards is at least as new as that answer.
+async function refreshRequests() {
   const token = (state.requestsToken = (state.requestsToken || 0) + 1);
-  const refresh = (async () => {
-    const requests = await api("/api/requests");
-    if (token !== state.requestsToken) return state.requestsRefresh;
-    state.requests = Array.isArray(requests) ? requests : [];
-    // The cards always update. The manuscript re-renders only when that cannot
-    // destroy a selection or an edit in progress; otherwise it is replayed later.
-    renderRequestLists();
-    renderDocumentWhenSafe();
-    if (state.chat && !dom.codexChat.hidden) renderChatSession({ scroll: false });
-  })();
-  state.requestsRefresh = refresh;
-  return refresh;
+  const requests = await api("/api/requests");
+  if (token < state.requestsShownToken) return;
+  state.requestsShownToken = token;
+  state.requests = Array.isArray(requests) ? requests : [];
+  // The cards always update. The manuscript re-renders only when that cannot
+  // destroy a selection or an edit in progress; otherwise it is replayed later.
+  renderRequestLists();
+  renderDocumentWhenSafe();
+  if (state.chat && !dom.codexChat.hidden) renderChatSession({ scroll: false });
 }
 
 function appendInlineMarkdown(container, text) {

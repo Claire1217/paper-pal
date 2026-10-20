@@ -17,7 +17,11 @@ const SAVE_MAPPING = [
   "diffTextOperations",
   "rawTextForDisplayEdit",
   "endsSourceComment",
+  "escapeTypedText",
+  "insideLiteralText",
   "displayEditKeepingMarkup",
+  "EMPTIABLE_FORMATTING",
+  "withoutEmptiedFormatting",
 ];
 
 // A source whose display is its raw text, one character each.
@@ -47,6 +51,14 @@ We use \\emph{very \\textbf{bold} words} here.
 
 See this. % a note
 Next line here.
+
+Urban \\textbf{songbirds} are widely studied.
+
+Start \\emph{word} end.
+
+A \\textbf{b}\\emph{c} d.
+
+Cost 5\\% \\& more.
 \\end{document}
 `;
 const NOTES = `\\section{First}
@@ -105,6 +117,48 @@ describe("front end", () => {
       const result = await editAndSave("bold", "very bold words", "quite plain text");
       assert.match(result.source, /We use \\emph\{quite \\textbf\{plain\} text\} here\./);
       assert.equal(result.display, result.typed);
+    });
+
+    it("puts new text where the replaced words started, inside their group", async () => {
+      // The page showed "birds now" in bold; "now" stays outside because the
+      // space before it lines up with the old one.
+      const result = await editAndSave("songbirds", "songbirds are w", "birds now");
+      assert.match(result.source, /\nUrban \\textbf\{birds\} nowidely studied\./);
+      assert.equal(result.display, result.typed);
+    });
+
+    it("never leaves an emptied \\textbf{} or \\emph{} behind", async () => {
+      // Deleting all of a group's text removes the command.
+      const deleted = await editAndSave("big", "big ", "");
+      assert.match(deleted.source, /\nThe dog sat\./);
+      const joined = await editAndSave("textbf{b}", "bc", "x");
+      assert.match(joined.source, /\nA \\textbf\{x\} d\./);
+      // New text right next to the emptied command moves into it.
+      const retyped = await editAndSave("Start", "Start word end", "big red");
+      assert.match(retyped.source, /\n\\emph\{big\} red\./);
+      for (const result of [deleted, joined, retyped]) {
+        assert.doesNotMatch(result.raw, /\\(?:textbf|emph)\{\}/);
+        assert.equal(result.display, result.typed);
+      }
+      // A command that was empty in the source is not the edit's business.
+      const app2 = loadAppFunctions(SAVE_MAPPING);
+      const source = { raw: "a \\emph{} b", display: "a  b", displayStarts: [0, 1, 9, 10], displayEnds: [1, 2, 10, 11] };
+      assert.equal(app2.rawTextForDisplayEdit(source, "a  c"), "a \\emph{} c");
+    });
+
+    it("escapes a %, & or # the author types", async () => {
+      const edited = await editAndSave("Cost", "5% & more", "6% & less #1");
+      assert.match(edited.source, /\nCost 6\\% \\& less \\#1\./);
+      assert.equal(edited.display, edited.typed);
+      const typed = await editAndSave("Alpha", "paragraph", "50% of the");
+      assert.match(typed.source, /\nAlpha 50\\% of the text\./);
+      // Already escaped, or inside a URL: as typed.
+      assert.equal(app.rawTextForDisplayEdit(plainSource("Use it."), "Use 5\\% of it."), "Use 5\\% of it.");
+      const url = { raw: "see \\url{a%20b} now", display: "see a%20b now", displayStarts: [0, 1, 2, 3, 9, 10, 11, 12, 13, 15, 16, 17, 18], displayEnds: [1, 2, 3, 4, 10, 11, 12, 13, 14, 16, 17, 18, 19] };
+      assert.equal(app.rawTextForDisplayEdit(url, "see a%2%0b now"), "see \\url{a%2%0b} now");
+      assert.equal(app.rawTextForDisplayEdit(url, "see a%20b 5% now"), "see \\url{a%20b} 5\\% now");
+      // $, _ and ^ stay source: authors type math that way.
+      assert.equal(app.rawTextForDisplayEdit(plainSource("Use it."), "Use $x_1^2$ it."), "Use $x_1^2$ it.");
     });
 
     it("never writes text into a % comment", async () => {
@@ -172,25 +226,59 @@ describe("front end", () => {
     assert.deepEqual(appendedCards, ["c-alpha", "c-gamma", "c-beta"]);
   });
 
-  it("keeps the newest comment list when /api/requests answers arrive out of order", async () => {
-    const pending = [];
-    const renders = [];
-    const app = loadAppFunctions(["refreshRequests"], {
-      state: { requests: [], chat: null },
-      dom: { codexChat: { hidden: true } },
-      api: () => new Promise((resolve) => pending.push(resolve)),
-      renderRequestLists: () => renders.push(app.state.requests.map((item) => item.id).join()),
-      renderDocumentWhenSafe() {},
-      renderChatSession() {},
+  describe("refreshing the comment list", () => {
+    function setup() {
+      const pending = [];
+      const renders = [];
+      const app = loadAppFunctions(["refreshRequests"], {
+        state: { requests: [], requestsToken: 0, requestsShownToken: 0, chat: null },
+        dom: { codexChat: { hidden: true } },
+        api: () => new Promise((resolve, reject) => pending.push({ resolve, reject })),
+        renderRequestLists: () => renders.push(app.state.requests.map((item) => item.id).join()),
+        renderDocumentWhenSafe() {},
+        renderChatSession() {},
+      });
+      return { app, pending, renders };
+    }
+
+    it("keeps the newest list when answers arrive out of order", async () => {
+      const { app, pending, renders } = setup();
+      const older = app.refreshRequests();
+      const newer = app.refreshRequests();
+      pending[1].resolve([{ id: "new" }]);
+      await newer;
+      pending[0].resolve([{ id: "old" }]);
+      await older;
+      assert.deepEqual(plain(app.state.requests), [{ id: "new" }]);
+      assert.deepEqual(renders, ["new"]);
     });
-    const older = app.refreshRequests();
-    const newer = app.refreshRequests();
-    pending[1]([{ id: "new" }]);
-    await newer;
-    pending[0]([{ id: "old" }]);
-    await older;
-    assert.deepEqual(plain(app.state.requests), [{ id: "new" }]);
-    assert.deepEqual(renders, ["new"]);
+
+    it("keeps an older good answer when the newer fetch fails", async () => {
+      const { app, pending, renders } = setup();
+      const older = app.refreshRequests();
+      const newer = app.refreshRequests();
+      let olderDone = false;
+      older.then(() => { olderDone = true; });
+      pending[0].resolve([{ id: "old" }]);
+      await tick();
+      assert.equal(olderDone, true);
+      pending[1].reject(new Error("server down"));
+      await assert.rejects(newer, /server down/);
+      assert.deepEqual(plain(app.state.requests), [{ id: "old" }]);
+      assert.deepEqual(renders, ["old"]);
+    });
+
+    it("lets a caller wait for its own fetch only", async () => {
+      const { app, pending } = setup();
+      const older = app.refreshRequests();
+      app.refreshRequests();
+      app.refreshRequests();
+      pending[0].resolve([{ id: "old" }]);
+      let done = false;
+      older.then(() => { done = true; });
+      await tick();
+      assert.equal(done, true);
+    });
   });
 
   it("sends Ask in Chat the blocks a selection was pulled into", async () => {
@@ -400,32 +488,68 @@ describe("front end", () => {
     assert.equal(await second, true);
   });
 
-  it("saves a proposal-unit edit that was left while another unit was saving", async () => {
-    const saved = [];
-    let releaseFirst;
-    const unitElement = (text) => ({ text, isConnected: false, matches: () => false, classList: { add() {}, remove() {} } });
-    const app = loadAppFunctions([...SAVE_MAPPING, "flushProposalUnitSave"], {
-      state: { proposalEditing: null, proposalSaving: false, requests: [] },
-      api: (url, options) => {
-        saved.push(JSON.parse(options.body).unitId);
-        return saved.length === 1 ? new Promise((resolve) => { releaseFirst = resolve; }) : Promise.resolve({});
-      },
-      canonicalEditableText: (target) => target.text,
-      refreshRequests: async () => {},
-      setSaveState() {},
-      showToast() {},
-      flushPendingRender() {},
-      setTimeout,
+  describe("saving proposal-unit edits", () => {
+    function setup({ connected = false } = {}) {
+      const saved = [];
+      const first = {};
+      const unitElement = (text) => ({ text, isConnected: connected, matches: () => false, classList: { add() {}, remove() {} } });
+      const app = loadAppFunctions([...SAVE_MAPPING, "flushProposalUnitSave"], {
+        state: { proposalEditing: null, proposalSaving: false, proposalRetry: null, requests: [] },
+        api: (url, options) => {
+          saved.push(JSON.parse(options.body).unitId);
+          if (saved.length > 1) return Promise.resolve({});
+          return new Promise((resolve, reject) => Object.assign(first, { resolve, reject }));
+        },
+        canonicalEditableText: (target) => target.text,
+        refreshRequests: async () => {},
+        setSaveState() {},
+        showToast() {},
+        flushPendingRender() {},
+        setTimeout,
+      });
+      const edit = (id, element = unitElement(`new ${id}`)) => ({ element, request: { id: "r" }, unit: { id, ...plainSource(`old ${id}`) } });
+      return { app, saved, first, edit };
+    }
+
+    it("saves an edit that was left while another unit was saving", async () => {
+      const { app, saved, first, edit } = setup();
+      app.state.proposalEditing = edit("a");
+      const saving = app.flushProposalUnitSave();
+      app.state.proposalEditing = edit("b");
+      assert.equal(await app.flushProposalUnitSave(), false);
+      first.resolve({});
+      await saving;
+      await tick();
+      assert.deepEqual(saved, ["a", "b"]);
+      assert.equal(app.state.proposalEditing, null);
     });
-    const edit = (id) => ({ element: unitElement(`new ${id}`), request: { id: "r" }, unit: { id, ...plainSource(`old ${id}`) } });
-    app.state.proposalEditing = edit("a");
-    const first = app.flushProposalUnitSave();
-    app.state.proposalEditing = edit("b");
-    assert.equal(await app.flushProposalUnitSave(), false);
-    releaseFirst({});
-    await first;
-    await tick();
-    assert.deepEqual(saved, ["a", "b"]);
-    assert.equal(app.state.proposalEditing, null);
+
+    it("keeps both edits when the first save fails, and tries the failed one again", async () => {
+      const { app, saved, first, edit } = setup();
+      app.state.proposalEditing = edit("a");
+      const saving = app.flushProposalUnitSave();
+      app.state.proposalEditing = edit("b");
+      await app.flushProposalUnitSave();
+      first.reject(new Error("network"));
+      assert.equal(await saving, false);
+      await tick();
+      assert.deepEqual(saved, ["a", "b", "a"]);
+      assert.equal(app.state.proposalEditing, null);
+      assert.equal(app.state.proposalRetry, null);
+    });
+
+    it("continues from the saved unit when typing went on during its save", async () => {
+      const { app, first, edit } = setup({ connected: true });
+      const typing = edit("a");
+      app.state.proposalEditing = typing;
+      const saving = app.flushProposalUnitSave();
+      // More typing in the same unit, captured against the unit before the save.
+      app.state.proposalEditing = { ...edit("a", typing.element) };
+      const savedUnit = { id: "a", ...plainSource("new a") };
+      app.state.requests = [{ id: "r", proposal: { reviewUnits: [savedUnit] } }];
+      first.resolve({});
+      await saving;
+      assert.equal(app.state.proposalEditing.unit.raw, "new a");
+    });
   });
 });

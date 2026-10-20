@@ -76,6 +76,47 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   text with a stray `$`. It is now math.
 - `\texorpdfstring{...}{...}` showed both arguments. It now shows the first one;
   the second is only for PDF bookmarks.
+- **Editing words across inline formatting could delete a closing brace.**
+  Changing "big dog" to "small cat" in `The \textbf{big} dog` saved
+  `The \textbf{small cat`, whose open group ran to the end of the file. Markup
+  inside the edited stretch is now kept (`The \textbf{small} cat`), new text
+  starts inside the group where the replaced words started, a formatting
+  command whose text was all deleted is removed instead of left as
+  `\textbf{}`, and an edit next to a `% comment` no longer writes text into
+  the comment.
+- **Typing `%` turned the rest of the line into a LaTeX comment.** "50% of
+  sites" was written as is, so everything after the `%` disappeared from the
+  PDF; a typed `&` or `#` stopped the compile. Paper Pal now writes `\%`, `\&`
+  and `\#`, except inside `\url`, `\href`, `\path` and `\verb`.
+- **A comment could be sent for the wrong passage.** Selecting other text
+  while the composer was open (to copy it, say) made Comment send that
+  selection instead of the quoted one. The composer's passage is now sent.
+- **Ask in Chat sent no selection after a drag that started at the very end of
+  a paragraph** (or a triple-click), so the reply and "Generate reviewable
+  edit" were tied to the previous passage. The selection now carries the ids of
+  the paragraphs it was moved into.
+- **Comments and edits made while the tab was in the background did not show
+  when coming back to it.** The card kept saying "drafting…". Paper Pal now
+  re-reads the comments, the undo state and the open file on every reconnect.
+- Comment cards were numbered differently from the badges in the text once a
+  comment lost its anchor, and the "Anchor changed" card sorted first. Both now
+  use the same numbers, and that card is listed last.
+- An older comment list could replace a newer one when several updates arrived
+  during an agent run. Only the newest answer is used now.
+- Typing on while a save was in flight showed a false "The paragraph changed"
+  conflict. The next save now continues from the saved paragraph.
+- After one text selection, every outside change to the open file showed the
+  "source changed" banner instead of reloading quietly.
+- "Confirm section" in a file the main file does not `\input` confirmed up to
+  the end of the file. It now stops at the next heading of the same or a higher
+  level.
+- Enter that picks a Chinese or Japanese IME candidate inserted a paragraph
+  break in the source, or was swallowed in a proposal unit. It is now left to
+  the input method.
+- A proposal-unit edit left while another unit was still saving was never
+  saved, and the manuscript stopped repainting. It is now saved once the first
+  save finishes, and if that first save fails, both edits are kept and tried
+  again.
 - On Windows, an agent run or another save could fail with "EPERM: operation
   not permitted, rename" when the page read the same state file at that moment.
   Paper Pal now retries the rename a few times before it reports an error.
