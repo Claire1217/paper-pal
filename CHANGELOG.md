@@ -14,6 +14,21 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- **Citations showed "key (n.d.)" for entries exported by the ACL Anthology,
+  JabRef and many hand-kept `.bib` files.** Values in double quotes
+  (`title = "..."`), bare numbers (`year = 2019`), `@string` names
+  (`journal = jcp`, joined with `#`) and entries written `@article( ... )` were
+  ignored. Paper Pal now reads all of these, and skips `@comment` and
+  `@preamble`.
+- An IEEE Xplore export that lists `booktitle` before `title` showed the
+  conference name as the paper title, and a DBLP entry without `url` linked to
+  its `biburl`. Field names are now matched whole.
+- A corporate author written `{{Open Data Collective}}` showed only its last
+  word. A wholly braced name is now shown whole, and `and` inside braces no
+  longer splits a name.
+- A `.bib` link with a `%` in it (`url = {https://example.org/a%20b.pdf}`) was
+  cut at the `%`, and its PDF link was lost. `url` and `doi` are now read
+  verbatim, as BibTeX reads them.
 - **Codex runs failed with "the argument '--dangerously-bypass-approvals-and-sandbox'
   cannot be used with '--ask-for-approval'"** when the `codex` on PATH is a
   wrapper that adds that flag. Paper Pal now passes the approval policy as a
