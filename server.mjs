@@ -4300,13 +4300,15 @@ async function validateLinkedCommentTargets(rawTargets, source) {
   const warnings = [];
   const seen = new Set();
   // A follow-up runs the search again. A location that already has an active
-  // linked comment from this source keeps it rather than getting a second one.
+  // linked comment from this source is matched to it (the newest, if several),
+  // so createLinkedCommentRequests can update it rather than add a duplicate.
   const existing = new Map();
   for (const id of Array.isArray(source.links) ? source.links : []) {
     try {
-      const { value: linked } = await readRewriteRequest(id);
-      if (linked.origin?.sourceRequestId === source.id && ["pending", "proposed", "discussed"].includes(linked.status)) {
-        existing.set(`${linked.path}:${linked.absoluteStart}:${linked.absoluteEnd}`, linked.id);
+      const linked = await readRewriteRequest(id);
+      const { value } = linked;
+      if (value.origin?.sourceRequestId === source.id && ["pending", "proposed", "discussed"].includes(value.status)) {
+        existing.set(`${value.path}:${value.absoluteStart}:${value.absoluteEnd}`, linked);
       }
     } catch {
       // A link whose file is gone cannot be reused.
@@ -4347,8 +4349,8 @@ async function validateLinkedCommentTargets(rawTargets, source) {
         || selectionSpanFromAbsoluteRange(blocks, absoluteStart, absoluteEnd);
       if (!span) throw new Error("the source anchor does not map to a reviewable source range");
       seen.add(key);
-      const existingId = existing.get(`${targetPath}:${span.absoluteStart}:${span.absoluteEnd}`);
-      targets.push({ path: targetPath, span, comment, reason, ...(existingId ? { existingId } : {}) });
+      const linked = existing.get(`${targetPath}:${span.absoluteStart}:${span.absoluteEnd}`);
+      targets.push({ path: targetPath, span, comment, reason, ...(linked ? { existing: linked } : {}) });
     } catch (error) {
       warnings.push(`Linked location ${index + 1} was not attached: ${error.message}`);
     }
@@ -4360,13 +4362,30 @@ async function validateLinkedCommentTargets(rawTargets, source) {
 // both directions. Each is an ordinary comment at that location, so it can be
 // run for a proposal later; it just does not draft one on arrival, because the
 // author asked to be shown the locations first. A target that already has a
-// linked comment (from an earlier search) is listed with that one.
+// linked comment from an earlier search reuses it: unchanged when the
+// instruction is the same, rewritten when the agent has not worked on it yet.
+// One the agent has already answered keeps its answer, and the new
+// instruction gets a comment of its own beside it.
 async function createLinkedCommentRequests(sourceRequest, targets, { autoProcess = false } = {}) {
   const created = [];
   for (const target of targets) {
-    if (target.existingId) {
-      created.push({ id: target.existingId, path: target.path, reason: target.reason });
-      continue;
+    if (target.existing) {
+      const { target: linkedPath, value: linked } = target.existing;
+      const untouched = linked.status === "pending" && !linked.proposal && !linked.discussion
+        && !linked.proposalHistory?.length && !linked.discussionHistory?.length
+        && (!Array.isArray(linked.conversation) || linked.conversation.length <= 1)
+        && !codexQueue.includes(linked.id) && !["queued", "running", "validating"].includes(codexRuns.get(linked.id)?.status);
+      if (linked.comment === target.comment || untouched) {
+        if (linked.comment !== target.comment) {
+          linked.comment = target.comment;
+          linked.conversation = [{ role: "user", content: target.comment, createdAt: new Date().toISOString() }];
+          linked.origin = { ...linked.origin, reason: target.reason };
+          await atomicWrite(linkedPath, `${JSON.stringify(linked, null, 2)}\n`);
+          emit("request", { id: linked.id, path: linked.path, status: linked.status, reason: "linked-updated" });
+        }
+        created.push({ id: linked.id, path: linked.path, reason: target.reason });
+        continue;
+      }
     }
     const payload = await documentPayload(target.path);
     const request = buildRewriteRequest({
@@ -4456,10 +4475,9 @@ async function validateRelatedProposalChanges(rawChanges, primaryPath) {
 // already there. Accepting that would double the text in the source. An echo
 // is removed when the replacement begins (ends) with the text right before
 // (after) the selection and the selected text itself did not: either up to
-// three whole words, or any run of 12 or more characters. A repeated word can
-// also be meant ("argued that" + "that claim…", "we had" + "had to…"), so a
-// word echo goes only when the rest lines up with the selection word for word
-// better than the whole replacement does, or when the other edge echoes too.
+// three whole words, or any run of 12 or more characters. A repeated "that"
+// or "had" can also be meant ("argued that" + "that claim…", "we had" +
+// "had to…"), so that one-word echo needs more evidence before it goes.
 function trimBoundaryEcho(replacementText, originalText, before, after) {
   let result = replacementText;
   const overlap = (longest, candidate, original) => {
@@ -4499,26 +4517,19 @@ function trimBoundaryEcho(replacementText, originalText, before, after) {
   }
   const mark = longTail ? null : after.match(/^[.,;:!?]/)?.[0];
   const markEcho = Boolean(mark && result.endsWith(mark) && !originalText.endsWith(mark));
-  // How many words, counted from one edge, stand where the selection has them.
-  const words = (text) => String(text).trim().split(/\s+/).filter(Boolean)
-    .map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").toLowerCase());
-  const aligned = (text, fromEnd) => {
-    const candidate = words(text);
-    const original = words(originalText);
-    if (fromEnd) {
-      candidate.reverse();
-      original.reverse();
-    }
-    return candidate.filter((word, index) => word && word === original[index]).length;
+  // English prose doubles "that" and "had" on purpose ("argued that that
+  // claim", "we had had to"). Such a one-word echo stays unless the other edge
+  // echoes too or the rest begins (ends) with the selection's own edge word.
+  const edgeWord = (text, last) => {
+    const words = String(text).trim().split(/\s+/);
+    return (last ? words.at(-1) : words[0]).replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").toLowerCase();
   };
-  // One selected word replaced by one word plus a neighbour ("0.5 percent" ->
-  // ".3 percent") is an echo; a meant doubling needs more words around it.
-  const oneForOne = (text) => words(originalText).length === 1 && words(text).length === 1;
-  const echoes = (trimmed, fromEnd) => aligned(trimmed, fromEnd) > aligned(result, fromEnd) || oneForOne(trimmed);
-  if (leadEcho && (longTail || tailEcho || markEcho || echoes(rest, false))) result = rest;
+  const echoes = (trimmed, last, echo) => !/^(?:that|had)$/i.test(echo.trim())
+    || (Boolean(edgeWord(trimmed, last)) && edgeWord(trimmed, last) === edgeWord(originalText, last));
+  if (leadEcho && (longTail || tailEcho || markEcho || echoes(rest, false, leadEcho))) result = rest;
   if (tailEcho) {
     const trimmed = result.slice(0, -tailEcho.length);
-    if (longLead || leadEcho || echoes(trimmed, true)) result = trimmed;
+    if (longLead || leadEcho || echoes(trimmed, true, tailEcho)) result = trimmed;
   }
   if (mark && result.trim() && result.endsWith(mark) && !originalText.endsWith(mark)) result = result.slice(0, -1);
   return result;
@@ -6018,7 +6029,9 @@ function drainChatQueue() {
   if (chatQueueDraining) return;
   chatQueueDraining = true;
   try {
-    while (chatQueue.length && activeChatRuns.size < maxConcurrentChatTurns) {
+    // A stopped run counts until its child has exited, so Stop followed by a
+    // new message never has more agent processes alive than chatConcurrency.
+    while (chatQueue.length && activeChatRuns.size + stoppedChatRuns.size < maxConcurrentChatTurns) {
       const sessionId = chatQueue.shift();
       const run = { child: null, cancelled: false };
       activeChatRuns.set(sessionId, run);
@@ -6483,6 +6496,9 @@ async function followupRewriteRequest(body) {
     request.status = "pending";
     delete request.proposal;
     delete request.proposalUnitReviews;
+    // A plain follow-up asks for a whole new answer. Left in place, a unit
+    // revision still running would make the rerun keep only one unit of it.
+    delete request.pendingUnitRevision;
   }
   await atomicWrite(target, `${JSON.stringify(request, null, 2)}\n`);
   emit("request", {
