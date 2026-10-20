@@ -127,7 +127,7 @@ and `capabilities: { readRepo }`.
 | GET | `/api/asset?path=` | An image or PDF inside `sourceRoot` (`pdf png jpg jpeg gif webp svg`). | Sandboxed by CSP. |
 | GET | `/api/asset-preview?path=` | PNG rendering of a PDF figure, cached in the state folder. | Needs `pdftoppm` or macOS `sips`; else `422`. |
 | POST | `/api/save` | Save the author's edit of one block. **Writes source.** | `path`, `etag`, `blockIndex`, `blockId`, `blockKind`, `baseText`, `text`, `force`. Three-way merge when the file changed elsewhere. |
-| POST | `/api/tracked-change/resolve` | Accept or reject one `\chadd`/`\chdel` group. **Writes source.** | `path`, `blockIndex`, `blockId`, `start`, `end` (a group from the block's `trackedChanges`), `text` (the raw text in that range), `action` (`"accept"`; anything else rejects). `409` when the range is not a group of the current source or its text differs. |
+| POST | `/api/tracked-change/resolve` | Accept or reject one `\chadd`/`\chdel` group. **Writes source.** | `path`, `etag`, `blockIndex`, `blockId`, `start`, `end` (a group from the block's `trackedChanges`), `text` (the raw text in that range), `action` (`"accept"`; anything else rejects). `409` when the range is not a group of the current source or its text differs, or when `etag` is stale and the file has another block with the same text. |
 | POST | `/api/confirm` | Mark a selection as confirmed. State only. | `path`, `etag`, and `segments: [{ blockIndex, blockId, start, end }]` or the same four fields at top level. Offsets index the block's raw text. |
 | POST | `/api/unconfirm` | Remove confirmation. State only. | Same body. |
 | GET | `/api/undo` | Undo status: `available`, `label`, `kind`, `path`, `createdAt`, `depth`. | |

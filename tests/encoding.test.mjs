@@ -619,8 +619,14 @@ describe("tracked changes: ✓/✕ resolves the change that was clicked", () => 
     "Break \\chadd{line one\\\\} middle \\chdel{gone} end.",
     "Typed \\chadd{new} results here.",
     "Caret \\chadd{b} c d e.",
+    "Macro \\pt{\\chadd{x}} end.",
+    "Body \\added{} then \\chadd{real} end.",
   ];
-  const MAIN = `\\documentclass{article}\n\\begin{document}\n\n${PARAGRAPHS.join("\n\n")}\n\n\\end{document}\n`;
+  // \pt has math in its body, so its argument is substituted as text; \added
+  // has a tracked change in its body, which is not in the paragraph's source.
+  const PREAMBLE = "\\documentclass{article}\n\\newcommand{\\pt}[1]{#1 $\\star$}\n\\newcommand{\\added}{\\chadd{zz}}\n\\begin{document}\n\n";
+  const sourceOf = (paragraphs) => `${PREAMBLE}${paragraphs.join("\n\n")}\n\n\\end{document}\n`;
+  const MAIN = sourceOf(PARAGRAPHS);
   let project;
   let server;
   let file;
@@ -642,7 +648,7 @@ describe("tracked changes: ✓/✕ resolves the change that was clicked", () => 
   function resolve(document, block, group, action = "accept", text = block.raw.slice(group.start, group.end)) {
     return api(server, "/api/tracked-change/resolve", {
       method: "POST",
-      body: { path: document.path, blockIndex: block.index, blockId: block.id, start: group.start, end: group.end, text, action },
+      body: { path: document.path, etag: document.etag, blockIndex: block.index, blockId: block.id, start: group.start, end: group.end, text, action },
     });
   }
 
@@ -662,6 +668,58 @@ describe("tracked changes: ✓/✕ resolves the change that was clicked", () => 
       assert.equal(result.status, 200, result.value.error);
       assert.equal(await paragraphOnDisk(prefix), expected);
     }
+  });
+
+  it("resolves a group joined by ~ without leaving a double gap", async () => {
+    for (const [action, expected] of [
+      ["accept", "Tilde new and later \\chadd{more}."],
+      ["reject", "Tilde old and later \\chadd{more}."],
+    ]) {
+      const { document, block } = await paragraph("Tilde");
+      const result = await resolve(document, block, block.trackedChanges[0], action);
+      assert.equal(result.status, 200, result.value.error);
+      assert.equal(await paragraphOnDisk("Tilde"), expected);
+    }
+  });
+
+  it("offers a change inside an argument of a macro with math in its body, but not one from a macro body", async () => {
+    for (const [prefix, expectedGroups, expected] of [
+      ["Macro", ["\\chadd{x}"], "Macro \\pt{x} end."],
+      ["Body", ["\\chadd{real}"], "Body \\added{} then real end."],
+    ]) {
+      const { document, block, groups } = await paragraph(prefix);
+      assert.deepEqual(groups, expectedGroups);
+      const result = await resolve(document, block, block.trackedChanges[0]);
+      assert.equal(result.status, 200, result.value.error);
+      assert.equal(await paragraphOnDisk(prefix), expected);
+    }
+  });
+
+  it("refuses a stale page when the clicked paragraph has identical copies, and resolves the right copy otherwise", async () => {
+    const same = "Same \\chadd{x} text.";
+    await fs.writeFile(file, sourceOf(["A.", "B.", same, same, same]), "utf8");
+    const stale = await getDocument(server, "main.tex");
+    const middle = stale.blocks.filter((item) => item.raw === same)[1];
+    // A co-author removes a paragraph above; the middle copy's id now names the third.
+    const shifted = sourceOf(["B.", same, same, same, "C."]);
+    await fs.writeFile(file, shifted, "utf8");
+    const refused = await resolve(stale, middle, middle.trackedChanges[0]);
+    assert.equal(refused.status, 409);
+    assert.match(refused.value.error, /changed on disk\. Reload/);
+    assert.equal(await fs.readFile(file, "utf8"), shifted);
+
+    const current = await getDocument(server, "main.tex");
+    const copy = current.blocks.filter((item) => item.raw === same)[1];
+    const accepted = await resolve(current, copy, copy.trackedChanges[0]);
+    assert.equal(accepted.status, 200, accepted.value.error);
+    assert.equal(await fs.readFile(file, "utf8"), sourceOf(["B.", same, "Same x text.", same, "C."]));
+
+    // A unique paragraph still resolves from a stale page.
+    const { document, block } = await paragraph("Tilde");
+    await fs.writeFile(file, MAIN.replace("Caret", "Caret, edited,"), "utf8");
+    const result = await resolve(document, block, block.trackedChanges[1]);
+    assert.equal(result.status, 200, result.value.error);
+    assert.equal(await paragraphOnDisk("Tilde"), "Tilde \\chdel{old}~\\chadd{new} and later more.");
   });
 
   it("never offers or resolves a tracked change inside a % comment", async () => {
@@ -707,12 +765,14 @@ describe("tracked changes: ✓/✕ resolves the change that was clicked", () => 
   it("page: saves typing in the paragraph first, then resolves the change in the saved text", async () => {
     const { document, block } = await paragraph("Typed");
     const sent = [];
+    let savedEtag = null;
     const app = appFunctions(["currentTrackedChangeTarget", "resolveTrackedChangeGroup"], {
       state: { document },
       // The author typed at the start of the paragraph, which moves the change.
       settlePendingEdits: async () => {
         await saveBlock(server, document, block, block.raw.replace("Typed ", "Typed, indeed, "));
         app.state.document = await getDocument(server, "main.tex");
+        savedEtag = app.state.document.etag;
         return true;
       },
       api: async (url, options) => {
@@ -726,6 +786,7 @@ describe("tracked changes: ✓/✕ resolves the change that was clicked", () => 
     await app.resolveTrackedChangeGroup(block, block.trackedChanges[0], "accept");
     assert.equal(sent.length, 1);
     assert.equal(sent[0].text, "\\chadd{new}");
+    assert.equal(sent[0].etag, savedEtag);
     assert.equal(await paragraphOnDisk("Typed"), "Typed, indeed, new results here.");
 
     const skipped = appFunctions(["currentTrackedChangeTarget", "resolveTrackedChangeGroup"], {

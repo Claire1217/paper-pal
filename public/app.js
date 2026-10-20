@@ -1653,6 +1653,7 @@ async function resolveTrackedChangeGroup(block, group, action) {
       method: "POST",
       body: JSON.stringify({
         path: state.document.path,
+        etag: state.document.etag,
         blockIndex: target.block.index,
         blockId: target.block.id,
         start: target.start,

@@ -1339,7 +1339,7 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
     }
     return braceMatches.get(openAt) ?? -1;
   };
-  const appendNested = (nested, offsetOf, displayRange = null) => {
+  const appendNested = (nested, offsetOf, displayRange = null, landings = []) => {
     const displayOffset = display.length;
     for (let cursor = 0; cursor < nested.display.length; cursor += 1) {
       display.push(nested.display[cursor]);
@@ -1349,16 +1349,22 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
     for (const annotation of nested.annotations || []) {
       const shifted = { ...annotation, start: displayOffset + annotation.start, end: displayOffset + annotation.end };
       // A tracked change's source range is relative to the nested text. Text
-      // from a macro body is not in this source at all, so it has none.
+      // from a macro body is not in this source at all, so it has none,
+      // unless it lies wholly inside an argument substituted into the body:
+      // then it maps back through that argument (`landings`).
       if (Number.isInteger(annotation.rawStart)) {
-        if (displayRange) {
+        const landing = displayRange
+          ? landings.find((item) => annotation.rawStart >= item.at && annotation.rawEnd <= item.at + item.length)
+          : { at: 0, source: offsetOf };
+        if (landing) {
+          const shift = landing.source - landing.at;
+          shifted.rawStart += shift;
+          shifted.rawInnerStart += shift;
+          shifted.rawEnd += shift;
+        } else {
           delete shifted.rawStart;
           delete shifted.rawInnerStart;
           delete shifted.rawEnd;
-        } else {
-          shifted.rawStart += offsetOf;
-          shifted.rawInnerStart += offsetOf;
-          shifted.rawEnd += offsetOf;
         }
       }
       annotations.push(shifted);
@@ -1385,10 +1391,10 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
   };
   // Text that is not in the source (a macro body): converted, and every
   // character maps to the source range of the command that produced it.
-  const appendExpanded = (text, rawStart, rawEnd, keepSpaces = false) => {
+  const appendExpanded = (text, rawStart, rawEnd, keepSpaces = false, landings = []) => {
     if (depth >= MAX_MACRO_DEPTH || macroExpansionsLeft <= 0) return;
     macroExpansionsLeft -= 1;
-    appendNested(latexToDisplay(text, "paragraph", macros, referenceContext, depth + 1, keepSpaces), 0, [rawStart, rawEnd]);
+    appendNested(latexToDisplay(text, "paragraph", macros, referenceContext, depth + 1, keepSpaces), 0, [rawStart, rawEnd], landings);
   };
   const appendStyled = (style, write) => {
     const start = display.length;
@@ -1935,7 +1941,19 @@ function latexToDisplay(raw, kind, macros = new Map(), referenceContext = { labe
           appendStyled(TEXT_COMMANDS.get(alias[1]).style, () => appendInner(values[0].range.start, values[0].range.end));
         } else if (/[$]|\\\(|\\\[|\\ensuremath|\\begin\b|\\verb/.test(body)) {
           // Arguments may sit inside math: substitute as text, show as one unit.
-          appendExpanded(body.replace(/#([1-9])/g, (_, number) => values[Number(number) - 1]?.text ?? ""), cursor, parsed.end);
+          // Where each argument lands is kept, so a tracked change inside one
+          // still names its own source range.
+          const landings = [];
+          let substituted = "";
+          let last = 0;
+          for (const placeholder of body.matchAll(/#([1-9])/g)) {
+            substituted += body.slice(last, placeholder.index);
+            const value = values[Number(placeholder[1]) - 1];
+            if (value?.range) landings.push({ at: substituted.length, length: value.text.length, source: value.range.start });
+            substituted += value?.text ?? "";
+            last = placeholder.index + placeholder[0].length;
+          }
+          appendExpanded(`${substituted}${body.slice(last)}`, cursor, parsed.end, false, landings);
         } else {
           // Literal pieces map to the command; each argument keeps its own range.
           for (const piece of body.split(/(#[1-9])/)) {
@@ -6918,6 +6936,12 @@ async function resolveTrackedChange(body) {
   let block = blocks[body.blockIndex];
   if (!block || block.id !== body.blockId) block = blocks.find((candidate) => candidate.id === body.blockId);
   if (!block) throw new Error("The paragraph changed. Reload the document and try again.");
+  // Block ids are index plus content hash, so after a paragraph above was
+  // removed on disk, the id of one copy of a repeated paragraph names the
+  // next copy. With a stale page that is only safe when the text is unique.
+  if (body.etag !== sha(currentSource) && blocks.filter((candidate) => candidate.raw === block.raw).length > 1) {
+    throw new HttpError(409, "The file changed on disk. Reload the document and try again.");
+  }
   // The page names the group by its source range and text. Anything that does
   // not match a group of the current source is refused, never mapped onto
   // another change.
@@ -6940,8 +6964,10 @@ async function resolveTrackedChange(body) {
   }
   const before = block.raw.slice(0, group.start);
   let after = block.raw.slice(group.end);
-  if (/\s$/.test(before) && /^[ \t]/.test(resolved)) resolved = resolved.replace(/^[ \t]+/, "");
-  if (/\s$/.test(resolved) && /^[ \t]/.test(after)) resolved = resolved.replace(/[ \t]+$/, "");
+  // A "~" that joined two macros is a space too: next to a kept space it
+  // would double the gap.
+  if (/\s$/.test(before) && /^[ \t~]/.test(resolved)) resolved = resolved.replace(/^[ \t~]+/, "");
+  if (/[\s~]$/.test(resolved) && /^[ \t]/.test(after)) resolved = resolved.replace(/[ \t~]+$/, "");
   if (!resolved && /\s$/.test(before) && /^[ \t]/.test(after)) after = after.replace(/^[ \t]+/, "");
   return saveBlock({
     path: body.path,
