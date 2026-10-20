@@ -23,7 +23,7 @@ import {
   resolveExecutable,
   spawnPlan,
 } from "./agent-providers.mjs";
-import { isInside, loadReviewConfig } from "./config.mjs";
+import { isInside, loadReviewConfig, renameIntoPlace } from "./config.mjs";
 import { loadEnvFile } from "./env.mjs";
 import {
   APP_ID, APP_NAME, CONFIG_NAME, ENV, TEMP_PREFIX, appVersion, hostFromEnvironment, resolveStateDir,
@@ -210,7 +210,7 @@ async function atomicWrite(target, text) {
   try {
     await fs.writeFile(temporary, text, { encoding: "utf8", ...(mode === null ? {} : { mode }) });
     if (mode !== null) await fs.chmod(temporary, mode);
-    await fs.rename(temporary, destination);
+    await renameIntoPlace(temporary, destination);
   } catch (error) {
     await fs.rm(temporary, { force: true }).catch(() => {});
     throw error;

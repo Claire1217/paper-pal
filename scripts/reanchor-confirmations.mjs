@@ -19,7 +19,7 @@ import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadReviewConfig } from "../config.mjs";
+import { loadReviewConfig, renameIntoPlace } from "../config.mjs";
 import { loadEnvFile } from "../env.mjs";
 import { APP_NAME, resolveStateDir } from "../names.mjs";
 
@@ -147,7 +147,12 @@ await fs.copyFile(statePath, backup);
 for (const item of repaired) Object.assign(item.selection, item.next);
 // Same write-temp-then-rename as the server, so a reader never sees half a file.
 const temporary = `${statePath}.reanchor-${process.pid}-${randomBytes(6).toString("hex")}.tmp`;
-await fs.writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-await fs.rename(temporary, statePath);
+try {
+  await fs.writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await renameIntoPlace(temporary, statePath);
+} catch (error) {
+  await fs.rm(temporary, { force: true }).catch(() => {});
+  throw error;
+}
 console.log(`\nRewrote ${repaired.length} anchors. Previous state saved to ${path.basename(backup)}.`);
 console.log("Restart the server so it reloads the review state.");

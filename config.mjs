@@ -51,6 +51,24 @@ export function isInside(parent, child) {
   return relative !== ".." && !relative.startsWith(`..${path.sep}`);
 }
 
+// Moves a finished temp file over its target. On Windows that rename fails for
+// a moment with EPERM, EACCES or EBUSY while another handle has the target open
+// (a concurrent read of the same state file), so it is retried a few times with
+// a growing pause. Elsewhere the first error is final. `rename` is a parameter
+// so the retry can be tested on any platform.
+const TRANSIENT_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+export async function renameIntoPlace(from, to, { platform = process.platform, rename = fs.rename } = {}) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      if (platform !== "win32" || attempt >= 6 || !TRANSIENT_RENAME_CODES.has(error?.code)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 * attempt));
+    }
+  }
+}
+
 export const DEFAULT_PORT = 4317;
 
 // --port wins over PAPER_PAL_PORT; 0 asks the OS for a free port.

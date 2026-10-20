@@ -14,6 +14,9 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- On Windows, an agent run or another save could fail with "EPERM: operation
+  not permitted, rename" when the page read the same state file at that moment.
+  Paper Pal now retries the rename a few times before it reports an error.
 - **A caption edit could be written into a commented-out caption.** With
   `% \caption{Old}` above the real `\caption` of a table, the page showed the
   old caption, and an accepted caption rewrite changed the comment line while

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { after, describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 import { api, apiOk, appRoot, cleanupAll, configName, getDocument, makeProject, makeTempDir, runSetup, saveBlock, startServer, stateDirectory, trySymlink, waitFor } from "./helpers.mjs";
-import { isInside, loadReviewConfig } from "../config.mjs";
+import { isInside, loadReviewConfig, renameIntoPlace } from "../config.mjs";
 import { AGENT_PROVIDERS, buildAgentInvocation, childEnvironment, inspectAgentCommand, providerAvailability, redactSecrets, resolveExecutable } from "../agent-providers.mjs";
 
 after(cleanupAll);
@@ -164,6 +164,31 @@ describe("configuration", () => {
     assert.equal(config.agent.provider, "codex");
     assert.equal(config.codex.reviewLanguage, "en");
     assert.deepEqual(config.codex.entryPoints, ["main.tex"]);
+  });
+
+  it("retries a rename that Windows refuses for a moment, and only there", async () => {
+    // Real Windows sharing violations cannot be produced on other systems, so
+    // this checks the retry rule with a rename that fails a set number of times.
+    const flaky = (failures, code) => {
+      let calls = 0;
+      const rename = async () => {
+        calls += 1;
+        if (calls <= failures) throw Object.assign(new Error(code), { code });
+      };
+      return { rename, calls: () => calls };
+    };
+    const busy = flaky(3, "EPERM");
+    await renameIntoPlace("a", "b", { platform: "win32", rename: busy.rename });
+    assert.equal(busy.calls(), 4);
+    const stuck = flaky(100, "EBUSY");
+    await assert.rejects(renameIntoPlace("a", "b", { platform: "win32", rename: stuck.rename }), { code: "EBUSY" });
+    assert.equal(stuck.calls(), 6, "gives up after six tries");
+    const missing = flaky(1, "ENOENT");
+    await assert.rejects(renameIntoPlace("a", "b", { platform: "win32", rename: missing.rename }), { code: "ENOENT" });
+    assert.equal(missing.calls(), 1, "other errors are not retried");
+    const elsewhere = flaky(1, "EPERM");
+    await assert.rejects(renameIntoPlace("a", "b", { platform: "linux", rename: elsewhere.rename }), { code: "EPERM" });
+    assert.equal(elsewhere.calls(), 1, "only Windows retries");
   });
 
   it("isInside handles names that merely start with two dots", () => {
