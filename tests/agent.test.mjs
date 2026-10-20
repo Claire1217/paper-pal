@@ -221,6 +221,36 @@ describe("agent answers that need care", () => {
     assert.match(trace, /trace: Café résumé/);
     assert.doesNotMatch(trace, /�/);
   });
+
+  it("keeps a word the replacement means to double", async () => {
+    // The word before the selection opens the replacement, but the rest does
+    // not line up with the selection, so it is not an echo of that word.
+    const main = "\\documentclass{article}\n\\begin{document}\nHe argued that this claim was wrong from the start. The data we had collected were noisy.\n\\end{document}\n";
+    for (const [needle, replacementText] of [["this claim was wrong", "that claim was overstated"], ["collected were noisy", "had to be cleaned"]]) {
+      const project = await makeProject({ files: { "main.tex": main }, fakeAgent: true });
+      const answer = JSON.stringify({ replacementText, summary: "reworded", relatedChanges: [] });
+      const server = await startServer(project.root, { env: { FAKE_AGENT_ANSWER: answer } });
+      const created = await commentOn(server, "main.tex", needle, "Reword.");
+      await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+      const proposed = await waitForRequest(server, created.id, (request) => request.status === "proposed", "proposal");
+      assert.equal(proposed.proposal.replacementText, replacementText);
+      await server.stop();
+    }
+  });
+
+  it("still drops an echoed word when the replacement rewords the start of the selection", async () => {
+    const main = "\\documentclass{article}\n\\begin{document}\nOverall this is very good work overall. We use the old approach here.\n\\end{document}\n";
+    for (const [needle, replacementText, expected] of [["very good work", "is excellent work", "excellent work"], ["old approach", "the new method", "new method"]]) {
+      const project = await makeProject({ files: { "main.tex": main }, fakeAgent: true });
+      const answer = JSON.stringify({ replacementText, summary: "reworded", relatedChanges: [] });
+      const server = await startServer(project.root, { env: { FAKE_AGENT_ANSWER: answer } });
+      const created = await commentOn(server, "main.tex", needle, "Reword.");
+      await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+      const proposed = await waitForRequest(server, created.id, (request) => request.status === "proposed", "proposal");
+      assert.equal(proposed.proposal.replacementText, expected);
+      await server.stop();
+    }
+  });
 });
 
 describe("review progress after an accepted proposal", () => {
@@ -430,5 +460,171 @@ describe("agent switch and terminology", () => {
     await apiOk(server, "/api/document/review", { method: "POST", body: { path: "sections/02_related_work.tex" } });
     run = await lastRun(project);
     assert.match(run.promptHead, /suggestion in German/);
+  });
+});
+
+describe("agent queue and chat runs that overlap", () => {
+  after(cleanupAll);
+
+  it("runs a follow-up sent during a run again, without showing the first answer", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_SLEEP_MS: "2000" } });
+    const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Make it bolder.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    const first = await waitFor(() => lastRun(project).catch(() => null), { label: "first run to start" });
+    const followup = await api(server, "/api/request/followup", { method: "POST", body: { id: created.id, message: "Make it shorter instead." } });
+    assert.equal(followup.status, 202);
+    // The second run starts only after the first has ended; by then the first
+    // answer must not have been attached to the comment.
+    await waitFor(async () => (await lastRun(project).catch(() => first)).pid !== first.pid, { label: "second run to start" });
+    const between = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+    assert.equal(between.status, "pending");
+    assert.deepEqual(between.conversation.map((message) => message.role), ["user", "user"]);
+    // Wait for the end state itself: the proposal is attached one write before
+    // the assistant message (status "proposed", agent "validating" in between).
+    const proposed = await waitForRequest(server, created.id, (request) => request.status === "proposed" &&
+      request.agentStatus === "complete", "proposal for the follow-up");
+    assert.deepEqual(proposed.conversation.map((message) => message.role), ["user", "user", "assistant"]);
+    const task = JSON.parse(await fs.readFile(path.join(project.root, stateDirectory, "runs", created.id, "TASK.json"), "utf8"));
+    assert.deepEqual(task.conversation.map((message) => message.content), ["Make it bolder.", "Make it shorter instead."]);
+  });
+
+  it("answers a chat message sent right after Stop with a run of its own", async () => {
+    // With FAKE_AGENT_IGNORE_SIGTERM the stopped child lives on and answers;
+    // without it, it dies and leaves its stderr. Neither may reach the chat.
+    for (const ignoreSigterm of [false, true]) {
+      const project = await makeProject({ fakeAgent: true });
+      const env = { FAKE_AGENT_SLEEP_MS: "2500", ...(ignoreSigterm ? { FAKE_AGENT_IGNORE_SIGTERM: "1" } : {}) };
+      const server = await startServer(project.root, { env });
+      const session = await apiOk(server, "/api/chat/message", { method: "POST", body: { message: "first question" } });
+      const first = await waitFor(() => lastRun(project).catch(() => null), { label: "first chat run to start" });
+      await apiOk(server, "/api/chat/stop", { method: "POST", body: { sessionId: session.id } });
+      await apiOk(server, "/api/chat/message", { method: "POST", body: { sessionId: session.id, message: "second question" } });
+      // chatConcurrency is 1: the new run starts only once the stopped child is gone.
+      await waitFor(async () => (await lastRun(project).catch(() => first)).pid !== first.pid, { label: "second chat run to start" });
+      if (process.platform !== "win32") {
+        assert.throws(() => process.kill(first.pid, 0), "the stopped child exited before the next run started");
+      }
+      const answered = await waitFor(async () => {
+        const current = await apiOk(server, `/api/chat?id=${session.id}`);
+        return ["idle", "failed"].includes(current.status) ? current : null;
+      }, { label: "chat to settle" });
+      assert.equal(answered.status, "idle", answered.error);
+      assert.deepEqual(answered.messages.map((message) => message.role), ["user", "user", "assistant"]);
+      const second = await lastRun(project);
+      assert.notEqual(second.pid, first.pid, "the second message got a run of its own");
+      assert.equal(answered.messages[2].content, `fake chat answer (${second.stdinChars} prompt characters)`);
+      await server.stop();
+    }
+  });
+
+  it("lists a chat that finished after it was selected as finished", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_SLEEP_MS: "1500" } });
+    const first = await apiOk(server, "/api/chat/message", { method: "POST", body: { message: "question in the first chat" } });
+    await waitFor(() => lastRun(project).catch(() => null), { label: "chat run to start" });
+    // Opening another chat archives the running one; selecting it again
+    // brings it back while its run is still going.
+    await apiOk(server, "/api/chat/new", { method: "POST" });
+    await apiOk(server, "/api/chat/select", { method: "POST", body: { id: first.id } });
+    await waitFor(async () => {
+      const current = await apiOk(server, `/api/chat?id=${first.id}`);
+      if (current.status === "failed") throw new Error(current.error);
+      return current.status === "idle" && current.messages.length === 2;
+    }, { label: "chat answer" });
+    for (let index = 0; index < 2; index += 1) {
+      const listed = (await apiOk(server, "/api/chats")).find((item) => item.id === first.id);
+      assert.equal(listed.status, "idle");
+      assert.equal(listed.messageCount, 2);
+    }
+  });
+
+  it("updates or adds linked comments when the link search runs again", async () => {
+    const target = "Traffic noise peaks during the morning rush";
+    const linkAnswer = (comment) => JSON.stringify({ summary: "one other place", targets: [{ path: "sections/01_introduction.tex", selectedText: target, comment, reason: "It repeats the claim." }] });
+    const project = await makeProject({ fakeAgent: true });
+    // A fixed answer per server: restarting it lets each search return a new instruction.
+    const search = async (comment, action) => {
+      const server = await startServer(project.root, { env: { FAKE_AGENT_ANSWER: linkAnswer(comment) } });
+      const searches = (request) => (request?.conversation || []).filter((message) => message.kind === "link").length;
+      const before = searches((await apiOk(server, "/api/requests")).find((item) => item.id === source?.id));
+      await action(server);
+      const searched = await waitForRequest(server, source.id, (request) => request.status === "discussed" && searches(request) === before + 1, "link search");
+      const linked = (await apiOk(server, "/api/requests")).filter((item) => item.origin?.type === "linked-comment" && item.status === "pending");
+      return { server, searched, linked };
+    };
+    let source = null;
+    let { server, searched, linked } = await search("Check this too.", async (current) => {
+      source = await commentOn(current, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Remove this claim.", { responseMode: "link" });
+      await apiOk(current, "/api/request/process", { method: "POST", body: { id: source.id } });
+    });
+    assert.equal(linked.length, 1);
+    const firstLink = linked[0];
+    await server.stop();
+
+    // Not worked on yet: the same comment takes the new instruction.
+    ({ server, searched, linked } = await search("Delete the sentence.", (current) =>
+      apiOk(current, "/api/request/followup", { method: "POST", body: { id: source.id, message: "Look again." } })));
+    assert.deepEqual(linked.map((item) => [item.id, item.comment]), [[firstLink.id, "Delete the sentence."]]);
+    assert.deepEqual(searched.links, [firstLink.id]);
+    assert.deepEqual(searched.linkSearch.located.map((item) => item.id), [firstLink.id]);
+    // The author follows up on the linked comment; the agent (answering with
+    // the link-search JSON) fails, but the thread now carries the author's words.
+    await apiOk(server, "/api/request/followup", { method: "POST", body: { id: firstLink.id, message: "Only the second half." } });
+    await waitFor(async () => (await apiOk(server, "/api/requests")).find((item) => item.id === firstLink.id)?.agentStatus === "failed", { label: "linked comment run" });
+    await server.stop();
+
+    // Worked on: it keeps its thread, and the new instruction gets its own comment.
+    ({ server, searched, linked } = await search("Move it to the discussion.", (current) =>
+      apiOk(current, "/api/request/followup", { method: "POST", body: { id: source.id, message: "Once more." } })));
+    const kept = linked.find((item) => item.id === firstLink.id);
+    assert.equal(kept.comment, "Delete the sentence.");
+    assert.equal(kept.conversation.at(-1).content, "Only the second half.");
+    const added = linked.find((item) => item.id !== firstLink.id);
+    assert.equal(added.comment, "Move it to the discussion.");
+    assert.equal(added.selectedText, target);
+    assert.deepEqual(searched.links, [firstLink.id, added.id]);
+    assert.deepEqual(searched.linkSearch.located.map((item) => item.id), [added.id]);
+  });
+
+  it("answers a plain follow-up sent during a unit revision with the whole new answer", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    let server = await startServer(project.root);
+    const needle = "Bright streets are also loud streets.";
+    const created = await commentOn(server, "sections/01_introduction.tex", needle, "Louder.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    await waitForRequest(server, created.id, (request) => request.status === "proposed", "proposal");
+    await server.stop();
+    // Make it a grouped (structure) proposal of two units, as a structure plan would.
+    const requestFile = path.join(project.root, stateDirectory, "requests", `${created.id}.json`);
+    const stored = JSON.parse(await fs.readFile(requestFile, "utf8"));
+    stored.origin = { type: "structure" };
+    stored.proposal.replacementText = "First unit.\n\nSecond unit.";
+    await fs.writeFile(requestFile, `${JSON.stringify(stored, null, 2)}\n`);
+    server = await startServer(project.root, { env: { FAKE_AGENT_SLEEP_MS: "1500" } });
+    const grouped = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+    assert.equal(grouped.proposal.reviewUnits.length, 2);
+    const before = await lastRun(project);
+    await apiOk(server, "/api/request/followup", { method: "POST", body: { id: created.id, unitId: grouped.proposal.reviewUnits[0].id, message: "Shorter." } });
+    await waitFor(async () => (await lastRun(project).catch(() => before)).pid !== before.pid, { label: "unit revision to start" });
+    await apiOk(server, "/api/request/followup", { method: "POST", body: { id: created.id, message: "Start again from the source." } });
+    const proposed = await waitForRequest(server, created.id, (request) => request.status === "proposed" &&
+      request.conversation.at(-1).role === "assistant", "proposal for the plain follow-up");
+    // The agent upper-cases the selection: a whole answer, not one unit spliced into the old two.
+    assert.equal(proposed.proposal.replacementText, needle.toUpperCase());
+    assert.equal(proposed.pendingUnitRevision, undefined);
+  });
+
+  it("leaves no temp directory behind when a run fails before the agent starts", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    const server = await startServer(project.root, { privateTmp: true });
+    const needle = "Bright streets are also loud streets.";
+    const created = await commentOn(server, "sections/01_introduction.tex", needle, "Tighten.");
+    // The passage is gone by the time the run reads the request.
+    const file = path.join(project.root, "sections", "01_introduction.tex");
+    await fs.writeFile(file, (await fs.readFile(file, "utf8")).replace(needle, "Rewritten elsewhere."));
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    await waitFor(async () => (await apiOk(server, "/api/requests")).find((item) => item.id === created.id)?.agentStatus === "failed", { label: "failed run" });
+    assert.deepEqual(await fs.readdir(server.tmpDir), []);
   });
 });

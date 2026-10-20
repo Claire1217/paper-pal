@@ -14,6 +14,32 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- **A follow-up sent while the agent was still answering a comment was
+  dropped**, and the answer to the earlier instruction was shown as if it
+  replied to the follow-up. The comment now runs again with the follow-up once
+  the current run ends, and the earlier answer is discarded.
+- **A chat message sent right after Stop could fail with the stopped run's
+  output, or get the stopped run's reply.** Stop now frees the chat at once,
+  the new message gets a run of its own, and nothing from the stopped run is
+  written to the chat.
+- A proposal dropped a word that the replacement meant to double ("He argued
+  that" + "that claim…", "we had" + "had to…"), taking it for an echo of the
+  word before the selection. A repeated "that" or "had" is now kept unless the
+  other edge of the replacement echoes too; other echoed words are still
+  removed.
+- Running a link search again (a follow-up on a "Find linked" comment) placed a
+  second linked comment at every location it had already found. A linked
+  comment the agent has not worked on yet now takes the new instruction; one
+  that already has a reply or a follow-up keeps it, and the new instruction
+  gets its own comment beside it.
+- A plain follow-up sent while the agent was revising one unit of a grouped
+  proposal was answered with only that unit changed. It now gets a whole new
+  answer.
+- A chat that finished after it was selected from the list showed as
+  "interrupted" with an old message count. The leftover archive copy is
+  removed when a chat is selected, and is not listed.
+- An agent run that failed before the agent started (for example because the
+  commented passage was gone) left a temporary folder behind.
 - **A heading whose title ends in `\\` swallowed the paragraph below it**
   (`\section{Results\\}`), and the section was missing from the outline. The
   `}` after `\\` is no longer read as an escaped brace.
