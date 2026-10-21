@@ -409,6 +409,12 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   `doctor` now resolve it the way Node does.
 - Windows: a timed-out or cancelled agent run behind a `.cmd` shim is now
   ended with its whole process tree (`taskkill /T`).
+- When an agent run finished, the page could briefly show the proposal without
+  the agent's reply or its linked changes, because the comment was saved twice:
+  first as "proposed", then with the reply and the linked changes. The result
+  is now saved in one write, and the run is reported complete at the same
+  moment. A discussion answer and a link search are also reported complete
+  together with their answer, not after it.
 
 ### Added
 

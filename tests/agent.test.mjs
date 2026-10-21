@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { api, apiOk, cleanupAll, commentOn, getDocument, makeProject, saveBlock, startServer, stateDirectory, trySymlink, waitFor, waitForRequest } from "./helpers.mjs";
@@ -480,10 +481,7 @@ describe("agent queue and chat runs that overlap", () => {
     const between = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
     assert.equal(between.status, "pending");
     assert.deepEqual(between.conversation.map((message) => message.role), ["user", "user"]);
-    // Wait for the end state itself: the proposal is attached one write before
-    // the assistant message (status "proposed", agent "validating" in between).
-    const proposed = await waitForRequest(server, created.id, (request) => request.status === "proposed" &&
-      request.agentStatus === "complete", "proposal for the follow-up");
+    const proposed = await waitForRequest(server, created.id, (request) => request.status === "proposed", "proposal for the follow-up");
     assert.deepEqual(proposed.conversation.map((message) => message.role), ["user", "user", "assistant"]);
     const task = JSON.parse(await fs.readFile(path.join(project.root, stateDirectory, "runs", created.id, "TASK.json"), "utf8"));
     assert.deepEqual(task.conversation.map((message) => message.content), ["Make it bolder.", "Make it shorter instead."]);
@@ -629,6 +627,132 @@ describe("agent queue and chat runs that overlap", () => {
   });
 });
 
+describe("the end of an agent run, as readers see it", () => {
+  after(cleanupAll);
+
+  // Records every state of one request that a reader can see while its run
+  // ends: the request file read in a tight loop, /api/requests polled without
+  // pause, and /api/requests fetched on each SSE "request" event, as the page
+  // does. Stops once the listing shows the run as settled.
+  async function watchRunEnd(server, project, id, settled) {
+    const requestFile = path.join(project.root, stateDirectory, "requests", `${id}.json`);
+    const seen = { file: new Map(), api: new Map() };
+    const remember = (map, request) => {
+      if (request) map.set(JSON.stringify(request), request);
+    };
+    const listed = async () => (await apiOk(server, "/api/requests")).find((item) => item.id === id);
+    let done = false;
+    const events = [];
+    const sse = http.get({ host: "127.0.0.1", port: server.port, path: "/api/events" }, (response) => {
+      response.setEncoding("utf8");
+      let buffer = "";
+      response.on("data", (chunk) => {
+        buffer += chunk;
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop();
+        for (const part of parts) {
+          const data = part.match(/^event: request\ndata: (.*)$/m)?.[1];
+          if (data && JSON.parse(data).id === id) events.push(listed().then((request) => remember(seen.api, request)));
+        }
+      });
+    });
+    const loops = [
+      (async () => {
+        while (!done) {
+          try {
+            remember(seen.file, JSON.parse(await fs.readFile(requestFile, "utf8")));
+          } catch {
+            // Not written yet.
+          }
+        }
+      })(),
+      (async () => {
+        while (!done) remember(seen.api, await listed());
+      })(),
+    ];
+    try {
+      await apiOk(server, "/api/request/process", { method: "POST", body: { id } });
+      const end = await waitFor(async () => {
+        const request = await listed();
+        if (request?.agentStatus === "failed") throw new Error(`agent run failed: ${request.agentError}`);
+        return request && settled(request) ? request : null;
+      }, { intervalMs: 5, label: "run to settle" });
+      await Promise.all(events);
+      return { end, file: [...seen.file.values()], api: [...seen.api.values()] };
+    } finally {
+      done = true;
+      sse.destroy();
+      await Promise.all(loops);
+    }
+  }
+
+  const answered = (request) => (request.conversation || []).some((message) => message.role === "assistant");
+
+  // A proposal is shown with its reply, its linked changes and its warnings,
+  // or not at all; and the listing never calls it still running.
+  function assertWholeProposals(states, { linkedChanges = 0, linkedWarnings = 0, listing = false } = {}) {
+    const proposed = states.filter((request) => request.status === "proposed");
+    assert.ok(proposed.length, "the proposal was seen");
+    for (const request of proposed) {
+      const shown = JSON.stringify({ status: request.status, agentStatus: request.agentStatus, conversation: request.conversation?.length });
+      assert.ok(answered(request), `a proposal without its reply was visible: ${shown}`);
+      assert.equal((request.proposal.linkedChanges || []).length, linkedChanges, `linked changes: ${shown}`);
+      assert.equal((request.proposal.linkedWarnings || []).length, linkedWarnings, `linked warnings: ${shown}`);
+      if (listing) assert.equal(request.agentStatus, "complete", `a proposal was listed while its run was still going: ${shown}`);
+    }
+  }
+
+  it("shows a rewrite proposal only together with its reply", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_SLEEP_MS: "300" } });
+    for (let round = 0; round < 3; round += 1) {
+      const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", `Louder, round ${round}.`);
+      const seen = await watchRunEnd(server, project, created.id, (request) => request.status === "proposed" && request.agentStatus === "complete");
+      assert.ok(seen.file.some((request) => request.status === "pending"), "the request was watched before the run ended");
+      assertWholeProposals(seen.file);
+      assertWholeProposals(seen.api, { listing: true });
+      await apiOk(server, "/api/request/delete", { method: "POST", body: { id: created.id } });
+    }
+  });
+
+  it("shows a proposal with related changes only together with its reply, linked changes and warnings", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    const answer = JSON.stringify({
+      replacementText: "BRIGHT STREETS ARE ALSO LOUD STREETS.",
+      summary: "louder",
+      relatedChanges: [
+        { path: "sections/02_related_work.tex", selectedText: "Both lines of work treated noise as a nuisance variable and did not sample it.", replacementText: "Neither sampled noise.", summary: "test", reason: "test", required: true },
+        { path: "sections/03_method.tex", selectedText: "A sentence that is not in the file.", replacementText: "x", summary: "test", reason: "test" },
+      ],
+    });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_SLEEP_MS: "300", FAKE_AGENT_ANSWER: answer } });
+    for (let round = 0; round < 3; round += 1) {
+      const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", `Louder, round ${round}.`);
+      const seen = await watchRunEnd(server, project, created.id, (request) => request.status === "proposed" && request.agentStatus === "complete");
+      assert.ok(seen.file.some((request) => request.status === "pending"), "the request was watched before the run ended");
+      assertWholeProposals(seen.file, { linkedChanges: 1, linkedWarnings: 1 });
+      assertWholeProposals(seen.api, { linkedChanges: 1, linkedWarnings: 1, listing: true });
+      await apiOk(server, "/api/request/delete", { method: "POST", body: { id: created.id } });
+    }
+  });
+
+  it("shows a discussion answer and a link search only together with their reply", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_SLEEP_MS: "300" } });
+    for (const responseMode of ["discuss", "link"]) {
+      const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Is this right?", { responseMode });
+      const seen = await watchRunEnd(server, project, created.id, (request) => request.status === "discussed" && request.agentStatus === "complete");
+      for (const request of [...seen.file, ...seen.api].filter((item) => item.status === "discussed")) {
+        assert.ok(answered(request), `${responseMode}: an answer without its reply was visible`);
+      }
+      for (const request of seen.api.filter((item) => item.status === "discussed")) {
+        assert.equal(request.agentStatus, "complete", `${responseMode}: an answer was listed while its run was still going`);
+      }
+      await apiOk(server, "/api/request/delete", { method: "POST", body: { id: created.id } });
+    }
+  });
+});
+
 describe("linked change sets with several changes in one file", () => {
   const MAIN = "\\documentclass{article}\n\\begin{document}\n\\input{sec}\n\\input{other}\nMain body paragraph here.\n\\end{document}\n";
   const SEC = "Alpha opens the study.\n\nBeta opens the result.\n\nGamma paragraph to edit by link.\n";
@@ -647,11 +771,9 @@ describe("linked change sets with several changes in one file", () => {
       .map(([name, text]) => fs.writeFile(path.join(project.root, name), text, "utf8")));
   }
 
-  // The agent run writes "proposed" first and the linked changes (or their
-  // warnings) in a second write that also adds its answer to the conversation.
-  // Wait for that answer, or a test can read, or rewrite, the half-done request.
-  const waitForProposal = (target, id) => waitForRequest(target, id, (request) =>
-    request.status === "proposed" && (request.conversation || []).some((message) => message.role === "assistant"), "proposal");
+  // A run writes its proposal, reply and linked changes (or their warnings) in
+  // one write, so "proposed" is the end state.
+  const waitForProposal = (target, id) => waitForRequest(target, id, (request) => request.status === "proposed", "proposal");
 
   // The agent attaches at most one related change per file, so a set with
   // several changes in one file is written into the stored request, as an

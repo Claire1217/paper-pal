@@ -5143,13 +5143,15 @@ function trimBoundaryEcho(replacementText, originalText, before, after) {
   return result;
 }
 
-async function attachGeneratedProposal(requestId, replacementText, summary) {
-  const { target, value: request } = await readRewriteRequest(requestId);
+// Sets the agent's proposal on the request in memory. The caller adds the
+// reply and the linked changes and writes the request once, so no reader sees
+// a proposal without them.
+async function attachGeneratedProposal(request, replacementText, summary) {
   const unitRevision = request.status === "proposed"
     && request.pendingUnitRevision
     && request.proposal;
   if (request.status !== "pending" && !unitRevision) {
-    throw new Error(`This review request is no longer waiting for a proposal: ${requestId}`);
+    throw new Error(`This review request is no longer waiting for a proposal: ${request.id}`);
   }
   const absolutePath = resolveDocument(request.path);
   const source = await fs.readFile(absolutePath, "utf8");
@@ -5178,8 +5180,7 @@ async function attachGeneratedProposal(requestId, replacementText, summary) {
     replacementText,
   };
   delete request.rejectedAt;
-  await atomicWrite(target, `${JSON.stringify(request, null, 2)}\n`);
-  return { target, value: request };
+  return request;
 }
 
 // Full source of the file being edited, so the agent can resolve references
@@ -5902,7 +5903,6 @@ async function generateCodexProposal(requestId) {
         discussedRequest.conversation.push({ role: "assistant", kind: "discussion", ...discussedRequest.discussion });
         discussedRequest.status = "discussed";
         delete discussedRequest.regenerationRequestedAt;
-        await atomicWrite(requestTarget, `${JSON.stringify(discussedRequest, null, 2)}\n`);
         await writeCodexRunJson(requestId, "RESULT.json", discussedRequest.discussion);
         await writeCodexRunJson(requestId, "STATUS.json", {
           taskId: requestId,
@@ -5912,6 +5912,9 @@ async function generateCodexProposal(requestId) {
           model: activeModel,
           reasoningEffort,
         });
+        // The run is complete the moment the answer is on disk, with no await
+        // in between, so the listing never shows the answer as still running.
+        await atomicWrite(requestTarget, `${JSON.stringify(discussedRequest, null, 2)}\n`);
         codexRunPayload(requestId, "complete");
         return;
       }
@@ -5939,7 +5942,6 @@ async function generateCodexProposal(requestId) {
         linkedRequest.conversation.push({ role: "assistant", kind: "link", ...linkedRequest.linkSearch });
         linkedRequest.status = "discussed";
         delete linkedRequest.regenerationRequestedAt;
-        await atomicWrite(requestTarget, `${JSON.stringify(linkedRequest, null, 2)}\n`);
         await writeCodexRunJson(requestId, "RESULT.json", linkedRequest.linkSearch);
         await writeCodexRunJson(requestId, "STATUS.json", {
           taskId: requestId,
@@ -5949,6 +5951,7 @@ async function generateCodexProposal(requestId) {
           model: activeModel,
           reasoningEffort,
         });
+        await atomicWrite(requestTarget, `${JSON.stringify(linkedRequest, null, 2)}\n`);
         codexRunPayload(requestId, "complete");
         return;
       }
@@ -5956,19 +5959,17 @@ async function generateCodexProposal(requestId) {
       let replacementText = proposal.replacementText;
       const summary = typeof proposal.summary === "string" ? proposal.summary.trim() : "";
       if (!summary) throw new Error(`${providerLabel(provider)} returned no proposal summary.`);
+      // The request file stays as it was while the proposal is validated; it
+      // is written once below, with the proposal, the reply and the linked
+      // changes, so no reader sees a proposal without them.
       codexRunPayload(requestId, "validating");
-      await attachGeneratedProposal(requestId, replacementText, summary);
-      if (cancelledCodexRequests.has(requestId)) {
-        const error = new Error("The agent run was cancelled because the comment was deleted.");
-        error.code = "CODEX_CANCELLED";
-        throw error;
-      }
       const { target: requestTarget, value: proposedRequest } = await readRewriteRequest(requestId);
       if (cancelledCodexRequests.has(requestId) || proposedRequest.status === "deleted") {
         const error = new Error("The agent run was cancelled because the comment was deleted.");
         error.code = "CODEX_CANCELLED";
         throw error;
       }
+      await attachGeneratedProposal(proposedRequest, replacementText, summary);
       if (proposedRequest.pendingUnitRevision) {
         const pending = proposedRequest.pendingUnitRevision;
         const references = await cachedProjectReferences();
@@ -6029,7 +6030,6 @@ async function generateCodexProposal(requestId) {
         createdAt: new Date().toISOString(),
       });
       delete proposedRequest.regenerationRequestedAt;
-      await atomicWrite(requestTarget, `${JSON.stringify(proposedRequest, null, 2)}\n`);
       await writeCodexRunJson(requestId, "RESULT.json", proposal);
       await writeCodexRunJson(requestId, "STATUS.json", {
         taskId: requestId,
@@ -6039,6 +6039,7 @@ async function generateCodexProposal(requestId) {
         model: activeModel,
         reasoningEffort,
       });
+      await atomicWrite(requestTarget, `${JSON.stringify(proposedRequest, null, 2)}\n`);
       codexRunPayload(requestId, "complete");
     });
   } finally {
