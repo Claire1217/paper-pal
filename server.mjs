@@ -3975,6 +3975,8 @@ function spawnCaptured(command, args, { cwd, env = childEnvironment(), input = n
     // fragment (see agentFailureMessage).
     let stdoutCut = false;
     let stderrCut = false;
+    // The start of a stderr line that has not ended yet (see fatalAgentError).
+    let stderrLine = "";
     let child;
     let timer;
     const finish = (value) => {
@@ -4011,6 +4013,16 @@ function spawnCaptured(command, args, { cwd, env = childEnvironment(), input = n
     child.stderr?.on("data", (chunk) => {
       stderr = `${stderr}${chunk}`;
       if (stderr.length > 32000) [stderr, stderrCut] = [stderr.slice(-32000), true];
+      // Whole lines only: a pipe read can end inside one. Only a line's start
+      // matters, so a long line (a dumped prompt) is not kept whole.
+      const lines = `${stderrLine}${chunk}`.split("\n");
+      stderrLine = lines.pop().slice(0, 4000);
+      if (lines.some(fatalAgentError)) {
+        // Ended the way a timeout ends it; the message comes from the stderr
+        // captured so far, which ends with the error line.
+        terminateChild(child);
+        finish({ code: -1, fatal: true });
+      }
     });
     child.on("error", (error) => {
       if (!stderr) stderr = error?.code === "ENOENT"
@@ -4025,6 +4037,36 @@ function spawnCaptured(command, args, { cwd, env = childEnvironment(), input = n
       finish({ code: -1, error: new Error(message), timedOut: true, timeoutMessage: message });
     }, timeoutMs);
   });
+}
+
+// What kind of error a CLI's line names. The failure message picks its hint
+// with these, and fatalAgentError decides with them which line ends a run.
+const signInErrorPattern = /unauthori[sz]ed|\b401\b|not logged in|log ?in (?:required|again)|please (?:run )?.{0,20}log ?in|invalid api key|authentication/i;
+const newerVersionErrorPattern = /requires? a newer version|(?:upgrade|update) (?:to )?the latest (?:app|cli|version)|unsupported (?:cli|client) version/i;
+const networkErrorPattern = /waiting for network|failed to connect|connection failed|stream disconnected|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|fetch failed/i;
+// A 5xx only next to a status word, so that "500 ms" is not one.
+const serverErrorPattern = /\bstatus\b["']?\s*[:=]?\s*(?:50[0234]|529)\b|\bHTTP(?:\/[\d.]+)?\s+(?:50[0234]|529)\b|\b(?:50[0234]|529)\s+(?:Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out|Overloaded)\b|\bAPI Error:\s*(?:50[0234]|529)\b|server_error|service unavailable|overloaded_error|the server had an error/i;
+// Errors the CLI's own retry may still get past, besides network and server errors.
+const retryableErrorPattern = /\b(?:408|409|429)\b|rate.?limit|too many requests|overloaded|timed? ?out|reconnecting|retrying/i;
+const httpStatusPattern = /\bstatus\b["']?\s*[:=]?\s*(\d{3})\b|\bHTTP(?:\/[\d.]+)?\s+(\d{3})\b/i;
+const fatalErrorTypePattern = /\b(?:invalid_request|authentication|permission|not_found)_error\b/;
+const fatalErrorTextPattern = /not logged in|please (?:run )?.{0,20}log ?in|invalid api key/i;
+
+// Codex prints some errors at once and then keeps reconnecting for half a
+// minute before it exits, although no retry can succeed: a model this CLI
+// version cannot use, a missing sign-in or key, a refused request (HTTP 400,
+// 401, 403, 404). Such a line ends the run at once. Only the CLI's own error
+// lines count ("ERROR: ...", as in agentFailureMessage), not timestamped log
+// lines, which include errors it recovers from. Whatever a retry may still
+// cure never ends a run early: rate limits, overload, server errors, timeouts
+// and network trouble.
+function fatalAgentError(line) {
+  const text = line.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "").trim();
+  if (!/^error\b\s*:/i.test(text)) return false;
+  if (retryableErrorPattern.test(text) || networkErrorPattern.test(text) || serverErrorPattern.test(text)) return false;
+  const status = httpStatusPattern.exec(text);
+  if (status) return [400, 401, 403, 404].includes(Number(status[1] || status[2]));
+  return fatalErrorTypePattern.test(text) || newerVersionErrorPattern.test(text) || fatalErrorTextPattern.test(text);
 }
 
 // What a failed agent run tells the author. A CLI's stderr is a trace, not a
@@ -4096,14 +4138,13 @@ function agentFailureMessage(result, fallback, { timeoutSetting = "agent.timeout
   // The API adapter already ends its messages with what to check.
   const hint = /\.env\b/.test(said) ? "" : /unexpected argument|unrecognized (?:option|argument)|unknown (?:option|argument)/i.test(said)
     ? "The installed CLI does not accept an option Paper Pal passes: update the CLI to its current version, then Retry."
-    : /unauthori[sz]ed|\b401\b|not logged in|log ?in (?:required|again)|please (?:run )?.{0,20}log ?in|invalid api key|authentication/i.test(said)
+    : signInErrorPattern.test(said)
     ? "The backend is not signed in: sign in to its CLI in a terminal (or check the key in .env), then Retry."
-    : /requires? a newer version|(?:upgrade|update) (?:to )?the latest (?:app|cli|version)|unsupported (?:cli|client) version/i.test(said)
+    : newerVersionErrorPattern.test(said)
     ? "This needs a newer version of the CLI: update it (or choose another model or backend), then Retry."
-    : /waiting for network|failed to connect|connection failed|stream disconnected|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|fetch failed/i.test(said)
+    : networkErrorPattern.test(said)
       ? "The backend could not reach its service: check the network connection or proxy, then Retry."
-      // A 5xx only next to a status word, so that "500 ms" is not one.
-      : /\bstatus\b["']?\s*[:=]?\s*(?:50[0234]|529)\b|\bHTTP(?:\/[\d.]+)?\s+(?:50[0234]|529)\b|\b(?:50[0234]|529)\s+(?:Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out|Overloaded)\b|\bAPI Error:\s*(?:50[0234]|529)\b|server_error|service unavailable|overloaded_error|the server had an error/i.test(said)
+      : serverErrorPattern.test(said)
       ? "The service had an error on its side: wait a minute, then Retry."
       : result?.timedOut
         ? `Retry, or raise ${timeoutSetting} in ${CONFIG_NAME} and restart.`

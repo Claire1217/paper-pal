@@ -73,7 +73,15 @@ writeFileSync(path.join(logRoot, "last-run.json"), JSON.stringify({
 if (!process.env.FAKE_AGENT_NO_ECHO) process.stderr.write(`fake-agent instruction: ${task?.instruction ?? ""}\n`);
 
 // A real CLI traces on stderr: the echoed prompt, then timestamped log lines.
-if (process.env.FAKE_AGENT_STDERR) process.stderr.write(`${process.env.FAKE_AGENT_STDERR}\n`);
+// FAKE_AGENT_STDERR_SPLIT=1 writes it in two parts, cut in the middle of its
+// first line, so the server reads that line in two chunks.
+if (process.env.FAKE_AGENT_STDERR && process.env.FAKE_AGENT_STDERR_SPLIT) {
+  const text = `${process.env.FAKE_AGENT_STDERR}\n`;
+  const cut = Math.max(1, Math.floor(text.indexOf("\n") / 2));
+  process.stderr.write(text.slice(0, cut));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  process.stderr.write(text.slice(cut));
+} else if (process.env.FAKE_AGENT_STDERR) process.stderr.write(`${process.env.FAKE_AGENT_STDERR}\n`);
 // FAKE_AGENT_STDERR_FILL=<n> follows it with n characters of neutral log
 // lines, so that the server's stderr cap cuts FAKE_AGENT_STDERR at a known point.
 if (process.env.FAKE_AGENT_STDERR_FILL) {

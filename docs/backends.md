@@ -99,6 +99,11 @@ sign-in state the same way, without those variables.
 - A run that reads other files can take longer than a minute. The comment card
   counts the seconds; if runs end in "timed out", raise `agent.timeoutMs`
   (default 90000) in `.paper-pal.json` and restart.
+- When the CLI prints an error that no retry can fix (HTTP 400, 401, 403 or
+  404: a model the installed CLI version cannot use, a missing sign-in or key,
+  a refused request), the run ends at once with that error, even if the CLI
+  would keep reconnecting. Rate limits, overload, server errors, timeouts and
+  network errors are left to the CLI's own retries.
 
 ## Claude Code CLI (`claude`)
 

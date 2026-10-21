@@ -471,6 +471,101 @@ describe("agent timeouts", () => {
   });
 });
 
+// A CLI that gets an error it cannot recover from (an outdated CLI, a missing
+// sign-in) prints it at once but may keep retrying for half a minute before it
+// exits. The run ends on that line; errors a retry can cure do not end it.
+describe("agent errors that no retry can fix", () => {
+  after(cleanupAll);
+
+  const newerVersion = 'ERROR: {"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The \'example-model\' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again."}}';
+  const isAlive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // Starts one rewrite against a fake agent that prints `stderr` and then keeps
+  // running for `sleepMs`; returns the card's message and how long it took.
+  // `helper` starts a long-lived grandchild, which also keeps the fake agent
+  // itself alive: use it only where the run must end some other way.
+  const timedRun = async ({ stderr, sleepMs, split = false, helper = false, config = {} }) => {
+    const project = await makeProject({ fakeAgent: true, config });
+    const server = await startServer(project.root, {
+      env: {
+        FAKE_AGENT_STDERR: stderr, FAKE_AGENT_SLEEP_MS: String(sleepMs), FAKE_AGENT_EXIT: "1",
+        ...(split ? { FAKE_AGENT_STDERR_SPLIT: "1" } : {}),
+        ...(helper ? { FAKE_AGENT_GRANDCHILD: "1" } : {}),
+      },
+    });
+    const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Tighten.");
+    const started = Date.now();
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    const failed = await waitFor(async () => {
+      const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+      return request?.agentStatus === "failed" ? request : null;
+    }, { timeoutMs: sleepMs + 15_000, label: "failed run" });
+    return { message: failed.agentError, elapsedMs: Date.now() - started, project };
+  };
+
+  it("ends a proposal run on the CLI's error line instead of waiting for its retries", async () => {
+    const { message, elapsedMs, project } = await timedRun({ stderr: newerVersion, sleepMs: 20_000, split: true, helper: true });
+    assert.ok(elapsedMs < 5000, `the run ended after ${elapsedMs} ms`);
+    assert.equal(message, "The 'example-model' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again. This needs a newer version of the CLI: update it (or choose another model or backend), then Retry.");
+    if (process.platform === "win32") return;
+    const { pid, grandchildPid } = await startedRun(project);
+    await waitFor(() => !isAlive(pid) && !isAlive(grandchildPid), { timeoutMs: 9000, label: "the agent and its helpers to be gone" });
+  });
+
+  it("ends a run on a sign-in or permission error in plain text", async () => {
+    for (const stderr of [
+      "ERROR: unexpected status 401 Unauthorized: Missing bearer",
+      "Error: Invalid API key. Please run /login.",
+      'ERROR: {"type":"error","error":{"type":"permission_error","message":"This key may not use the requested model."}}',
+    ]) {
+      const { message, elapsedMs } = await timedRun({ stderr, sleepMs: 20_000 });
+      assert.ok(elapsedMs < 5000, `${stderr}: the run ended after ${elapsedMs} ms`);
+      assert.doesNotMatch(message, /timed out/);
+    }
+  });
+
+  it("lets the CLI retry errors that may still pass", async () => {
+    const retryable = [
+      'ERROR: {"type":"error","status":429,"error":{"type":"rate_limit_error","message":"Rate limit reached, try again in 2 s."}}',
+      'ERROR: {"type":"error","status":529,"error":{"type":"overloaded_error","message":"Overloaded"}}',
+      "ERROR: unexpected status 503 Service Unavailable: no healthy upstream",
+      "ERROR: Reconnecting... 2/5 (unexpected status 404 Not Found: stream disconnected before completion)",
+      "Error: request timed out",
+      "ERROR: stream disconnected before completion: error sending request: ECONNRESET",
+      "Error: getaddrinfo ENOTFOUND api.example.invalid",
+      'ERROR: {"type":"error","status":408,"error":{"type":"invalid_request_error","message":"Request timeout."}}',
+    ];
+    const { message, elapsedMs } = await timedRun({ stderr: retryable.join("\n"), sleepMs: 2500 });
+    assert.ok(elapsedMs >= 2500, `the run ended after ${elapsedMs} ms, before the agent exited`);
+    assert.doesNotMatch(message, /timed out after/);
+    // And a run that never exits still ends by its own timeout.
+    const timedOut = await timedRun({ stderr: retryable[0], sleepMs: 20_000, config: { agent: { timeoutMs: 2000 } } });
+    assert.ok(timedOut.elapsedMs >= 2000, `the run ended after ${timedOut.elapsedMs} ms`);
+    assert.match(timedOut.message, /^Codex rewrite timed out after 2 s\./);
+  });
+
+  it("ends a chat turn on the same error", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_STDERR: newerVersion, FAKE_AGENT_SLEEP_MS: "20000", FAKE_AGENT_EXIT: "1" } });
+    const started = Date.now();
+    const session = await apiOk(server, "/api/chat/message", { method: "POST", body: { message: "What is this paper about?" } });
+    const failed = await waitFor(async () => {
+      const current = await apiOk(server, `/api/chat?id=${session.id}`);
+      return current.status === "failed" ? current : null;
+    }, { timeoutMs: 30_000, label: "chat failure" });
+    const elapsedMs = Date.now() - started;
+    assert.ok(elapsedMs < 5000, `the chat turn ended after ${elapsedMs} ms`);
+    assert.match(failed.error, /requires a newer version of Codex.* This needs a newer version of the CLI: update it/);
+  });
+});
+
 describe("agent process groups", { skip: process.platform === "win32" }, () => {
   after(cleanupAll);
 

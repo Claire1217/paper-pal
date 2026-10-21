@@ -14,6 +14,15 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- A run that failed with an error no retry can fix (for example "The model
+  requires a newer version of Codex", or a missing sign-in) kept the comment
+  card waiting for about half a minute, because the CLI printed the error at
+  once and then kept reconnecting before it exited. The run now ends as soon
+  as the CLI prints such an error (HTTP 400, 401, 403 or 404), its process
+  group is stopped, and the card shows the same message and hint as before.
+  This applies to proposals, link and discussion runs, chat turns and section
+  reviews. Rate limits, overload, server errors, timeouts and network errors
+  still get the CLI's own retries.
 - Clicking a paragraph with a proposal hid its red/green: the paragraph
   switched to source editing and showed the old text until it lost focus, so
   the proposal looked gone. The red/green now stays until Accept (the paragraph
