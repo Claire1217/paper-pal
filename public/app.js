@@ -173,6 +173,11 @@ const state = {
   renderPending: false,
   suppressRender: false,
   lastPointerInEditorPane: false,
+  // Set while a primary button pressed in the manuscript, or any key, is held:
+  // the selection is still being made, so the toolbar waits for the release.
+  selectionPointerDown: false,
+  selectionKeyDown: false,
+  selectionToolbarPending: false,
   mathUnavailableNotified: false,
   chatRenderSignature: null,
   review: null,
@@ -4411,6 +4416,70 @@ function showSelectionToolbar() {
   dom.selectionToolbar.hidden = false;
 }
 
+// The toolbar appears once a selection is finished, not on every
+// selectionchange of a drag or a held key, where it would slide along with the
+// pointer. "hide": a new press in the manuscript, the old selection may still
+// be there. "clear": the selection is gone (or lives in a text field), so
+// state.selection goes too; hasLocalDocumentState() reads it. "show": the
+// press that made the selection was released. "settle": show once the
+// selection stops changing. "wait": not finished yet, or nothing to do.
+function selectionToolbarAction({ eventType, pointerDown = false, keyDown = false, pending = false, collapsed = false, inField = false }) {
+  if (eventType === "pointerdown") return "hide";
+  if (collapsed || inField) return "clear";
+  if (eventType === "selectionchange") return pointerDown || keyDown ? "wait" : "settle";
+  // Only a press that began in the manuscript: a release on the toolbar's own
+  // buttons must not bring the toolbar back over the composer it just opened.
+  if (["pointerup", "mouseup", "touchend"].includes(eventType)) return pointerDown ? "show" : "wait";
+  // Only a key that changed the selection (Shift+arrows, Cmd/Ctrl+A).
+  if (eventType === "keyup") return pending ? "settle" : "wait";
+  if (eventType === "pointercancel") return "settle";
+  return "wait";
+}
+
+function updateSelectionToolbar(eventType) {
+  if (eventType === "keydown") {
+    state.selectionKeyDown = true;
+    return;
+  }
+  if (eventType === "blur") {
+    state.selectionPointerDown = false;
+    state.selectionKeyDown = false;
+    return;
+  }
+  if (eventType === "pointerdown") state.selectionPointerDown = true;
+  const selection = window.getSelection();
+  const active = document.activeElement;
+  const action = selectionToolbarAction({
+    eventType,
+    pointerDown: state.selectionPointerDown,
+    keyDown: state.selectionKeyDown,
+    pending: state.selectionToolbarPending,
+    collapsed: !selection || selection.rangeCount === 0 || selection.isCollapsed,
+    inField: active instanceof Element && Boolean(active.closest("input, textarea, select")),
+  });
+  if (["pointerup", "mouseup", "touchend", "pointercancel"].includes(eventType)) state.selectionPointerDown = false;
+  if (eventType === "keyup") state.selectionKeyDown = false;
+  if (action === "wait") {
+    if (eventType === "selectionchange") state.selectionToolbarPending = true;
+    return;
+  }
+  state.selectionToolbarPending = false;
+  clearTimeout(showSelectionToolbar.timer);
+  if (action === "hide" || action === "clear") {
+    dom.selectionToolbar.hidden = true;
+    if (action === "clear") state.selection = null;
+  }
+  showSelectionToolbar.timer = setTimeout(() => {
+    // A new drag or key press began in the meantime; its release shows it.
+    if (state.selectionPointerDown || state.selectionKeyDown) {
+      if (action === "show" || action === "settle") state.selectionToolbarPending = true;
+      return;
+    }
+    if (action === "show" || action === "settle") showSelectionToolbar();
+    flushPendingRender();
+  }, action === "show" ? 0 : action === "settle" ? 150 : 80);
+}
+
 async function confirmCurrentSelection() {
   const selection = state.selection;
   if (!selection) return;
@@ -7111,17 +7180,20 @@ async function start() {
   }
 }
 
-document.addEventListener("selectionchange", () => {
-  clearTimeout(showSelectionToolbar.timer);
-  showSelectionToolbar.timer = setTimeout(() => {
-    showSelectionToolbar();
-    flushPendingRender();
-  }, 80);
-});
+document.addEventListener("selectionchange", () => updateSelectionToolbar("selectionchange"));
 dom.editor.addEventListener("focusout", () => setTimeout(flushPendingRender, 0));
 document.addEventListener("pointerdown", (event) => {
   state.lastPointerInEditorPane = event.target instanceof Element && Boolean(event.target.closest(".editor-pane"));
+  if (state.lastPointerInEditorPane && event.button === 0) updateSelectionToolbar("pointerdown");
 }, true);
+// On window, in the capture phase: a drag may end over the sidebar, and no
+// handler there can stop the release from reaching this.
+for (const type of ["pointerup", "mouseup", "touchend", "pointercancel", "keydown", "keyup"]) {
+  window.addEventListener(type, () => updateSelectionToolbar(type), true);
+}
+// Not in the capture phase, which would also catch every element's blur. A
+// release that happens in another window never arrives, so forget the press.
+window.addEventListener("blur", () => updateSelectionToolbar("blur"));
 
 // Cmd/Ctrl+Z here is a server-side undo: it can revert an accepted proposal in
 // another file. It therefore only fires while the author is demonstrably
