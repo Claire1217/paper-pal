@@ -4,7 +4,7 @@
   "description": "A local, review-first AI writing workspace for LaTeX manuscripts.",
   "license": "MIT",
   "type": "module",
-  "homepage": "https://github.com/claire1217/paper-pal#readme",
+  "homepage": "https://claire1217.github.io/paper-pal/",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/claire1217/paper-pal.git"

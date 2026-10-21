@@ -1,0 +1,7 @@
+# Crawlers read robots.txt only at the root of a host, so this file takes
+# effect only if the site is ever served from its own domain. On
+# claire1217.github.io/paper-pal/ the sitemap below is submitted by hand.
+User-agent: *
+Allow: /
+
+Sitemap: https://claire1217.github.io/paper-pal/sitemap.xml

@@ -1,0 +1,73 @@
+name: Pages
+
+# Publishes the landing page (site/) to https://claire1217.github.io/paper-pal/.
+# Needs Settings > Pages > Source set to "GitHub Actions". Until then a run
+# fails at "Configure Pages", and nothing else is affected.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "docs/images/**"
+      - "public/fonts/**"
+      - "llms.txt"
+      - "README*"
+      - "package.json"
+      - "scripts/pages.mjs"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# The build only reads the repository; the deploy job gets the Pages rights.
+permissions:
+  contents: read
+
+# One deployment at a time, and a running one is allowed to finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # Copies site/ and the images, fonts and llms.txt it references, writes the
+      # version from package.json into the page, and fails if the page's FAQ no
+      # longer matches the README's or a referenced file is missing.
+      - name: Assemble the site
+        run: node scripts/pages.mjs _site
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5

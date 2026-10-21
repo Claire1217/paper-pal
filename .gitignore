@@ -21,3 +21,6 @@ examples/**/*.pdf
 # Local review state created inside a manuscript project
 .paper-pal/
 .draft-review/
+
+# Local build of the landing page (node scripts/pages.mjs _site)
+_site/
