@@ -1339,9 +1339,14 @@ describe("a paragraph with a proposal waiting", () => {
     "showProposalWaitingToast",
     "isImeComposing",
     "proposalLockedEditTarget",
+    "handleLockedEditAttempt",
     "activateBlockEditing",
+    "handleBlockPointerUp",
     "deactivateBlockEditing",
     "releaseStrayEditingBlocks",
+    "blockHasProposal",
+    "setBlockProposalLock",
+    "redrawResolvedProposalBlocks",
   ];
 
   class FakeElement {
@@ -1354,13 +1359,18 @@ describe("a paragraph with a proposal waiting", () => {
         add: (name) => this.classes.add(name),
         remove: (name) => this.classes.delete(name),
         contains: (name) => this.classes.has(name),
+        toggle: (name, on) => (on ? this.classes.add(name) : this.classes.delete(name)),
       };
+      this.attributes = new Map([["role", "textbox"]]);
       this.parent = parent;
       this.editor = editor;
       this.focused = 0;
       this.replaced = 0;
     }
     focus() { this.focused += 1; }
+    getAttribute(name) { return this.attributes.get(name) ?? null; }
+    setAttribute(name, value) { this.attributes.set(name, String(value)); }
+    removeAttribute(name) { this.attributes.delete(name); }
     replaceChildren() { this.replaced += 1; }
     contains(node) {
       for (let current = node; current; current = current.parent) if (current === this) return true;
@@ -1379,7 +1389,7 @@ describe("a paragraph with a proposal waiting", () => {
     }
   }
 
-  function lockPage({ blocks = [], selectionNode = null, activeElement = null, editing = null, savePromise = null } = {}) {
+  function lockPage({ blocks = [], selectionNode = null, activeElement = null, editing = null, savePromise = null, requests = [] } = {}) {
     const toasts = [];
     const body = new FakeElement({ blockId: "" });
     body.classes.clear();
@@ -1387,23 +1397,33 @@ describe("a paragraph with a proposal waiting", () => {
     editor.classes.clear();
     editor.contains = (node) => FakeElement.prototype.contains.call(editor, node);
     editor.querySelectorAll = (selector) => {
+      if (selector === ".editor-block[data-review-locked='true']") return blocks.filter((element) => element.dataset.reviewLocked === "true");
       assert.equal(selector, ".editor-block.is-editing");
       return blocks.filter((element) => element.classes.has("is-editing"));
     };
     for (const element of blocks) element.parent = editor;
     const page = loadAppFunctions(LOCK_FUNCTIONS, {
       Element: FakeElement,
-      state: { proposalWaitingToastAt: new Map(), editing, savePromise },
+      state: { proposalWaitingToastAt: new Map(), editing, savePromise, requests, document: { path: "main.tex" } },
       dom: { editor },
       document: { body, activeElement },
-      window: { getSelection: () => ({ anchorNode: page.selectionNode }) },
+      window: { getSelection: () => ({ anchorNode: page.selectionNode, isCollapsed: true, rangeCount: page.selectionNode ? 1 : 0 }) },
       Date: { now: () => page.now },
       showToast: (message) => toasts.push(message),
       canonicalCaretOffset: () => 3,
       prepareEditableMath() {},
       restoreEditableCaret() {},
-      renderReviewText() { throw new Error("a locked paragraph must not be re-rendered"); },
+      requestAnimationFrame: (callback) => callback(),
+      renderReviewText: (element) => {
+        if (!page.allowRedraw) throw new Error("a locked paragraph must not be re-rendered");
+        page.redrawn.push(element.dataset.blockId);
+      },
+      requestRangeForBlock: (request, block) => (request.blocks.includes(block.index) ? { start: 0, end: 1 } : null),
+      applyCommentMarkers() {},
+      positionCommentCards() {},
+      renderMath() {},
     });
+    page.redrawn = [];
     page.selectionNode = selectionNode;
     page.now = 1_000;
     page.toasts = toasts;
@@ -1442,13 +1462,15 @@ describe("a paragraph with a proposal waiting", () => {
     }
   });
 
-  it("keeps the preview of a locked paragraph on a click and says why once", () => {
+  it("keeps the preview of a locked paragraph on a click, without a toast", () => {
     const first = new FakeElement({ locked: true, blockId: "p1" });
     // The second paragraph of a proposal that spans two.
     const second = new FakeElement({ locked: true, blockId: "p2" });
     const page = lockPage({ blocks: [first, second] });
-    page.activateBlockEditing(first);
-    page.activateBlockEditing(first);
+    const click = (element) => page.handleBlockPointerUp({ button: 0, currentTarget: element, target: { closest: () => null } });
+    click(first);
+    click(first);
+    click(second);
     page.activateBlockEditing(second);
     for (const element of [first, second]) {
       assert.equal(element.contentEditable, "false");
@@ -1458,16 +1480,14 @@ describe("a paragraph with a proposal waiting", () => {
       assert.equal(element.replaced, 0);
       assert.equal(element.focused, 0);
     }
-    assert.deepEqual(plain(page.toasts), [
-      "This paragraph has a proposal waiting: Accept or Reject it first, or edit the proposal in its card.",
-      "This paragraph has a proposal waiting: Accept or Reject it first, or edit the proposal in its card.",
-    ]);
+    // A reading click (or the first half of a double-click) says nothing.
+    assert.deepEqual(page.toasts, []);
   });
 
   it("edits a paragraph again once its proposal is gone", () => {
     const element = new FakeElement({ locked: false });
     const page = lockPage({ blocks: [element] });
-    page.activateBlockEditing(element);
+    page.handleBlockPointerUp({ button: 0, currentTarget: element, target: { closest: () => null } });
     assert.equal(element.contentEditable, "true");
     assert.equal(element.classes.has("is-editing"), true);
     assert.equal(element.focused, 1);
@@ -1483,6 +1503,61 @@ describe("a paragraph with a proposal waiting", () => {
     assert.equal(page.showProposalWaitingToast(other, 2_500), true);
     assert.equal(page.showProposalWaitingToast(element, 11_000), true);
     assert.equal(page.toasts.length, 3);
+  });
+
+  it("shows the toast from the document key and paste listener, throttled", () => {
+    const locked = new FakeElement({ locked: true });
+    const page = lockPage({ blocks: [locked] });
+    page.selectionNode = { parentElement: locked, parent: locked };
+    page.handleLockedEditAttempt({ type: "keydown", key: "x", target: page.body });
+    page.handleLockedEditAttempt({ type: "paste", target: page.body });
+    page.handleLockedEditAttempt({ type: "keydown", key: "ArrowLeft", target: page.body });
+    assert.deepEqual(plain(page.toasts), ["This paragraph has a proposal waiting: Accept or Reject it first, or edit the proposal in its card."]);
+    page.now += 10_000;
+    page.handleLockedEditAttempt({ type: "paste", target: page.body });
+    assert.equal(page.toasts.length, 2);
+  });
+
+  it("tells a screen reader a locked paragraph is read-only", () => {
+    const page = lockPage();
+    const element = new FakeElement();
+    page.setBlockProposalLock(element, { index: 4 }, true);
+    assert.equal(element.dataset.reviewLocked, "true");
+    assert.equal(element.classes.has("has-proposal"), true);
+    assert.equal(element.getAttribute("aria-readonly"), "true");
+    assert.equal(element.getAttribute("aria-label"), "Paper paragraph 5, read-only while a proposal waits");
+    page.setBlockProposalLock(element, { index: 4 }, false);
+    assert.equal(element.dataset.reviewLocked, "false");
+    assert.equal(element.classes.has("has-proposal"), false);
+    assert.equal(element.getAttribute("aria-readonly"), null);
+    assert.equal(element.getAttribute("aria-label"), "Editable paper paragraph 5");
+    page.setBlockProposalLock(element, { index: 4, editable: false }, false);
+    assert.equal(element.getAttribute("aria-readonly"), "true");
+    assert.equal(element.getAttribute("aria-label"), "Read-only paper paragraph 5");
+  });
+
+  it("redraws a paragraph whose proposal was resolved while the full render waits", () => {
+    const resolved = new FakeElement({ locked: true, blockId: "r", block: { index: 0 } });
+    const waiting = new FakeElement({ locked: true, blockId: "w", block: { index: 1 } });
+    const focused = new FakeElement({ locked: true, blockId: "f", block: { index: 2 } });
+    const page = lockPage({
+      blocks: [resolved, waiting, focused],
+      activeElement: focused,
+      requests: [{ path: "main.tex", status: "proposed", blocks: [1] }],
+    });
+    page.allowRedraw = true;
+    page.redrawResolvedProposalBlocks();
+    assert.deepEqual(plain(page.redrawn), ["r"]);
+    assert.equal(resolved.dataset.reviewLocked, "false");
+    assert.equal(resolved.getAttribute("aria-label"), "Editable paper paragraph 1");
+    assert.equal(waiting.dataset.reviewLocked, "true");
+    assert.equal(focused.dataset.reviewLocked, "true", "a paragraph holding the focus waits for the full render");
+    // A proposal unit being edited holds the render back entirely.
+    page.state.proposalEditing = { element: {} };
+    page.redrawn.length = 0;
+    page.state.requests = [];
+    page.redrawResolvedProposalBlocks();
+    assert.deepEqual(plain(page.redrawn), []);
   });
 
   it("answers a key press or paste aimed at a locked paragraph with the toast", () => {

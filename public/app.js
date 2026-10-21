@@ -2636,6 +2636,48 @@ function blockHasProposal(block, path) {
   );
 }
 
+// The lock and what a screen reader is told about it: a paragraph with a
+// proposal waiting is read-only until the proposal is accepted or rejected.
+function setBlockProposalLock(section, block, locked) {
+  section.dataset.reviewLocked = locked ? "true" : "false";
+  section.classList.toggle("has-proposal", locked);
+  if (section.getAttribute("role") !== "textbox") return;
+  const number = block.index + 1;
+  if (locked || block.editable === false) section.setAttribute("aria-readonly", "true");
+  else section.removeAttribute("aria-readonly");
+  section.setAttribute("aria-label", locked
+    ? `Paper paragraph ${number}, read-only while a proposal waits`
+    : block.editable === false ? `Read-only paper paragraph ${number}` : `Editable paper paragraph ${number}`);
+}
+
+// A deferred render waits for an edit or a selection to finish. A paragraph
+// whose proposal was just accepted elsewhere, rejected or deleted holds no
+// edit (it was locked), so it is redrawn now instead of keeping a red/green
+// that no longer applies. One that holds the selection or the focus waits.
+function redrawResolvedProposalBlocks() {
+  if (state.proposalEditing || state.proposalSaving) return;
+  const selection = window.getSelection();
+  const range = selection?.rangeCount && !selection.isCollapsed ? selection.getRangeAt(0) : null;
+  let redrawn = false;
+  for (const element of dom.editor.querySelectorAll(".editor-block[data-review-locked='true']")) {
+    const block = element.reviewBlock;
+    if (!block || blockHasProposal(block, state.document?.path)) continue;
+    if (range && (element.contains(range.startContainer) || element.contains(range.endContainer))) continue;
+    if (element.contains(document.activeElement)) continue;
+    if (block.semantic || element.getAttribute("role") !== "textbox") continue;
+    element.replaceChildren();
+    renderReviewText(element, block);
+    setBlockProposalLock(element, block, false);
+    redrawn = true;
+  }
+  if (!redrawn) return;
+  applyCommentMarkers();
+  requestAnimationFrame(() => {
+    positionCommentCards();
+    renderMath();
+  });
+}
+
 function renderDocument() {
   const payload = state.document;
   if (!payload) return;
@@ -2699,8 +2741,7 @@ function renderDocument() {
     }
     const hasProposal = blockHasProposal(block, payload.path);
     section.contentEditable = "false";
-    section.dataset.reviewLocked = hasProposal ? "true" : "false";
-    if (hasProposal) section.classList.add("has-proposal");
+    setBlockProposalLock(section, block, hasProposal);
     section.spellcheck = true;
     section.dataset.blockIndex = String(block.index);
     section.dataset.blockId = block.id;
@@ -2718,11 +2759,7 @@ function renderDocument() {
     if (!renderStructure(section, block)) {
       section.setAttribute("role", "textbox");
       section.setAttribute("aria-multiline", "true");
-      section.setAttribute("aria-label", `Editable paper paragraph ${block.index + 1}`);
-      if (block.editable === false) {
-        section.setAttribute("aria-readonly", "true");
-        section.setAttribute("aria-label", `Read-only paper paragraph ${block.index + 1}`);
-      }
+      setBlockProposalLock(section, block, hasProposal);
       renderReviewText(section, block);
       section.addEventListener("input", handleBlockInput);
       section.addEventListener("keydown", handleBlockKeydown);
@@ -3482,7 +3519,7 @@ function blockMayEnterEditing(element) {
 
 const PROPOSAL_WAITING_TOAST_INTERVAL = 5000;
 
-// Once per paragraph every few seconds: repeated clicks must not stack toasts.
+// Once per paragraph every few seconds: held or repeated keys must not stack toasts.
 function showProposalWaitingToast(element, now = Date.now()) {
   const key = element.dataset.blockId || element.dataset.blockIndex || "";
   const shownAt = state.proposalWaitingToastAt.get(key);
@@ -3510,11 +3547,17 @@ function proposalLockedEditTarget(event) {
   return element;
 }
 
+// Document-level keydown and paste.
+function handleLockedEditAttempt(event) {
+  const element = proposalLockedEditTarget(event);
+  if (element) showProposalWaitingToast(element);
+}
+
+// A click in a locked paragraph is a reading click (placing the caret, the
+// first half of a double-click): it is ignored without a note, which would
+// also replace whatever the toast was saying.
 function activateBlockEditing(element) {
-  if (!blockMayEnterEditing(element)) {
-    if (element?.dataset.reviewLocked === "true") showProposalWaitingToast(element);
-    return;
-  }
+  if (!blockMayEnterEditing(element)) return;
   const caretOffset = canonicalCaretOffset(element);
   prepareEditableMath(element);
   element.contentEditable = "true";
@@ -3553,8 +3596,8 @@ function releaseStrayEditingBlocks() {
 }
 
 function handleBlockPointerUp(event) {
-  // A click inside an editable proposal unit edits that unit; it is not an
-  // attempt to edit the host paragraph, so it gets no "proposal waiting" note.
+  // A click inside an editable proposal unit edits that unit; it must not flip
+  // the host paragraph into source editing.
   if (event.button !== 0 || event.target.closest("[data-citation-keys], [data-reference-key], [data-review-request-id], button, .proposal-review-block")) return;
   const element = event.currentTarget;
   requestAnimationFrame(() => {
@@ -6171,6 +6214,7 @@ async function refreshRequests() {
   // destroy a selection or an edit in progress; otherwise it is replayed later.
   renderRequestLists();
   renderDocumentWhenSafe();
+  if (state.renderPending) redrawResolvedProposalBlocks();
   if (state.chat && !dom.codexChat.hidden) renderChatSession({ scroll: false });
 }
 
@@ -7236,12 +7280,7 @@ dom.editor.addEventListener("focusout", () => setTimeout(() => {
   releaseStrayEditingBlocks();
   flushPendingRender();
 }, 0));
-for (const type of ["keydown", "paste"]) {
-  document.addEventListener(type, (event) => {
-    const element = proposalLockedEditTarget(event);
-    if (element) showProposalWaitingToast(element);
-  });
-}
+for (const type of ["keydown", "paste"]) document.addEventListener(type, handleLockedEditAttempt);
 document.addEventListener("pointerdown", (event) => {
   state.lastPointerInEditorPane = event.target instanceof Element && Boolean(event.target.closest(".editor-pane"));
   if (selectionPress(event)) updateSelectionToolbar("pointerdown");
