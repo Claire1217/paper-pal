@@ -27,7 +27,8 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   only fill in when there are none, and very long lines and the cut-off start of
   a long trace are ignored. The advice is chosen from the lines shown only, and
   a "requires a newer version" error now says to update the CLI or choose
-  another model or backend.
+  another model or backend, and a 5xx or "overloaded" error from the service
+  says to wait a minute and retry.
 - **Accept could rewrite a paragraph the author never commented on.** When a
   commented sentence also appears elsewhere in the file and the commented copy
   was edited away, the comment moved to the other copy, and Accept rewrote that

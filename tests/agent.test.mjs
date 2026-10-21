@@ -394,7 +394,17 @@ describe("agent timeouts", () => {
         'ERROR: {"type":"error","status":500,"error":{"type":"server_error","message":"The server had an error processing the request."}}',
       ].join("\n"),
     });
-    assert.equal(retried, "The server had an error processing the request.", "the CLI's own error line, alone");
+    assert.equal(retried, "The server had an error processing the request. The service had an error on its side: wait a minute, then Retry.", "the CLI's own error line, alone");
+  });
+
+  it("says to wait for a service error, and only next to a status word", async () => {
+    const overloaded = await failedRun({ FAKE_AGENT_STDERR: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}' });
+    assert.match(overloaded, /API Error: 529 .* The service had an error on its side: wait a minute, then Retry\.$/);
+    const unavailable = await failedRun({ FAKE_AGENT_STDERR: "ERROR: unexpected status 503 Service Unavailable: no healthy upstream" });
+    assert.match(unavailable, /status 503 Service Unavailable.* The service had an error on its side/);
+    const slow = await failedRun({ FAKE_AGENT_STDERR: "Error: the request timed out after 500 ms" });
+    assert.match(slow, /timed out after 500 ms/);
+    assert.doesNotMatch(slow, /service had an error/);
   });
 
   it("shows a complete one-line error that starts in lower case", async () => {

@@ -4056,6 +4056,8 @@ function agentFailureMessage(result, fallback, { timeoutSetting = "agent.timeout
     const error = marked ? cliError(text) : null;
     return {
       text: error?.message || text,
+      // The JSON envelope still counts for the hint: its status says what failed.
+      envelope: error ? text : "",
       marked,
       apiError: Boolean(error?.api),
       filler: Boolean(logged) || /reconnecting|retrying/i.test(text),
@@ -4088,9 +4090,9 @@ function agentFailureMessage(result, fallback, { timeoutSetting = "agent.timeout
     ? pick([errors.filter((entry) => entry.apiError || entry === errors.at(-1)), errors])
     : telling.length
       ? pick([telling.filter((entry) => !entry.filler), telling])
-      : lines.slice(-3)).map((entry) => entry.text);
-  const detail = chosen.join(" ").slice(0, 600);
-  const said = chosen.join("\n");
+      : lines.slice(-3));
+  const detail = chosen.map((entry) => entry.text).join(" ").slice(0, 600);
+  const said = chosen.map((entry) => [entry.text, entry.envelope].filter(Boolean).join("\n")).join("\n");
   // The API adapter already ends its messages with what to check.
   const hint = /\.env\b/.test(said) ? "" : /unexpected argument|unrecognized (?:option|argument)|unknown (?:option|argument)/i.test(said)
     ? "The installed CLI does not accept an option Paper Pal passes: update the CLI to its current version, then Retry."
@@ -4100,6 +4102,9 @@ function agentFailureMessage(result, fallback, { timeoutSetting = "agent.timeout
     ? "This needs a newer version of the CLI: update it (or choose another model or backend), then Retry."
     : /waiting for network|failed to connect|connection failed|stream disconnected|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|fetch failed/i.test(said)
       ? "The backend could not reach its service: check the network connection or proxy, then Retry."
+      // A 5xx only next to a status word, so that "500 ms" is not one.
+      : /\bstatus\b["']?\s*[:=]?\s*(?:50[0234]|529)\b|\bHTTP(?:\/[\d.]+)?\s+(?:50[0234]|529)\b|\b(?:50[0234]|529)\s+(?:Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out|Overloaded)\b|\bAPI Error:\s*(?:50[0234]|529)\b|server_error|service unavailable|overloaded_error|the server had an error/i.test(said)
+      ? "The service had an error on its side: wait a minute, then Retry."
       : result?.timedOut
         ? `Retry, or raise ${timeoutSetting} in ${CONFIG_NAME} and restart.`
         : "";
