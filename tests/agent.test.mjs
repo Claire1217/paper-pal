@@ -613,6 +613,34 @@ describe("agent queue and chat runs that overlap", () => {
     assert.equal(proposed.pendingUnitRevision, undefined);
   });
 
+  it("does not bring back a proposal rejected during a unit revision", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    let server = await startServer(project.root);
+    const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Louder.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
+    await waitForRequest(server, created.id, (request) => request.status === "proposed", "proposal");
+    await server.stop();
+    // A grouped (structure) proposal of two units, as a structure plan would make.
+    const requestFile = path.join(project.root, stateDirectory, "requests", `${created.id}.json`);
+    const stored = JSON.parse(await fs.readFile(requestFile, "utf8"));
+    stored.origin = { type: "structure" };
+    stored.proposal.replacementText = "First unit.\n\nSecond unit.";
+    await fs.writeFile(requestFile, `${JSON.stringify(stored, null, 2)}\n`);
+    server = await startServer(project.root, { env: { FAKE_AGENT_SLEEP_MS: "1500" } });
+    const grouped = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+    const before = await lastRun(project);
+    await apiOk(server, "/api/request/followup", { method: "POST", body: { id: created.id, unitId: grouped.proposal.reviewUnits[0].id, message: "Shorter." } });
+    await waitFor(async () => (await lastRun(project).catch(() => before)).pid !== before.pid, { label: "unit revision to start" });
+    await apiOk(server, "/api/request/reject", { method: "POST", body: { id: created.id } });
+    // The revision's answer arrives for a rejected comment and is refused.
+    const ended = await waitFor(async () => {
+      const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
+      return request?.agentStatus === "failed" ? request : null;
+    }, { label: "unit revision to end" });
+    assert.equal(ended.status, "rejected");
+    assert.equal(ended.proposal, undefined, "the rejected proposal does not come back");
+  });
+
   it("leaves no temp directory behind when a run fails before the agent starts", async () => {
     const project = await makeProject({ fakeAgent: true });
     const server = await startServer(project.root, { privateTmp: true });
@@ -630,17 +658,47 @@ describe("agent queue and chat runs that overlap", () => {
 describe("the end of an agent run, as readers see it", () => {
   after(cleanupAll);
 
-  // Records every state of one request that a reader can see while its run
-  // ends: the request file read in a tight loop, /api/requests polled without
-  // pause, and /api/requests fetched on each SSE "request" event, as the page
-  // does. Stops once the listing shows the run as settled.
+  const FINISHED_RUN = new Set(["PROPOSED", "DISCUSSED", "LINKED"]);
+
+  // Records every state of one request, and of the linked comments it creates,
+  // that a reader can see while its run ends: the files read in a tight loop,
+  // /api/requests polled without pause, and /api/requests fetched on each SSE
+  // "request" event, as the page does. Stops once the listing shows the run
+  // as settled. Each snapshot is { source, children, runState }.
   async function watchRunEnd(server, project, id, settled) {
-    const requestFile = path.join(project.root, stateDirectory, "requests", `${id}.json`);
+    const requestsRoot = path.join(project.root, stateDirectory, "requests");
+    const statusFile = path.join(project.root, stateDirectory, "runs", id, "STATUS.json");
     const seen = { file: new Map(), api: new Map() };
-    const remember = (map, request) => {
-      if (request) map.set(JSON.stringify(request), request);
+    const remember = (map, snapshot) => {
+      if (snapshot.source) map.set(JSON.stringify(snapshot), snapshot);
     };
-    const listed = async () => (await apiOk(server, "/api/requests")).find((item) => item.id === id);
+    const readJson = async (file) => {
+      try {
+        return JSON.parse(await fs.readFile(file, "utf8"));
+      } catch {
+        return null;
+      }
+    };
+    // Read in the reverse order of the server's writes (run status, linked
+    // comments, then the request itself), so anything seen first was on disk
+    // before what is read after it.
+    const fileSnapshot = async () => {
+      const runState = (await readJson(statusFile))?.state ?? null;
+      const children = [];
+      for (const name of await fs.readdir(requestsRoot)) {
+        if (!name.endsWith(".json") || name === `${id}.json`) continue;
+        const request = await readJson(path.join(requestsRoot, name));
+        if (request?.origin?.sourceRequestId === id) children.push(request);
+      }
+      return { runState, children, source: await readJson(path.join(requestsRoot, `${id}.json`)) };
+    };
+    const apiSnapshot = async () => {
+      const requests = await apiOk(server, "/api/requests");
+      return {
+        source: requests.find((item) => item.id === id),
+        children: requests.filter((item) => item.origin?.sourceRequestId === id),
+      };
+    };
     let done = false;
     const events = [];
     const sse = http.get({ host: "127.0.0.1", port: server.port, path: "/api/events" }, (response) => {
@@ -651,32 +709,29 @@ describe("the end of an agent run, as readers see it", () => {
         const parts = buffer.split("\n\n");
         buffer = parts.pop();
         for (const part of parts) {
-          const data = part.match(/^event: request\ndata: (.*)$/m)?.[1];
-          if (data && JSON.parse(data).id === id) events.push(listed().then((request) => remember(seen.api, request)));
+          if (/^event: request$/m.test(part)) events.push(apiSnapshot().then((snapshot) => remember(seen.api, snapshot)));
         }
       });
     });
     const loops = [
       (async () => {
-        while (!done) {
-          try {
-            remember(seen.file, JSON.parse(await fs.readFile(requestFile, "utf8")));
-          } catch {
-            // Not written yet.
-          }
-        }
+        while (!done) remember(seen.file, await fileSnapshot());
       })(),
       (async () => {
-        while (!done) remember(seen.api, await listed());
+        while (!done) remember(seen.api, await apiSnapshot());
       })(),
     ];
     try {
       await apiOk(server, "/api/request/process", { method: "POST", body: { id } });
       const end = await waitFor(async () => {
-        const request = await listed();
-        if (request?.agentStatus === "failed") throw new Error(`agent run failed: ${request.agentError}`);
-        return request && settled(request) ? request : null;
+        const snapshot = await apiSnapshot();
+        remember(seen.api, snapshot);
+        const { source } = snapshot;
+        if (source?.agentStatus === "failed") throw new Error(`agent run failed: ${source.agentError}`);
+        return source && settled(source) ? source : null;
       }, { intervalMs: 5, label: "run to settle" });
+      // The end state itself, in case the loops were mid-read when it arrived.
+      remember(seen.file, await fileSnapshot());
       await Promise.all(events);
       return { end, file: [...seen.file.values()], api: [...seen.api.values()] };
     } finally {
@@ -687,18 +742,44 @@ describe("the end of an agent run, as readers see it", () => {
   }
 
   const answered = (request) => (request.conversation || []).some((message) => message.role === "assistant");
+  const shown = (request) => JSON.stringify({ status: request.status, agentStatus: request.agentStatus, conversation: request.conversation?.length });
+
+  // STATUS.json says the run finished only once its answer is on disk: a
+  // crash in between must read as an interrupted run on restart.
+  function assertRunStatusLast(snapshots) {
+    assert.ok(snapshots.some(({ source }) => source.status === "pending"), "the request was watched before the run ended");
+    for (const { runState, source } of snapshots) {
+      if (FINISHED_RUN.has(runState)) assert.notEqual(source.status, "pending", `STATUS.json said ${runState} before the request was written`);
+    }
+  }
 
   // A proposal is shown with its reply, its linked changes and its warnings,
   // or not at all; and the listing never calls it still running.
-  function assertWholeProposals(states, { linkedChanges = 0, linkedWarnings = 0, listing = false } = {}) {
-    const proposed = states.filter((request) => request.status === "proposed");
+  function assertWholeProposals(snapshots, { linkedChanges = 0, linkedWarnings = 0, listing = false } = {}) {
+    const proposed = snapshots.map(({ source }) => source).filter((request) => request.status === "proposed");
     assert.ok(proposed.length, "the proposal was seen");
     for (const request of proposed) {
-      const shown = JSON.stringify({ status: request.status, agentStatus: request.agentStatus, conversation: request.conversation?.length });
-      assert.ok(answered(request), `a proposal without its reply was visible: ${shown}`);
-      assert.equal((request.proposal.linkedChanges || []).length, linkedChanges, `linked changes: ${shown}`);
-      assert.equal((request.proposal.linkedWarnings || []).length, linkedWarnings, `linked warnings: ${shown}`);
-      if (listing) assert.equal(request.agentStatus, "complete", `a proposal was listed while its run was still going: ${shown}`);
+      assert.ok(answered(request), `a proposal without its reply was visible: ${shown(request)}`);
+      assert.equal((request.proposal.linkedChanges || []).length, linkedChanges, `linked changes: ${shown(request)}`);
+      assert.equal((request.proposal.linkedWarnings || []).length, linkedWarnings, `linked warnings: ${shown(request)}`);
+      if (listing) assert.equal(request.agentStatus, "complete", `a proposal was listed while its run was still going: ${shown(request)}`);
+    }
+  }
+
+  // A discussion answer or a link search is shown with its reply; a linked
+  // comment only once its source lists it.
+  function assertWholeAnswers(snapshots, label, { listing = false } = {}) {
+    for (const { source, children } of snapshots) {
+      if (source.status === "discussed") {
+        assert.ok(answered(source), `${label}: an answer without its reply was visible: ${shown(source)}`);
+        if (listing) assert.equal(source.agentStatus, "complete", `${label}: an answer was listed while its run was still going`);
+      }
+      for (const child of children) {
+        assert.equal(source.status, "discussed", `${label}: linked comment ${child.id} was visible while its source was ${shown(source)}`);
+        assert.ok(answered(source), `${label}: linked comment ${child.id} was visible before its source's reply`);
+        assert.ok((source.links || []).includes(child.id), `${label}: linked comment ${child.id} was visible before its source listed it`);
+        assert.ok(source.linkSearch.located.some((item) => item.id === child.id), `${label}: linked comment ${child.id} is missing from linkSearch`);
+      }
     }
   }
 
@@ -708,7 +789,7 @@ describe("the end of an agent run, as readers see it", () => {
     for (let round = 0; round < 3; round += 1) {
       const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", `Louder, round ${round}.`);
       const seen = await watchRunEnd(server, project, created.id, (request) => request.status === "proposed" && request.agentStatus === "complete");
-      assert.ok(seen.file.some((request) => request.status === "pending"), "the request was watched before the run ended");
+      assertRunStatusLast(seen.file);
       assertWholeProposals(seen.file);
       assertWholeProposals(seen.api, { listing: true });
       await apiOk(server, "/api/request/delete", { method: "POST", body: { id: created.id } });
@@ -729,7 +810,7 @@ describe("the end of an agent run, as readers see it", () => {
     for (let round = 0; round < 3; round += 1) {
       const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", `Louder, round ${round}.`);
       const seen = await watchRunEnd(server, project, created.id, (request) => request.status === "proposed" && request.agentStatus === "complete");
-      assert.ok(seen.file.some((request) => request.status === "pending"), "the request was watched before the run ended");
+      assertRunStatusLast(seen.file);
       assertWholeProposals(seen.file, { linkedChanges: 1, linkedWarnings: 1 });
       assertWholeProposals(seen.api, { linkedChanges: 1, linkedWarnings: 1, listing: true });
       await apiOk(server, "/api/request/delete", { method: "POST", body: { id: created.id } });
@@ -742,14 +823,59 @@ describe("the end of an agent run, as readers see it", () => {
     for (const responseMode of ["discuss", "link"]) {
       const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Is this right?", { responseMode });
       const seen = await watchRunEnd(server, project, created.id, (request) => request.status === "discussed" && request.agentStatus === "complete");
-      for (const request of [...seen.file, ...seen.api].filter((item) => item.status === "discussed")) {
-        assert.ok(answered(request), `${responseMode}: an answer without its reply was visible`);
-      }
-      for (const request of seen.api.filter((item) => item.status === "discussed")) {
-        assert.equal(request.agentStatus, "complete", `${responseMode}: an answer was listed while its run was still going`);
-      }
+      assertRunStatusLast(seen.file);
+      assertWholeAnswers(seen.file, responseMode);
+      assertWholeAnswers(seen.api, responseMode, { listing: true });
       await apiOk(server, "/api/request/delete", { method: "POST", body: { id: created.id } });
     }
+  });
+
+  it("shows the comments a link search adds only after their source lists them", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    const targets = [
+      { path: "sections/01_introduction.tex", selectedText: "Traffic noise peaks during the morning rush", comment: "Check this too.", reason: "It repeats the claim." },
+      { path: "sections/02_related_work.tex", selectedText: "Both lines of work treated noise as a nuisance variable and did not sample it.", comment: "And this.", reason: "Same claim." },
+    ];
+    const answer = JSON.stringify({ summary: "two other places", targets });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_SLEEP_MS: "300", FAKE_AGENT_ANSWER: answer } });
+    for (let round = 0; round < 3; round += 1) {
+      const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", `Find the others, round ${round}.`, { responseMode: "link" });
+      const seen = await watchRunEnd(server, project, created.id, (request) => request.status === "discussed" && request.agentStatus === "complete");
+      assert.equal(seen.end.links.length, 2, "both linked comments were created");
+      assertRunStatusLast(seen.file);
+      assertWholeAnswers(seen.file, "link");
+      assertWholeAnswers(seen.api, "link", { listing: true });
+      for (const child of [created.id, ...seen.end.links]) {
+        await apiOk(server, "/api/request/delete", { method: "POST", body: { id: child } });
+      }
+    }
+  });
+
+  it("after a restart, shows an answer whose run status was not updated yet, and a run cut off before its answer as interrupted", async () => {
+    const project = await makeProject({ fakeAgent: true });
+    let server = await startServer(project.root);
+    const answeredComment = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Louder.");
+    await apiOk(server, "/api/request/process", { method: "POST", body: { id: answeredComment.id } });
+    await waitForRequest(server, answeredComment.id, (request) => request.status === "proposed" && request.agentStatus === "complete", "proposal");
+    const pendingComment = await commentOn(server, "sections/02_related_work.tex", "Both lines of work treated noise as a nuisance variable and did not sample it.", "Shorter.");
+    await server.stop();
+    // A crash right after the request was written and before STATUS.json was
+    // updated leaves the status of the run's start next to the answer. A crash
+    // before the request was written leaves it next to a pending comment.
+    const drafting = (id) => fs.mkdir(path.join(project.root, stateDirectory, "runs", id), { recursive: true }).then(() =>
+      fs.writeFile(path.join(project.root, stateDirectory, "runs", id, "STATUS.json"), JSON.stringify({ taskId: id, state: "DRAFTING", startedAt: new Date().toISOString() })));
+    await drafting(answeredComment.id);
+    await drafting(pendingComment.id);
+    server = await startServer(project.root);
+    const requests = await apiOk(server, "/api/requests");
+    const answeredAfter = requests.find((item) => item.id === answeredComment.id);
+    assert.equal(answeredAfter.status, "proposed");
+    assert.ok(answered(answeredAfter));
+    assert.equal(answeredAfter.agentStatus, undefined, "a written answer is not shown as a failed run");
+    const pendingAfter = requests.find((item) => item.id === pendingComment.id);
+    assert.equal(pendingAfter.status, "pending");
+    assert.equal(pendingAfter.agentStatus, "failed");
+    assert.match(pendingAfter.agentError, /interrupted/);
   });
 });
 

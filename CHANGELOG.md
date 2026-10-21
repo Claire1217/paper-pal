@@ -414,7 +414,12 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   first as "proposed", then with the reply and the linked changes. The result
   is now saved in one write, and the run is reported complete at the same
   moment. A discussion answer and a link search are also reported complete
-  together with their answer, not after it.
+  together with their answer, not after it. The comments a link search adds
+  are saved after their source comment lists them. The run's own status file
+  says "finished" only after all of that, so a run cut off before its answer
+  was saved is shown as interrupted after a restart, never as "Not sent yet".
+- Rejecting a grouped proposal while the agent was revising one of its units
+  brought the proposal back when the revision failed. It now stays rejected.
 
 ### Added
 
