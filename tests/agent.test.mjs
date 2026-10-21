@@ -363,22 +363,63 @@ describe("agent timeouts", () => {
     }, { label: "model-version failure" });
     assert.match(failed.agentError, /^The 'example-model' model requires a newer version of Codex\. Please upgrade/);
     assert.equal(failed.agentError.match(/requires a newer version/g).length, 1, "the repeated error is shown once");
-    assert.match(failed.agentError, /update the CLI \(or choose another model or backend\), then Retry\.$/);
+    assert.match(failed.agentError, /This needs a newer version of the CLI: update it \(or choose another model or backend\), then Retry\.$/);
     assert.doesNotMatch(failed.agentError, /not signed in|authorization|invalid_request_error|\{/);
   });
 
-  it("does not take a hint from a line that starts mid-sentence", async () => {
+  // Runs one rewrite against a fake agent with this trace and returns the card's message.
+  const failedRun = async (env) => {
     const project = await makeProject({ fakeAgent: true });
-    const stderr = "  you are not logged in to the shared drive, ask its owner for access.\nThe run stopped before it wrote an answer.";
-    const server = await startServer(project.root, { env: { FAKE_AGENT_STDERR: stderr, FAKE_AGENT_EXIT: "1" } });
+    const server = await startServer(project.root, { env: { FAKE_AGENT_EXIT: "1", ...env } });
     const created = await commentOn(server, "sections/01_introduction.tex", "Bright streets are also loud streets.", "Tighten.");
     await apiOk(server, "/api/request/process", { method: "POST", body: { id: created.id } });
     const failed = await waitFor(async () => {
       const request = (await apiOk(server, "/api/requests")).find((item) => item.id === created.id);
       return request?.agentStatus === "failed" ? request : null;
-    }, { label: "fragment failure" });
-    assert.match(failed.agentError, /The run stopped before it wrote an answer\./);
-    assert.doesNotMatch(failed.agentError, /not signed in|shared drive/);
+    }, { label: "failed run" });
+    return failed.agentError;
+  };
+
+  it("does not let a logged error the CLI recovers from hide the real failure", async () => {
+    // Codex logs a misconfigured MCP server on every run, with a timestamp.
+    const mcp = "2026-01-01T00:00:00.100000Z ERROR codex_core::mcp_connection_manager: MCP client for `docs` failed to start: program not found";
+    const network = await failedRun({ FAKE_AGENT_STDERR: `${mcp}\nConnection failed: ENOTFOUND example.invalid` });
+    assert.match(network, /Connection failed: ENOTFOUND example\.invalid/);
+    assert.match(network, /check the network connection or proxy, then Retry\.$/);
+    const retried = await failedRun({
+      FAKE_AGENT_STDERR: [
+        "2026-01-01T00:00:01.100000Z ERROR codex_core::codex: stream disconnected - retrying turn (2/5 in 200ms)...",
+        "2026-01-01T00:00:02.100000Z ERROR codex_core::codex: stream disconnected - retrying turn (3/5 in 400ms)...",
+        mcp,
+        'ERROR: {"type":"error","status":500,"error":{"type":"server_error","message":"The server had an error processing the request."}}',
+      ].join("\n"),
+    });
+    assert.equal(retried, "The server had an error processing the request.", "the CLI's own error line, alone");
+  });
+
+  it("shows a complete one-line error that starts in lower case", async () => {
+    const network = await failedRun({ FAKE_AGENT_STDERR: "fetch failed: getaddrinfo ENOTFOUND example.invalid", FAKE_AGENT_NO_ECHO: "1" });
+    assert.match(network, /^fetch failed: getaddrinfo ENOTFOUND example\.invalid The backend could not reach its service/);
+    assert.match(await failedRun({ FAKE_AGENT_STDERR: "sandbox error: landlock is not supported on this kernel", FAKE_AGENT_NO_ECHO: "1" }), /^sandbox error: landlock is not supported/);
+    assert.match(await failedRun({ FAKE_AGENT_STDERR: "permission denied while reading config file", FAKE_AGENT_NO_ECHO: "1" }), /^permission denied while reading config file/);
+  });
+
+  it("drops the first line of a trace the capture cap cut, and only then", async () => {
+    // The cap keeps the last 32,000 characters: the fill places the cut inside
+    // the first line, so only "not logged in ..." of it reaches the server.
+    const tail = "not logged in to the shared drive must ask its owner.";
+    const stderr = `Users who are ${tail}\nThe run stopped before it wrote an answer.`;
+    const message = await failedRun({ FAKE_AGENT_STDERR: stderr, FAKE_AGENT_STDERR_FILL: String(32000 - (stderr.length - `Users who are `.length) - 1) });
+    assert.match(message, /The run stopped before it wrote an answer\./);
+    assert.doesNotMatch(message, /not signed in|shared drive/);
+  });
+
+  it("gives the sign-in hint for an invalid key and no update hint for a billing request", async () => {
+    const key = await failedRun({ FAKE_AGENT_STDERR: "ERROR: Invalid API key. Please update your key and try again." });
+    assert.match(key, /not signed in: sign in to its CLI/);
+    const billing = await failedRun({ FAKE_AGENT_STDERR: "ERROR: unexpected status 402 Payment Required: Please update your billing details." });
+    assert.match(billing, /402 Payment Required/);
+    assert.doesNotMatch(billing, /newer version|not signed in/);
   });
 
   it("names the provider, fails the run, and kills a child that ignores SIGTERM", async () => {
