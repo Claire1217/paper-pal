@@ -14,6 +14,11 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- The selection toolbar (Confirm / Comment) appeared while a selection was
+  still being dragged and moved along with it. It now appears once, when the
+  mouse button is released (also over the sidebar), or shortly after the key
+  that extended a keyboard selection is released. Starting a new drag in the
+  manuscript hides it.
 - **Accept could rewrite a paragraph the author never commented on.** When a
   commented sentence also appears elsewhere in the file and the commented copy
   was edited away, the comment moved to the other copy, and Accept rewrote that

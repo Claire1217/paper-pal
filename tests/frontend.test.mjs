@@ -852,6 +852,241 @@ describe("front end", () => {
   });
 });
 
+// The selection toolbar shows once a selection is finished: on the release of
+// the press or key that made it, not on each selectionchange along the way.
+describe("the selection toolbar", () => {
+  function toolbarPage() {
+    const timers = new Map();
+    let nextTimer = 1;
+    const calls = { shown: 0, flushed: 0 };
+    class Element {
+      constructor({ field = false, pane = false, clientWidth = 0, clientHeight = 0 } = {}) {
+        Object.assign(this, { field, pane, clientWidth, clientHeight });
+      }
+      closest(selector) { return (selector === ".editor-pane" ? this.pane : this.field) ? this : null; }
+    }
+    const showSelectionToolbar = () => {
+      calls.shown += 1;
+      page.dom.selectionToolbar.hidden = false;
+    };
+    const page = loadAppFunctions(["selectionToolbarAction", "selectionPress", "selectionKey", "updateSelectionToolbar"], {
+      Element,
+      state: { selection: null, selectionPointerDown: false, selectionKeyDown: false, selectionToolbarPending: false },
+      dom: { selectionToolbar: { hidden: true } },
+      selected: { rangeCount: 0, isCollapsed: true },
+      window: { getSelection: () => page.selected },
+      document: { activeElement: null },
+      showSelectionToolbar,
+      flushPendingRender: () => { calls.flushed += 1; },
+      setTimeout: (callback) => {
+        timers.set(nextTimer, callback);
+        return nextTimer++;
+      },
+      clearTimeout: (id) => timers.delete(id),
+    });
+    // Lets the timers run, as if the author paused.
+    page.settle = () => {
+      const pending = [...timers.values()];
+      timers.clear();
+      for (const callback of pending) callback();
+    };
+    page.select = (text) => {
+      page.selected = text ? { rangeCount: 1, isCollapsed: false } : { rangeCount: 1, isCollapsed: true };
+    };
+    page.fire = (...types) => {
+      for (const type of types) page.updateSelectionToolbar(type);
+    };
+    page.calls = calls;
+    page.Element = Element;
+    return page;
+  }
+
+  it("decides from the event and what is held", () => {
+    const { selectionToolbarAction: action } = toolbarPage();
+    assert.equal(action({ eventType: "pointerdown" }), "hide");
+    assert.equal(action({ eventType: "selectionchange", pointerDown: true }), "wait");
+    assert.equal(action({ eventType: "selectionchange", keyDown: true }), "wait");
+    assert.equal(action({ eventType: "selectionchange" }), "settle");
+    assert.equal(action({ eventType: "selectionchange", pointerDown: true, collapsed: true }), "clear");
+    for (const eventType of ["pointerup", "mouseup", "touchend"]) {
+      assert.equal(action({ eventType, pointerDown: true }), "show");
+      assert.equal(action({ eventType }), "wait", `${eventType} without a press in the manuscript`);
+    }
+    assert.equal(action({ eventType: "keyup", pending: true }), "settle");
+    assert.equal(action({ eventType: "keyup" }), "wait");
+    assert.equal(action({ eventType: "scrollend", pending: true }), "settle");
+    assert.equal(action({ eventType: "pointercancel", pending: true }), "wait");
+    assert.equal(action({ eventType: "pointerup", pointerDown: true, keyDown: true }), "show", "Shift+click");
+    assert.equal(action({ eventType: "pointerup", pointerDown: true, inField: true }), "clear");
+  });
+
+  it("stays away during a drag and shows once on release", () => {
+    const page = toolbarPage();
+    page.fire("pointerdown");
+    page.select(false);
+    page.fire("selectionchange");
+    for (let step = 0; step < 5; step += 1) {
+      page.select(true);
+      page.fire("selectionchange");
+      page.settle();
+    }
+    assert.equal(page.calls.shown, 0);
+    assert.equal(page.dom.selectionToolbar.hidden, true);
+    assert.equal(page.calls.flushed, 0, "no re-render while the button is held");
+    page.fire("pointerup", "mouseup", "touchend");
+    page.settle();
+    assert.equal(page.calls.shown, 1);
+    assert.equal(page.dom.selectionToolbar.hidden, false);
+    assert.equal(page.state.selectionPointerDown, false);
+  });
+
+  it("hides on a new press and forgets a selection that collapsed", () => {
+    const page = toolbarPage();
+    page.state.selection = { quote: "text" };
+    page.dom.selectionToolbar.hidden = false;
+    page.select(true);
+    page.fire("pointerdown");
+    assert.equal(page.dom.selectionToolbar.hidden, true);
+    assert.ok(page.state.selection, "the selection is still there when the press starts");
+    page.select(false);
+    page.fire("selectionchange");
+    assert.equal(page.state.selection, null);
+    page.fire("pointerup");
+    page.settle();
+    assert.ok(page.calls.flushed > 0);
+  });
+
+  it("shows a word picked by double-click on its release", () => {
+    const page = toolbarPage();
+    page.fire("pointerdown");
+    page.select(false);
+    page.fire("selectionchange", "pointerup", "mouseup");
+    page.settle();
+    page.fire("pointerdown");
+    page.select(true);
+    page.fire("selectionchange", "pointerup", "mouseup");
+    page.settle();
+    assert.equal(page.calls.shown, 1, "the first click left nothing selected");
+    assert.equal(page.dom.selectionToolbar.hidden, false);
+  });
+
+  it("waits for the key release during keyboard selection", () => {
+    const page = toolbarPage();
+    page.select(true);
+    page.fire("keydown");
+    for (let step = 0; step < 5; step += 1) {
+      page.fire("keydown", "selectionchange");
+      page.settle();
+    }
+    assert.equal(page.calls.shown, 0);
+    page.fire("keyup");
+    page.settle();
+    assert.equal(page.calls.shown, 1);
+  });
+
+  it("does not come back on a key or release that did not make the selection", () => {
+    const page = toolbarPage();
+    page.select(true);
+    // The toolbar's Comment button, by mouse or keyboard: the press did not start
+    // in the manuscript, and the key did not change the selection.
+    page.fire("pointerup", "mouseup", "keydown", "keyup");
+    page.settle();
+    assert.equal(page.calls.shown, 0);
+  });
+
+  it("does not show for a selection inside a text field", () => {
+    const page = toolbarPage();
+    page.state.selection = { quote: "text" };
+    page.document.activeElement = new page.Element({ field: true });
+    page.select(true);
+    page.fire("keydown", "selectionchange", "keyup");
+    page.settle();
+    assert.equal(page.calls.shown, 0);
+    assert.equal(page.state.selection, null);
+  });
+
+  it("counts only presses that can select text", () => {
+    const page = toolbarPage();
+    const text = new page.Element({ pane: true });
+    const pane = new page.Element({ pane: true, clientWidth: 600, clientHeight: 800 });
+    assert.equal(page.selectionPress({ button: 0, target: text, offsetX: 40, offsetY: 4 }), true, "inline text");
+    assert.equal(page.selectionPress({ button: 0, target: pane, offsetX: 300, offsetY: 10 }), true, "pane margin");
+    assert.equal(page.selectionPress({ button: 0, target: pane, offsetX: 605, offsetY: 10 }), false, "scrollbar");
+    assert.equal(page.selectionPress({ button: 0, ctrlKey: true, target: text }), false, "Ctrl+click on macOS");
+    assert.equal(page.selectionPress({ button: 2, target: text }), false);
+    assert.equal(page.selectionPress({ button: 0, target: new page.Element() }), false, "outside the manuscript");
+  });
+
+  it("counts only selection keys as held", () => {
+    const { selectionKey } = toolbarPage();
+    assert.equal(selectionKey({ key: "ArrowRight", shiftKey: true }), true);
+    assert.equal(selectionKey({ key: "End", shiftKey: true }), true);
+    assert.equal(selectionKey({ key: "a", metaKey: true }), true);
+    assert.equal(selectionKey({ key: "A", ctrlKey: true }), true);
+    assert.equal(selectionKey({ key: "Shift", shiftKey: true }), false, "Shift alone, as in Shift+click");
+    assert.equal(selectionKey({ key: "Enter" }), false);
+    assert.equal(selectionKey({ key: "ArrowRight" }), false);
+  });
+
+  it("shows a Shift+click extension on release while Shift is still held", () => {
+    const page = toolbarPage();
+    page.state.selectionKeyDown = true;
+    page.select(true);
+    page.fire("pointerdown", "selectionchange", "pointerup");
+    page.settle();
+    assert.equal(page.calls.shown, 1);
+  });
+
+  it("is not stuck by a key whose keyup never came", () => {
+    const page = toolbarPage();
+    // Enter on a button that opens window.confirm: the keyup goes to the dialog.
+    if (page.selectionKey({ key: "Enter" })) page.fire("keydown");
+    page.select(true);
+    page.fire("pointerdown", "selectionchange", "pointerup");
+    page.settle();
+    assert.equal(page.calls.shown, 1);
+  });
+
+  it("forgets a press whose release went to a context menu, another window or a scroll", () => {
+    for (const lost of ["contextmenu", "blur", "visibilitychange"]) {
+      const page = toolbarPage();
+      page.fire("pointerdown");
+      if (lost !== "contextmenu") page.fire("keydown");
+      page.fire(lost);
+      assert.equal(page.state.selectionPointerDown, false, lost);
+      if (lost !== "contextmenu") assert.equal(page.state.selectionKeyDown, false, lost);
+      page.select(true);
+      page.fire("selectionchange");
+      page.settle();
+      assert.equal(page.calls.shown, 1, `a later selection after ${lost}`);
+    }
+  });
+
+  it("does not show on pointercancel, only when the scroll ends", () => {
+    const page = toolbarPage();
+    page.fire("pointerdown");
+    page.select(true);
+    page.fire("selectionchange", "pointercancel");
+    page.settle();
+    assert.equal(page.calls.shown, 0, "a touch scroll took over the press");
+    assert.equal(page.state.selectionPointerDown, false);
+    page.fire("touchend");
+    page.settle();
+    assert.equal(page.calls.shown, 0, "momentum may still be running");
+    page.fire("scrollend");
+    page.settle();
+    assert.equal(page.calls.shown, 1);
+  });
+
+  it("still shows for a selection made without a press or key it saw", () => {
+    const page = toolbarPage();
+    page.select(true);
+    page.fire("selectionchange");
+    page.settle();
+    assert.equal(page.calls.shown, 1);
+  });
+});
+
 // A macro call is edited through the text the page shows for it. Each case
 // saves through the real server, in the manuscript and in a proposal unit,
 // and checks the source and that the display is what the author typed.
