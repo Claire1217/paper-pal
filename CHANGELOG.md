@@ -14,6 +14,15 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- Clicking a paragraph with a proposal hid its red/green: the paragraph
+  switched to source editing and showed the old text until it lost focus, so
+  the proposal looked gone. The red/green now stays until Accept (the paragraph
+  then shows the new text) or Reject (the original text), and the paragraph is
+  editable again after either. A click, double-click, key press or paste there
+  no longer starts editing; a short note says to Accept or Reject first, or to
+  edit the proposal in its card. Selecting text to comment or confirm works as
+  before. A paragraph left in editing without the focus is now released when
+  the focus leaves the manuscript.
 - The selection toolbar (Confirm / Comment) appeared while a selection was
   still being dragged and moved along with it. It now appears once, when the
   mouse button is released (also over the sidebar), or shortly after the key

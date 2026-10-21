@@ -137,6 +137,8 @@ const state = {
   saveTimer: null,
   saving: false,
   toastTimer: null,
+  // When the "proposal waiting" toast was last shown, per block id.
+  proposalWaitingToastAt: new Map(),
   externalChange: false,
   saveConflict: false,
   requests: [],
@@ -1732,7 +1734,7 @@ function trackedChangeControlsByEnd(block) {
   return ends;
 }
 
-function renderReviewText(container, block, { showProposals = true } = {}) {
+function renderReviewText(container, block) {
   const classes = Array(block.display.length).fill("");
   const requestIdsAt = Array.from({ length: block.display.length }, () => []);
   const reviewMarkersAt = new Map();
@@ -1761,9 +1763,7 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
   const blockRequests = state.requests.filter((request) =>
     request.path === state.document?.path && requestRangeForBlock(request, block) && ["pending", "proposed", "discussed"].includes(request.status)
   );
-  const visibleBlockRequests = blockRequests
-    .filter((request) => request.status !== "proposed" || showProposals)
-    .sort(compareCurrentReviewRequests);
+  const visibleBlockRequests = [...blockRequests].sort(compareCurrentReviewRequests);
   for (const request of visibleBlockRequests) {
     const rawRange = requestRangeForBlock(request, block);
     const range = displayRangeForRaw(block, rawRange.start, rawRange.end);
@@ -1779,7 +1779,7 @@ function renderReviewText(container, block, { showProposals = true } = {}) {
     const range = displayRangeForRaw(block, rawRange.start, rawRange.end);
     for (let index = range.start; index < range.end; index += 1) classes[index] = "pending-comment-range";
   }
-  for (const request of blockRequests.filter((item) => showProposals && item.status === "proposed" && item.proposal)) {
+  for (const request of blockRequests.filter((item) => item.status === "proposed" && item.proposal)) {
     const rawRange = requestRangeForBlock(request, block);
     const range = displayRangeForRaw(block, rawRange.start, rawRange.end);
     if (request.origin?.type === "structure" && block.index === resolvedRequestBlockIndex(request)) {
@@ -2627,6 +2627,15 @@ function flushPendingRender() {
   renderDocument();
 }
 
+// A block with a proposal waiting shows it inline and is locked against
+// source editing until the proposal is accepted, rejected or deleted. A comment
+// without a proposal (still drafting, or a plain remark) does not lock it.
+function blockHasProposal(block, path) {
+  return state.requests.some((request) =>
+    request.path === path && request.status === "proposed" && requestRangeForBlock(request, block)
+  );
+}
+
 function renderDocument() {
   const payload = state.document;
   if (!payload) return;
@@ -2688,9 +2697,7 @@ function renderDocument() {
         dom.editor.append(label);
       }
     }
-    const hasProposal = state.requests.some((request) =>
-      request.path === payload.path && request.status === "proposed" && requestRangeForBlock(request, block)
-    );
+    const hasProposal = blockHasProposal(block, payload.path);
     section.contentEditable = "false";
     section.dataset.reviewLocked = hasProposal ? "true" : "false";
     if (hasProposal) section.classList.add("has-proposal");
@@ -3365,20 +3372,13 @@ function unwrapPastedHeadingCommand(value, block) {
   return value;
 }
 
-function canonicalCaretOffset(root, { ignoreProposalAdditions = false } = {}) {
+function canonicalCaretOffset(root) {
   const selection = window.getSelection();
   if (!selection?.rangeCount || !selection.isCollapsed) return null;
   const range = selection.getRangeAt(0);
   if (!root.contains(range.startContainer) && range.startContainer !== root) return null;
   let offset = 0;
   for (const child of root.childNodes) {
-    const isProposalAddition = ignoreProposalAdditions
-      && child instanceof Element
-      && child.matches(".proposal-add, .proposal-add-blocks");
-    if (isProposalAddition) {
-      if (child === range.startContainer || child.contains(range.startContainer)) return offset;
-      continue;
-    }
     if (child === range.startContainer) {
       if (child.nodeType === Node.TEXT_NODE) return offset + Math.min(range.startOffset, child.textContent?.length || 0);
       return offset;
@@ -3399,14 +3399,7 @@ function canonicalCaretOffset(root, { ignoreProposalAdditions = false } = {}) {
   if (range.startContainer === root) {
     return [...root.childNodes]
       .slice(0, Math.min(range.startOffset, root.childNodes.length))
-      .reduce((sum, child) => {
-        if (
-          ignoreProposalAdditions
-          && child instanceof Element
-          && child.matches(".proposal-add, .proposal-add-blocks")
-        ) return sum;
-        return sum + canonicalNodeText(child).length;
-      }, 0);
+      .reduce((sum, child) => sum + canonicalNodeText(child).length, 0);
   }
   return offset;
 }
@@ -3479,18 +3472,51 @@ function updateEncodingNotice() {
   notice.title = notice.hidden ? "" : encoding?.reason || "";
 }
 
-function activateBlockEditing(element) {
-  if (!element || element.reviewBlock?.semantic || element.reviewBlock?.editable === false) return;
-  const hasProposalPreview = element.dataset.reviewLocked === "true";
-  const caretOffset = canonicalCaretOffset(element, { ignoreProposalAdditions: hasProposalPreview });
-  if (hasProposalPreview) {
-    element.replaceChildren();
-    renderReviewText(element, element.reviewBlock, { showProposals: false });
-    element.dataset.reviewLocked = "false";
-    element.dataset.reviewPreviewHidden = "true";
-  } else {
-    prepareEditableMath(element);
+// A paragraph that shows a proposal keeps its red/green until the author
+// accepts or rejects it. Editing its source meanwhile hid the preview, which
+// read as the proposal having vanished; the proposal is edited in its card.
+function blockMayEnterEditing(element) {
+  if (!element || element.reviewBlock?.semantic || element.reviewBlock?.editable === false) return false;
+  return element.dataset.reviewLocked !== "true";
+}
+
+const PROPOSAL_WAITING_TOAST_INTERVAL = 5000;
+
+// Once per paragraph every few seconds: repeated clicks must not stack toasts.
+function showProposalWaitingToast(element, now = Date.now()) {
+  const key = element.dataset.blockId || element.dataset.blockIndex || "";
+  const shownAt = state.proposalWaitingToastAt.get(key);
+  if (shownAt !== undefined && now - shownAt < PROPOSAL_WAITING_TOAST_INTERVAL) return false;
+  state.proposalWaitingToastAt.set(key, now);
+  showToast("This paragraph has a proposal waiting: Accept or Reject it first, or edit the proposal in its card.", 4200);
+  return true;
+}
+
+// The proposal-locked paragraph a key press or paste is aimed at: the
+// selection sits in it and no text field or button has the focus. The key
+// does nothing there (the paragraph is not editable); the toast says why.
+function proposalLockedEditTarget(event) {
+  if (event.type === "keydown") {
+    if (isImeComposing(event) || event.metaKey || event.ctrlKey || event.altKey) return null;
+    // Space is left out: on the page it scrolls.
+    if (event.key === " " || (event.key?.length !== 1 && !["Enter", "Backspace", "Delete"].includes(event.key))) return null;
   }
+  const target = event.target instanceof Element ? event.target : null;
+  if (target && target !== document.body && !dom.editor.contains(target)) return null;
+  if (target?.closest("[contenteditable='true'], button, a, input, textarea, select")) return null;
+  const node = window.getSelection()?.anchorNode;
+  const element = (node instanceof Element ? node : node?.parentElement)?.closest(".editor-block");
+  if (!element || !dom.editor.contains(element) || element.dataset.reviewLocked !== "true") return null;
+  return element;
+}
+
+function activateBlockEditing(element) {
+  if (!blockMayEnterEditing(element)) {
+    if (element?.dataset.reviewLocked === "true") showProposalWaitingToast(element);
+    return;
+  }
+  const caretOffset = canonicalCaretOffset(element);
+  prepareEditableMath(element);
   element.contentEditable = "true";
   element.classList.add("is-editing");
   element.focus({ preventScroll: true });
@@ -3512,18 +3538,23 @@ function deactivateBlockEditing(element) {
   if (!element) return;
   element.contentEditable = "false";
   element.classList.remove("is-editing");
-  if (element.dataset.reviewPreviewHidden === "true") {
-    element.replaceChildren();
-    renderReviewText(element, element.reviewBlock);
-    element.dataset.reviewLocked = "true";
-    delete element.dataset.reviewPreviewHidden;
-    requestAnimationFrame(renderMath);
+}
+
+// A block can be left in source editing without the focus, for example when
+// focus() was refused while the window was in the background; its blur never
+// comes. Release such blocks whenever focus leaves the manuscript, except the
+// one holding an unsaved edit or while a save is on its way.
+function releaseStrayEditingBlocks() {
+  if (state.savePromise) return;
+  for (const element of dom.editor.querySelectorAll(".editor-block.is-editing")) {
+    if (element === state.editing?.element || element.contains(document.activeElement)) continue;
+    deactivateBlockEditing(element);
   }
 }
 
 function handleBlockPointerUp(event) {
-  // A click inside an editable proposal unit edits that unit; it must not flip
-  // the host paragraph into source editing, which removes the proposal preview.
+  // A click inside an editable proposal unit edits that unit; it is not an
+  // attempt to edit the host paragraph, so it gets no "proposal waiting" note.
   if (event.button !== 0 || event.target.closest("[data-citation-keys], [data-reference-key], [data-review-request-id], button, .proposal-review-block")) return;
   const element = event.currentTarget;
   requestAnimationFrame(() => {
@@ -4119,7 +4150,6 @@ async function performSave({ force = false } = {}) {
       return true;
     }
     const sameShape = nextDocument.blocks.length === state.document.blocks.length;
-    const reviewPreviewWasHidden = editing.element.dataset.reviewPreviewHidden === "true";
     state.document = nextDocument;
     // The author may have typed on while this save was on its way. That edit
     // was captured against the block as it was before this save; sent as is,
@@ -4134,9 +4164,7 @@ async function performSave({ force = false } = {}) {
       }
     }
     await refreshCompiledOutline({ render: false });
-    if (reviewPreviewWasHidden) {
-      await refreshRequests();
-    } else if (sameShape && editing.element.matches(":focus")) {
+    if (sameShape && editing.element.matches(":focus")) {
       for (const element of dom.editor.querySelectorAll(".editor-block")) {
         const block = nextDocument.blocks[Number(element.dataset.blockIndex)];
         if (block) {
@@ -7204,7 +7232,16 @@ async function start() {
 }
 
 document.addEventListener("selectionchange", () => updateSelectionToolbar("selectionchange"));
-dom.editor.addEventListener("focusout", () => setTimeout(flushPendingRender, 0));
+dom.editor.addEventListener("focusout", () => setTimeout(() => {
+  releaseStrayEditingBlocks();
+  flushPendingRender();
+}, 0));
+for (const type of ["keydown", "paste"]) {
+  document.addEventListener(type, (event) => {
+    const element = proposalLockedEditTarget(event);
+    if (element) showProposalWaitingToast(element);
+  });
+}
 document.addEventListener("pointerdown", (event) => {
   state.lastPointerInEditorPane = event.target instanceof Element && Boolean(event.target.closest(".editor-pane"));
   if (selectionPress(event)) updateSelectionToolbar("pointerdown");

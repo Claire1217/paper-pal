@@ -76,7 +76,7 @@ Paper Pal opens your LaTeX project in the browser and shows the source as readab
 </picture>
 </p>
 
-**2. Review the diff.** The proposal appears inline in the manuscript and in the comment card, with a one-line rationale. Accept it, reject it, regenerate it, or reply to steer it.
+**2. Review the diff.** The proposal appears inline in the manuscript and in the comment card, with a one-line rationale. Accept it, reject it, regenerate it, or reply to steer it. Until you accept or reject it, the paragraph keeps showing the diff and is not edited directly; edit the proposal in its card instead.
 
 <p>
 <picture>
