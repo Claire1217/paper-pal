@@ -4970,9 +4970,12 @@ async function validateLinkedCommentTargets(rawTargets, source) {
 // linked comment from an earlier search reuses it: unchanged when the
 // instruction is the same, rewritten when the agent has not worked on it yet.
 // One the agent has already answered keeps its answer, and the new
-// instruction gets a comment of its own beside it.
-async function createLinkedCommentRequests(sourceRequest, targets, { autoProcess = false } = {}) {
+// instruction gets a comment of its own beside it. Nothing is written here:
+// the caller writes the returned comments after their source (finishCodexRun),
+// so no reader sees a linked comment whose source does not list it yet.
+async function createLinkedCommentRequests(sourceRequest, targets) {
   const created = [];
+  const writes = [];
   for (const target of targets) {
     if (target.existing) {
       const { target: linkedPath, value: linked } = target.existing;
@@ -4985,8 +4988,7 @@ async function createLinkedCommentRequests(sourceRequest, targets, { autoProcess
           linked.comment = target.comment;
           linked.conversation = [{ role: "user", content: target.comment, createdAt: new Date().toISOString() }];
           linked.origin = { ...linked.origin, reason: target.reason };
-          await atomicWrite(linkedPath, `${JSON.stringify(linked, null, 2)}\n`);
-          emit("request", { id: linked.id, path: linked.path, status: linked.status, reason: "linked-updated" });
+          writes.push({ target: linkedPath, request: linked, event: { id: linked.id, path: linked.path, status: linked.status, reason: "linked-updated" } });
         }
         created.push({ id: linked.id, path: linked.path, reason: target.reason });
         continue;
@@ -5008,10 +5010,14 @@ async function createLinkedCommentRequests(sourceRequest, targets, { autoProcess
     });
     request.provider = sourceRequest.provider;
     request.links = [sourceRequest.id];
-    await persistRewriteRequest(request, { autoProcess });
+    writes.push({
+      target: path.join(requestsRoot, `${request.id}.json`),
+      request,
+      event: { id: request.id, path: request.path, status: "pending" },
+    });
     created.push({ id: request.id, path: request.path, reason: target.reason });
   }
-  return created;
+  return { created, writes };
 }
 
 async function validateRelatedProposalChanges(rawChanges, primaryPath) {
@@ -5143,13 +5149,15 @@ function trimBoundaryEcho(replacementText, originalText, before, after) {
   return result;
 }
 
-async function attachGeneratedProposal(requestId, replacementText, summary) {
-  const { target, value: request } = await readRewriteRequest(requestId);
+// Sets the agent's proposal on the request in memory. The caller adds the
+// reply and the linked changes and writes the request once, so no reader sees
+// a proposal without them.
+async function attachGeneratedProposal(request, replacementText, summary) {
   const unitRevision = request.status === "proposed"
     && request.pendingUnitRevision
     && request.proposal;
   if (request.status !== "pending" && !unitRevision) {
-    throw new Error(`This review request is no longer waiting for a proposal: ${requestId}`);
+    throw new Error(`This review request is no longer waiting for a proposal: ${request.id}`);
   }
   const absolutePath = resolveDocument(request.path);
   const source = await fs.readFile(absolutePath, "utf8");
@@ -5178,8 +5186,7 @@ async function attachGeneratedProposal(requestId, replacementText, summary) {
     replacementText,
   };
   delete request.rejectedAt;
-  await atomicWrite(target, `${JSON.stringify(request, null, 2)}\n`);
-  return { target, value: request };
+  return request;
 }
 
 // Full source of the file being edited, so the agent can resolve references
@@ -5559,6 +5566,24 @@ async function acceptReviewFinding(body = {}) {
   return persistRewriteRequest(request, { autoProcess: false });
 }
 
+// Ends a successful run, under the project lock. The request is written once,
+// with the answer, and the run is marked complete with no await in between, so
+// no reader sees the answer as still running. Linked comments found by a link
+// search come next, so none is on disk before its source lists it. STATUS.json
+// says the run finished only after all of that, so a crash before the answer
+// is on disk reads as an interrupted run on restart, not as a finished one, and
+// a crash after it shows the answer. The SSE events go out
+// last, when everything is on disk.
+async function finishCodexRun(requestId, requestTarget, request, { result, status, linkedWrites = [] }) {
+  await atomicWrite(requestTarget, `${JSON.stringify(request, null, 2)}\n`);
+  codexRuns.set(requestId, { status: "complete", updatedAt: new Date().toISOString() });
+  for (const linked of linkedWrites) await atomicWrite(linked.target, `${JSON.stringify(linked.request, null, 2)}\n`);
+  await writeCodexRunJson(requestId, "RESULT.json", result);
+  await writeCodexRunJson(requestId, "STATUS.json", { taskId: requestId, ...status, finishedAt: new Date().toISOString() });
+  for (const linked of linkedWrites) emit("request", linked.event);
+  emit("request", { id: requestId, reason: "codex-complete" });
+}
+
 async function generateCodexProposal(requestId) {
   if (cancelledCodexRequests.has(requestId)) {
     const error = new Error("The agent run was cancelled because the comment was deleted.");
@@ -5902,17 +5927,10 @@ async function generateCodexProposal(requestId) {
         discussedRequest.conversation.push({ role: "assistant", kind: "discussion", ...discussedRequest.discussion });
         discussedRequest.status = "discussed";
         delete discussedRequest.regenerationRequestedAt;
-        await atomicWrite(requestTarget, `${JSON.stringify(discussedRequest, null, 2)}\n`);
-        await writeCodexRunJson(requestId, "RESULT.json", discussedRequest.discussion);
-        await writeCodexRunJson(requestId, "STATUS.json", {
-          taskId: requestId,
-          state: "DISCUSSED",
-          finishedAt: new Date().toISOString(),
-          provider,
-          model: activeModel,
-          reasoningEffort,
+        await finishCodexRun(requestId, requestTarget, discussedRequest, {
+          result: discussedRequest.discussion,
+          status: { state: "DISCUSSED", provider, model: activeModel, reasoningEffort },
         });
-        codexRunPayload(requestId, "complete");
         return;
       }
       if (isLink) {
@@ -5925,7 +5943,7 @@ async function generateCodexProposal(requestId) {
           throw error;
         }
         const resolved = await validateLinkedCommentTargets(proposal.targets, linkedRequest);
-        const created = await createLinkedCommentRequests(linkedRequest, resolved.targets);
+        const { created, writes: linkedWrites } = await createLinkedCommentRequests(linkedRequest, resolved.targets);
         linkedRequest.links = [...new Set([...(linkedRequest.links || []), ...created.map((item) => item.id)])];
         linkedRequest.linkSearch = {
           summary,
@@ -5939,36 +5957,28 @@ async function generateCodexProposal(requestId) {
         linkedRequest.conversation.push({ role: "assistant", kind: "link", ...linkedRequest.linkSearch });
         linkedRequest.status = "discussed";
         delete linkedRequest.regenerationRequestedAt;
-        await atomicWrite(requestTarget, `${JSON.stringify(linkedRequest, null, 2)}\n`);
-        await writeCodexRunJson(requestId, "RESULT.json", linkedRequest.linkSearch);
-        await writeCodexRunJson(requestId, "STATUS.json", {
-          taskId: requestId,
-          state: "LINKED",
-          finishedAt: new Date().toISOString(),
-          provider,
-          model: activeModel,
-          reasoningEffort,
+        await finishCodexRun(requestId, requestTarget, linkedRequest, {
+          result: linkedRequest.linkSearch,
+          status: { state: "LINKED", provider, model: activeModel, reasoningEffort },
+          linkedWrites,
         });
-        codexRunPayload(requestId, "complete");
         return;
       }
       if (typeof proposal.replacementText !== "string") throw new Error(`${providerLabel(provider)} returned no replacement text.`);
       let replacementText = proposal.replacementText;
       const summary = typeof proposal.summary === "string" ? proposal.summary.trim() : "";
       if (!summary) throw new Error(`${providerLabel(provider)} returned no proposal summary.`);
+      // The request file stays as it was while the proposal is validated; it
+      // is written once below, with the proposal, the reply and the linked
+      // changes, so no reader sees a proposal without them.
       codexRunPayload(requestId, "validating");
-      await attachGeneratedProposal(requestId, replacementText, summary);
-      if (cancelledCodexRequests.has(requestId)) {
-        const error = new Error("The agent run was cancelled because the comment was deleted.");
-        error.code = "CODEX_CANCELLED";
-        throw error;
-      }
       const { target: requestTarget, value: proposedRequest } = await readRewriteRequest(requestId);
       if (cancelledCodexRequests.has(requestId) || proposedRequest.status === "deleted") {
         const error = new Error("The agent run was cancelled because the comment was deleted.");
         error.code = "CODEX_CANCELLED";
         throw error;
       }
+      await attachGeneratedProposal(proposedRequest, replacementText, summary);
       if (proposedRequest.pendingUnitRevision) {
         const pending = proposedRequest.pendingUnitRevision;
         const references = await cachedProjectReferences();
@@ -6029,17 +6039,10 @@ async function generateCodexProposal(requestId) {
         createdAt: new Date().toISOString(),
       });
       delete proposedRequest.regenerationRequestedAt;
-      await atomicWrite(requestTarget, `${JSON.stringify(proposedRequest, null, 2)}\n`);
-      await writeCodexRunJson(requestId, "RESULT.json", proposal);
-      await writeCodexRunJson(requestId, "STATUS.json", {
-        taskId: requestId,
-        state: "PROPOSED",
-        finishedAt: new Date().toISOString(),
-        provider,
-        model: activeModel,
-        reasoningEffort,
+      await finishCodexRun(requestId, requestTarget, proposedRequest, {
+        result: proposal,
+        status: { state: "PROPOSED", provider, model: activeModel, reasoningEffort },
       });
-      codexRunPayload(requestId, "complete");
     });
   } finally {
     activeCodexChild = null;
@@ -6080,7 +6083,9 @@ async function drainCodexQueue() {
         try {
           await withProjectLock(async () => {
             const { target, value: failedRequest } = await readRewriteRequest(requestId);
-            if (!failedRequest.pendingUnitRevision) return;
+            // Rejected or deleted while the unit was being revised: the
+            // author's decision stands, and the old proposal stays gone.
+            if (!failedRequest.pendingUnitRevision || failedRequest.status !== "proposed") return;
             const pending = failedRequest.pendingUnitRevision;
             failedRequest.status = "proposed";
             failedRequest.proposal = pending.previousProposal;
