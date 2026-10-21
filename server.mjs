@@ -3971,13 +3971,17 @@ function spawnCaptured(command, args, { cwd, env = childEnvironment(), input = n
     let settled = false;
     let stdout = "";
     let stderr = "";
+    // Whether a cap cut the start of the stream off: its first line is then a
+    // fragment (see agentFailureMessage).
+    let stdoutCut = false;
+    let stderrCut = false;
     let child;
     let timer;
     const finish = (value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ ...value, stdout, stderr });
+      resolve({ ...value, stdout, stderr, stdoutCut, stderrCut });
     };
     try {
       const plan = spawnPlan(command, args);
@@ -4000,8 +4004,14 @@ function spawnCaptured(command, args, { cwd, env = childEnvironment(), input = n
     // character, and decoding that chunk alone would give U+FFFD.
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk) => { stdout = `${stdout}${chunk}`.slice(-400000); });
-    child.stderr?.on("data", (chunk) => { stderr = `${stderr}${chunk}`.slice(-32000); });
+    child.stdout?.on("data", (chunk) => {
+      stdout = `${stdout}${chunk}`;
+      if (stdout.length > 400000) [stdout, stdoutCut] = [stdout.slice(-400000), true];
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = `${stderr}${chunk}`;
+      if (stderr.length > 32000) [stderr, stderrCut] = [stderr.slice(-32000), true];
+    });
     child.on("error", (error) => {
       if (!stderr) stderr = error?.code === "ENOENT"
         ? `Could not start "${command}": the program was not found. Check that it is installed and on PATH, then run "npm run doctor".`
@@ -4018,41 +4028,105 @@ function spawnCaptured(command, args, { cwd, env = childEnvironment(), input = n
 }
 
 // What a failed agent run tells the author. A CLI's stderr is a trace, not a
-// message: Codex echoes the whole prompt there and logs every reconnect with a
-// timestamp, so the raw tail is a wall of noise that also pushes "timed out"
-// out of view. Lead with our own sentence, keep the few lines that say what
-// went wrong (once each), and end with what to do. The full trace stays in
-// TRACE.log.
+// message: Codex echoes the whole prompt there (and, cut by the capture cap,
+// the trace can start in the middle of its own instructions), and logs every
+// reconnect with a timestamp, so the raw tail is a wall of noise that also
+// pushes "timed out" out of view. Lead with our own sentence, keep the few
+// lines that say what went wrong (once each), and end with what to do. The
+// CLI's own error lines ("ERROR: ...", "error: ...") win; timestamped log
+// lines and reconnect notices only fill in when there are none, because Codex
+// also logs errors it recovers from (a broken MCP server) on every run. The
+// hint is chosen from the lines shown only: words like "authorization" in a
+// dumped prompt say nothing about this run. The full trace stays in TRACE.log.
 function agentFailureMessage(result, fallback, { timeoutSetting = "agent.timeoutMs" } = {}) {
-  const seen = new Set();
-  const lines = String(result?.stderr || result?.stdout || "")
+  const fromStderr = Boolean(result?.stderr);
+  const raw = String(result?.stderr || result?.stdout || "")
     .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z?\s+(?:ERROR|WARN|INFO)\s+/, "").trim())
+    .split(/\r?\n/);
+  const cut = fromStderr ? result?.stderrCut : result?.stdoutCut;
+  const lastIndex = raw.findLastIndex((line) => line.trim());
+  const entries = raw.map((line, index) => {
+    const logged = /^\d{4}-\d\d-\d\dT[\d:.]+Z?\s+(?:ERROR|WARN|INFO)\s+/.exec(line);
+    const text = (logged ? line.slice(logged[0].length) : line).trim();
+    const marked = !logged && /^error\b\s*:/i.test(text);
+    // The first line of a cut capture is the end of something longer, and a
+    // long unmarked line before the end is a dumped prompt or configuration.
+    // The last line may be long: the API adapter's own message is.
+    const noise = !marked && ((cut && index === 0) || (text.length > 300 && index !== lastIndex));
+    const error = marked ? cliError(text) : null;
+    return {
+      text: error?.message || text,
+      // The JSON envelope still counts for the hint: its status says what failed.
+      envelope: error ? text : "",
+      marked,
+      apiError: Boolean(error?.api),
+      filler: Boolean(logged) || /reconnecting|retrying/i.test(text),
+      noise,
+    };
+  });
+  const seen = new Set();
+  const lines = entries
+    .filter((entry) => entry.text && !entry.noise)
     .reverse()
-    .filter((line) => {
+    .filter((entry) => {
       // "Reconnecting... 2/5" and "3/5" are one message; keep the last of each.
-      const key = line.replace(/\d+/g, "#");
-      if (!line || seen.has(key)) return false;
+      const key = entry.text.replace(/\d+/g, "#");
+      if (seen.has(key)) return false;
       seen.add(key);
       return true;
     })
     .reverse();
-  const telling = lines.filter((line) => /error|fail|denied|unauthori[sz]ed|invalid|cannot|could not|not (?:found|logged|supported|permitted|allowed)|refus|limit|quota|log ?in|warning/i.test(line));
-  const detail = (telling.length ? telling : lines).slice(-3).join(" ").slice(0, 600);
-  const all = lines.join("\n");
+  // Up to three lines, the first-ranked first, shown in the order printed.
+  const pick = (ranked) => {
+    const chosen = new Set();
+    for (const group of ranked) {
+      for (const entry of [...group].reverse()) if (chosen.size < 3) chosen.add(entry);
+    }
+    return lines.filter((entry) => chosen.has(entry));
+  };
+  const errors = lines.filter((entry) => entry.marked && !entry.filler);
+  const telling = lines.filter((entry) => /error|fail|denied|unauthori[sz]ed|invalid|cannot|could not|not (?:found|logged|supported|permitted|allowed)|refus|limit|quota|log ?in|warning/i.test(entry.text));
+  const chosen = (errors.length
+    ? pick([errors.filter((entry) => entry.apiError || entry === errors.at(-1)), errors])
+    : telling.length
+      ? pick([telling.filter((entry) => !entry.filler), telling])
+      : lines.slice(-3));
+  const detail = chosen.map((entry) => entry.text).join(" ").slice(0, 600);
+  const said = chosen.map((entry) => [entry.text, entry.envelope].filter(Boolean).join("\n")).join("\n");
   // The API adapter already ends its messages with what to check.
-  const hint = /\.env\b/.test(all) ? "" : /unexpected argument|unrecognized (?:option|argument)|unknown (?:option|argument)/i.test(all)
+  const hint = /\.env\b/.test(said) ? "" : /unexpected argument|unrecognized (?:option|argument)|unknown (?:option|argument)/i.test(said)
     ? "The installed CLI does not accept an option Paper Pal passes: update the CLI to its current version, then Retry."
-    : /unauthori[sz]ed|\b401\b|not logged in|log ?in (?:required|again)|please (?:run )?.{0,20}log ?in|invalid api key|authentication/i.test(all)
+    : /unauthori[sz]ed|\b401\b|not logged in|log ?in (?:required|again)|please (?:run )?.{0,20}log ?in|invalid api key|authentication/i.test(said)
     ? "The backend is not signed in: sign in to its CLI in a terminal (or check the key in .env), then Retry."
-    : /waiting for network|failed to connect|connection failed|stream disconnected|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|fetch failed/i.test(all)
+    : /requires? a newer version|(?:upgrade|update) (?:to )?the latest (?:app|cli|version)|unsupported (?:cli|client) version/i.test(said)
+    ? "This needs a newer version of the CLI: update it (or choose another model or backend), then Retry."
+    : /waiting for network|failed to connect|connection failed|stream disconnected|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|fetch failed/i.test(said)
       ? "The backend could not reach its service: check the network connection or proxy, then Retry."
+      // A 5xx only next to a status word, so that "500 ms" is not one.
+      : /\bstatus\b["']?\s*[:=]?\s*(?:50[0234]|529)\b|\bHTTP(?:\/[\d.]+)?\s+(?:50[0234]|529)\b|\b(?:50[0234]|529)\s+(?:Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out|Overloaded)\b|\bAPI Error:\s*(?:50[0234]|529)\b|server_error|service unavailable|overloaded_error|the server had an error/i.test(said)
+      ? "The service had an error on its side: wait a minute, then Retry."
       : result?.timedOut
         ? `Retry, or raise ${timeoutSetting} in ${CONFIG_NAME} and restart.`
         : "";
   const head = result?.timedOut ? result.timeoutMessage : "";
   return [head, detail || (head ? "" : fallback), hint].filter(Boolean).join(" ").trim();
+}
+
+// "ERROR: {"type":"error","status":400,"error":{"message":"..."}}" is one
+// sentence in a JSON envelope: show the sentence, and note that it came from
+// the service (it has a status or a type), which ranks it first.
+function cliError(line) {
+  const body = line.replace(/^error\b\s*:\s*/i, "");
+  if (!body.startsWith("{")) return null;
+  try {
+    const value = JSON.parse(body);
+    const inner = value?.error && typeof value.error === "object" ? value.error : value;
+    const message = typeof value?.error === "string" ? value.error : inner?.message ?? value?.message;
+    if (typeof message !== "string" || !message.trim()) return null;
+    return { message: message.trim(), api: [value?.status, value?.type, inner?.status, inner?.type].some((field) => field != null) };
+  } catch {
+    return null;
+  }
 }
 
 function codexRunRoot(requestId) {

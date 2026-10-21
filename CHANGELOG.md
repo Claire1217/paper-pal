@@ -19,6 +19,16 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
   mouse button is released (also over the sidebar), or shortly after the key
   that extended a keyboard selection is released. Starting a new drag in the
   manuscript hides it.
+- A failed agent run could show a piece of the CLI's own instructions and the
+  advice to sign in, when the real error was elsewhere in the trace (for
+  example Codex saying the model needs a newer version of the CLI). The card now
+  shows the CLI's own error lines first (`ERROR:`, `error:`), once each, with the
+  message taken out of a JSON error. Timestamped log lines and reconnect notices
+  only fill in when there are none, and very long lines and the cut-off start of
+  a long trace are ignored. The advice is chosen from the lines shown only, and
+  a "requires a newer version" error now says to update the CLI or choose
+  another model or backend, and a 5xx or "overloaded" error from the service
+  says to wait a minute and retry.
 - **Accept could rewrite a paragraph the author never commented on.** When a
   commented sentence also appears elsewhere in the file and the commented copy
   was edited away, the comment moved to the other copy, and Accept rewrote that

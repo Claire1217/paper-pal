@@ -69,10 +69,16 @@ writeFileSync(path.join(logRoot, "last-run.json"), JSON.stringify({
 }, null, 2));
 
 // Echo the instruction so the test can check that traces are redacted.
-process.stderr.write(`fake-agent instruction: ${task?.instruction ?? ""}\n`);
+// FAKE_AGENT_NO_ECHO=1 leaves it out, so FAKE_AGENT_STDERR is the whole trace.
+if (!process.env.FAKE_AGENT_NO_ECHO) process.stderr.write(`fake-agent instruction: ${task?.instruction ?? ""}\n`);
 
 // A real CLI traces on stderr: the echoed prompt, then timestamped log lines.
 if (process.env.FAKE_AGENT_STDERR) process.stderr.write(`${process.env.FAKE_AGENT_STDERR}\n`);
+// FAKE_AGENT_STDERR_FILL=<n> follows it with n characters of neutral log
+// lines, so that the server's stderr cap cuts FAKE_AGENT_STDERR at a known point.
+if (process.env.FAKE_AGENT_STDERR_FILL) {
+  process.stderr.write("trace: idle\n".repeat(Number(process.env.FAKE_AGENT_STDERR_FILL) / 12 + 1).slice(0, Number(process.env.FAKE_AGENT_STDERR_FILL)));
+}
 
 // FAKE_AGENT_STDOUT is traced on stdout in two writes, cut inside its first
 // multi-byte character, so the server reads that character in two chunks.
