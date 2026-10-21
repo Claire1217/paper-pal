@@ -860,14 +860,16 @@ describe("the selection toolbar", () => {
     let nextTimer = 1;
     const calls = { shown: 0, flushed: 0 };
     class Element {
-      constructor(field) { this.field = field; }
-      closest() { return this.field ? this : null; }
+      constructor({ field = false, pane = false, clientWidth = 0, clientHeight = 0 } = {}) {
+        Object.assign(this, { field, pane, clientWidth, clientHeight });
+      }
+      closest(selector) { return (selector === ".editor-pane" ? this.pane : this.field) ? this : null; }
     }
     const showSelectionToolbar = () => {
       calls.shown += 1;
       page.dom.selectionToolbar.hidden = false;
     };
-    const page = loadAppFunctions(["selectionToolbarAction", "updateSelectionToolbar"], {
+    const page = loadAppFunctions(["selectionToolbarAction", "selectionPress", "selectionKey", "updateSelectionToolbar"], {
       Element,
       state: { selection: null, selectionPointerDown: false, selectionKeyDown: false, selectionToolbarPending: false },
       dom: { selectionToolbar: { hidden: true } },
@@ -912,6 +914,9 @@ describe("the selection toolbar", () => {
     }
     assert.equal(action({ eventType: "keyup", pending: true }), "settle");
     assert.equal(action({ eventType: "keyup" }), "wait");
+    assert.equal(action({ eventType: "scrollend", pending: true }), "settle");
+    assert.equal(action({ eventType: "pointercancel", pending: true }), "wait");
+    assert.equal(action({ eventType: "pointerup", pointerDown: true, keyDown: true }), "show", "Shift+click");
     assert.equal(action({ eventType: "pointerup", pointerDown: true, inField: true }), "clear");
   });
 
@@ -992,12 +997,85 @@ describe("the selection toolbar", () => {
   it("does not show for a selection inside a text field", () => {
     const page = toolbarPage();
     page.state.selection = { quote: "text" };
-    page.document.activeElement = new page.Element(true);
+    page.document.activeElement = new page.Element({ field: true });
     page.select(true);
     page.fire("keydown", "selectionchange", "keyup");
     page.settle();
     assert.equal(page.calls.shown, 0);
     assert.equal(page.state.selection, null);
+  });
+
+  it("counts only presses that can select text", () => {
+    const page = toolbarPage();
+    const text = new page.Element({ pane: true });
+    const pane = new page.Element({ pane: true, clientWidth: 600, clientHeight: 800 });
+    assert.equal(page.selectionPress({ button: 0, target: text, offsetX: 40, offsetY: 4 }), true, "inline text");
+    assert.equal(page.selectionPress({ button: 0, target: pane, offsetX: 300, offsetY: 10 }), true, "pane margin");
+    assert.equal(page.selectionPress({ button: 0, target: pane, offsetX: 605, offsetY: 10 }), false, "scrollbar");
+    assert.equal(page.selectionPress({ button: 0, ctrlKey: true, target: text }), false, "Ctrl+click on macOS");
+    assert.equal(page.selectionPress({ button: 2, target: text }), false);
+    assert.equal(page.selectionPress({ button: 0, target: new page.Element() }), false, "outside the manuscript");
+  });
+
+  it("counts only selection keys as held", () => {
+    const { selectionKey } = toolbarPage();
+    assert.equal(selectionKey({ key: "ArrowRight", shiftKey: true }), true);
+    assert.equal(selectionKey({ key: "End", shiftKey: true }), true);
+    assert.equal(selectionKey({ key: "a", metaKey: true }), true);
+    assert.equal(selectionKey({ key: "A", ctrlKey: true }), true);
+    assert.equal(selectionKey({ key: "Shift", shiftKey: true }), false, "Shift alone, as in Shift+click");
+    assert.equal(selectionKey({ key: "Enter" }), false);
+    assert.equal(selectionKey({ key: "ArrowRight" }), false);
+  });
+
+  it("shows a Shift+click extension on release while Shift is still held", () => {
+    const page = toolbarPage();
+    page.state.selectionKeyDown = true;
+    page.select(true);
+    page.fire("pointerdown", "selectionchange", "pointerup");
+    page.settle();
+    assert.equal(page.calls.shown, 1);
+  });
+
+  it("is not stuck by a key whose keyup never came", () => {
+    const page = toolbarPage();
+    // Enter on a button that opens window.confirm: the keyup goes to the dialog.
+    if (page.selectionKey({ key: "Enter" })) page.fire("keydown");
+    page.select(true);
+    page.fire("pointerdown", "selectionchange", "pointerup");
+    page.settle();
+    assert.equal(page.calls.shown, 1);
+  });
+
+  it("forgets a press whose release went to a context menu, another window or a scroll", () => {
+    for (const lost of ["contextmenu", "blur", "visibilitychange"]) {
+      const page = toolbarPage();
+      page.fire("pointerdown");
+      if (lost !== "contextmenu") page.fire("keydown");
+      page.fire(lost);
+      assert.equal(page.state.selectionPointerDown, false, lost);
+      if (lost !== "contextmenu") assert.equal(page.state.selectionKeyDown, false, lost);
+      page.select(true);
+      page.fire("selectionchange");
+      page.settle();
+      assert.equal(page.calls.shown, 1, `a later selection after ${lost}`);
+    }
+  });
+
+  it("does not show on pointercancel, only when the scroll ends", () => {
+    const page = toolbarPage();
+    page.fire("pointerdown");
+    page.select(true);
+    page.fire("selectionchange", "pointercancel");
+    page.settle();
+    assert.equal(page.calls.shown, 0, "a touch scroll took over the press");
+    assert.equal(page.state.selectionPointerDown, false);
+    page.fire("touchend");
+    page.settle();
+    assert.equal(page.calls.shown, 0, "momentum may still be running");
+    page.fire("scrollend");
+    page.settle();
+    assert.equal(page.calls.shown, 1);
   });
 
   it("still shows for a selection made without a press or key it saw", () => {
