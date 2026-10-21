@@ -4018,41 +4018,77 @@ function spawnCaptured(command, args, { cwd, env = childEnvironment(), input = n
 }
 
 // What a failed agent run tells the author. A CLI's stderr is a trace, not a
-// message: Codex echoes the whole prompt there and logs every reconnect with a
-// timestamp, so the raw tail is a wall of noise that also pushes "timed out"
-// out of view. Lead with our own sentence, keep the few lines that say what
-// went wrong (once each), and end with what to do. The full trace stays in
-// TRACE.log.
+// message: Codex echoes the whole prompt there (and, cut by our capture cap,
+// the trace can start in the middle of its own instructions), and logs every
+// reconnect with a timestamp, so the raw tail is a wall of noise that also
+// pushes "timed out" out of view. Lead with our own sentence, keep the few
+// lines that say what went wrong (once each), and end with what to do. The
+// CLI's own error lines ("ERROR: ...", "error: ...", or a timestamped ERROR
+// log line) win over everything else, and the hint is chosen from the lines
+// shown only: words like "authorization" in a dumped prompt say nothing about
+// this run. The full trace stays in TRACE.log.
 function agentFailureMessage(result, fallback, { timeoutSetting = "agent.timeoutMs" } = {}) {
-  const seen = new Set();
-  const lines = String(result?.stderr || result?.stdout || "")
+  const raw = String(result?.stderr || result?.stdout || "")
     .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z?\s+(?:ERROR|WARN|INFO)\s+/, "").trim())
+    .split(/\r?\n/);
+  const lastIndex = raw.findLastIndex((line) => line.trim());
+  const entries = raw.map((line, index) => {
+    const logged = /^\d{4}-\d\d-\d\dT[\d:.]+Z?\s+(?:ERROR|WARN|INFO)\s+/.exec(line);
+    const text = (logged ? line.slice(logged[0].length) : line).trim();
+    const marked = /^\d{4}-\d\d-\d\dT[\d:.]+Z?\s+ERROR\s/.test(line) || /^error\b\s*:/i.test(text);
+    // A line that starts mid-sentence is the cut-off end of something longer,
+    // and a long unmarked line before the end is a dumped prompt or config.
+    // The last line may be long: the API adapter's own message is.
+    const noise = !marked && (/^\s+[a-z]/.test(line)
+      || (index === 0 && /^[a-z]+ [a-z]/.test(text))
+      || (text.length > 300 && index !== lastIndex));
+    return { text: marked ? cliErrorText(text) : text, marked, noise };
+  });
+  const seen = new Set();
+  const lines = entries
+    .filter((entry) => entry.text && !entry.noise)
     .reverse()
-    .filter((line) => {
+    .filter((entry) => {
       // "Reconnecting... 2/5" and "3/5" are one message; keep the last of each.
-      const key = line.replace(/\d+/g, "#");
-      if (!line || seen.has(key)) return false;
+      const key = entry.text.replace(/\d+/g, "#");
+      if (seen.has(key)) return false;
       seen.add(key);
       return true;
     })
     .reverse();
-  const telling = lines.filter((line) => /error|fail|denied|unauthori[sz]ed|invalid|cannot|could not|not (?:found|logged|supported|permitted|allowed)|refus|limit|quota|log ?in|warning/i.test(line));
-  const detail = (telling.length ? telling : lines).slice(-3).join(" ").slice(0, 600);
-  const all = lines.join("\n");
+  const errors = lines.filter((entry) => entry.marked);
+  const telling = lines.filter((entry) => /error|fail|denied|unauthori[sz]ed|invalid|cannot|could not|not (?:found|logged|supported|permitted|allowed)|refus|limit|quota|log ?in|warning/i.test(entry.text));
+  const chosen = (errors.length ? errors : telling.length ? telling : lines).slice(-3).map((entry) => entry.text);
+  const detail = chosen.join(" ").slice(0, 600);
+  const said = chosen.join("\n");
   // The API adapter already ends its messages with what to check.
-  const hint = /\.env\b/.test(all) ? "" : /unexpected argument|unrecognized (?:option|argument)|unknown (?:option|argument)/i.test(all)
+  const hint = /\.env\b/.test(said) ? "" : /unexpected argument|unrecognized (?:option|argument)|unknown (?:option|argument)/i.test(said)
     ? "The installed CLI does not accept an option Paper Pal passes: update the CLI to its current version, then Retry."
-    : /unauthori[sz]ed|\b401\b|not logged in|log ?in (?:required|again)|please (?:run )?.{0,20}log ?in|invalid api key|authentication/i.test(all)
+    : /requires? a newer version|(?:upgrade|update) to the latest|please (?:upgrade|update)|unsupported (?:cli|client) version/i.test(said)
+    ? "The model needs a newer version of the CLI: update the CLI (or choose another model or backend), then Retry."
+    : /unauthori[sz]ed|\b401\b|not logged in|log ?in (?:required|again)|please (?:run )?.{0,20}log ?in|invalid api key|authentication/i.test(said)
     ? "The backend is not signed in: sign in to its CLI in a terminal (or check the key in .env), then Retry."
-    : /waiting for network|failed to connect|connection failed|stream disconnected|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|fetch failed/i.test(all)
+    : /waiting for network|failed to connect|connection failed|stream disconnected|ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|fetch failed/i.test(said)
       ? "The backend could not reach its service: check the network connection or proxy, then Retry."
       : result?.timedOut
         ? `Retry, or raise ${timeoutSetting} in ${CONFIG_NAME} and restart.`
         : "";
   const head = result?.timedOut ? result.timeoutMessage : "";
   return [head, detail || (head ? "" : fallback), hint].filter(Boolean).join(" ").trim();
+}
+
+// "ERROR: {"type":"error","error":{"message":"..."}}" says one sentence in a
+// JSON envelope: show the sentence. Any other error line is shown as written.
+function cliErrorText(line) {
+  const body = line.replace(/^error\b\s*:\s*/i, "");
+  if (!body.startsWith("{")) return line;
+  try {
+    const value = JSON.parse(body);
+    const message = value?.error?.message ?? (typeof value?.error === "string" ? value.error : value?.message);
+    return typeof message === "string" && message.trim() ? message.trim() : line;
+  } catch {
+    return line;
+  }
 }
 
 function codexRunRoot(requestId) {
