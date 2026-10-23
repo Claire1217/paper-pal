@@ -12,6 +12,12 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 - FAQ entry (both READMEs) and a line in `llms.txt` saying that Paper Pal is not
   Paperpal or one of the other "PaperPal" repositories, and how to find this one.
 
+### Added
+
+- Previous and next comment buttons stay above the comment list, follow the
+  manuscript's order and highlight the matching passage and card. Navigation
+  wraps at either end and continues after a comment is resolved.
+
 ### Fixed
 
 - Clicking a paragraph with a proposal hid its red/green: the paragraph
