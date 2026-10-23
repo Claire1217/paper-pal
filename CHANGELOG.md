@@ -14,6 +14,10 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- Completed Find linked searches now show "Linked locations found" and a
+  "Mark resolved" button. Closing a search keeps its history and does not
+  change the manuscript or the status of its linked comments.
+
 - Clicking a paragraph with a proposal hid its red/green: the paragraph
   switched to source editing and showed the old text until it lost focus, so
   the proposal looked gone. The red/green now stays until Accept (the paragraph

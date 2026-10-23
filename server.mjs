@@ -7240,6 +7240,23 @@ async function generateProposalFromDiscussion(body) {
   return agent ? { ...request, agentStatus: agent.status } : request;
 }
 
+async function resolveLinkedSearch(body) {
+  const { target, value: request } = await readRewriteRequest(body.id);
+  if (request.responseMode !== "link" || request.status !== "discussed" || !request.linkSearch) {
+    throw new HttpError(409, "Only a completed linked-location search can be marked resolved.");
+  }
+  if (codexQueue.includes(request.id) || ["queued", "running", "validating"].includes(codexRuns.get(request.id)?.status)) {
+    throw new HttpError(409, "Wait for the linked-location search to finish.");
+  }
+  // Closing a search is an author acknowledgement, not approval of its linked
+  // comments. Keep their states and the search history intact.
+  request.status = "resolved";
+  request.resolvedAt = new Date().toISOString();
+  await atomicWrite(target, `${JSON.stringify(request, null, 2)}\n`);
+  emit("request", { id: request.id, path: request.path, status: "resolved", reason: "linked-search-resolved" });
+  return request;
+}
+
 async function deleteRewriteRequest(body) {
   const { target, value: request } = await readRewriteRequest(body.id);
   if (!["pending", "proposed", "discussed"].includes(request.status)) {
@@ -9288,6 +9305,11 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/api/request/generate-proposal") {
       const body = await readJson(request);
       json(response, 202, await withProjectLock(() => generateProposalFromDiscussion(body)));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/request/resolve-link") {
+      const body = await readJson(request);
+      json(response, 200, await withProjectLock(() => resolveLinkedSearch(body)));
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/request/delete") {
