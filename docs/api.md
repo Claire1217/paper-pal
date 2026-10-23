@@ -147,6 +147,7 @@ A "request" is one comment with its conversation, proposal and history.
 | POST | `/api/request/generate-proposal` | Turn a finished discussion into a rewrite run. `202`. | `id`, `autoProcess` |
 | POST | `/api/request/accept` | Apply the proposal to the file and push an undo entry. **Writes source.** | `id` |
 | POST | `/api/request/reject` | Reject the proposal. | `id` |
+| POST | `/api/request/resolve-link` | Mark a completed Find linked search resolved and keep its history. State only; does not accept, reject or close linked comments. | `id`; requires a finished `link` search with status `discussed`. |
 | POST | `/api/request/delete` | Delete the comment; cancels a queued or running agent job. | `id` |
 | POST | `/api/request/review-unit` | Set the status of one unit of a grouped proposal. | `id`, `unitId`, `status` |
 | POST | `/api/request/edit-unit` | Hand-edit one unit of a grouped proposal. | `id`, `unitId`, `baseText`, `text` |
