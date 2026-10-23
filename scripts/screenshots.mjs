@@ -62,7 +62,7 @@ function readArguments(argv) {
     else if (flag === "--no-optimize") options.optimize = false;
     else if (flag === "--keep") options.keep = true;
     else if (flag === "--help" || flag === "-h") {
-      console.log("Usage: npm run screenshots [-- --out <dir>] [--only hero,diff,comment,review,chat,backends,structure,social] [--theme light|dark|both] [--no-compile] [--no-optimize] [--keep]");
+      console.log("Usage: npm run screenshots [-- --out <dir>] [--only hero,navigation,navigation-narrow,diff,comment,review,chat,backends,structure,social] [--theme light|dark|both] [--no-compile] [--no-optimize] [--keep]");
       process.exit(0);
     } else throw new Error(`Unknown option ${flag}`);
   }
@@ -458,8 +458,8 @@ async function gapBelow(page, y) {
     .filter((box) => box.height > 0)
     .map((box) => box.bottom + gap), GAP);
   const found = gaps.find((edge) => edge >= y);
-  if (found === undefined) throw new Error("The manuscript ends above the bottom of the close-up.");
-  return found;
+  // Below the final block the remaining area is blank, so it is also safe to crop.
+  return found ?? y;
 }
 
 async function boxOf(page, selector) {
@@ -562,7 +562,87 @@ async function frame(browser, png, { width, height }, theme) {
 const CLOSE_UP = { width: 1044, height: 1000 };
 const WIDE_CARDS = { comments: 384 }; // dragged wider than the default, so a card holds a whole diff
 
+function commentNavigationScene(width) {
+  return {
+    themes: ["light", "dark"],
+    viewport: { width: 1240, height: 1000 },
+    async run({ open, fixtures, save }) {
+      const requests = structuredClone(fixtures.hero);
+      const overlap = { ...structuredClone(requests[0]), id: "req-overlap", createdAt: "2031-03-04T09:31:00Z", status: "pending", proposal: null, comment: "Check this same passage for consistency.", conversation: [] };
+      requests.push(overlap);
+      const linked = requests.find((request) => request.status === "discussed");
+      linked.responseMode = "link";
+      linked.discussion = null;
+      linked.linkSearch = { summary: "All related locations have been checked.", located: [] };
+      const { page, problems } = await open({ requests }, { panes: { comments: width } });
+      const next = page.getByRole("button", { name: "Next comment ↓", exact: true });
+      const previous = page.getByRole("button", { name: "Previous comment ↑", exact: true });
+      const position = page.locator("#comment-position");
+      const checkPosition = async (expected) => {
+        await page.waitForFunction((value) => document.querySelector("#comment-position")?.textContent === value
+          && !document.querySelector("#next-comment").disabled, expected);
+        if (expected.startsWith("–")) return;
+        const visible = await page.locator(".request-card.review-link-active").first().evaluate((card) => {
+          const rect = card.getBoundingClientRect();
+          const viewport = document.querySelector("#request-list").getBoundingClientRect();
+          return !card.hidden && rect.top >= viewport.top - 1 && rect.top < viewport.bottom;
+        });
+        if (!visible) problems.push(`comment header is outside its pane at ${expected}`);
+      };
+      await next.click();
+      await checkPosition("1 / 4");
+      await next.click();
+      await checkPosition("2 / 4");
+      await previous.click();
+      await checkPosition("1 / 4");
+      await previous.click();
+      await checkPosition("4 / 4");
+      await next.click();
+      await checkPosition("1 / 4");
+      await settle(page, 1000);
+      if (!(await page.locator("#editor .review-link-active").count())) problems.push("the manuscript passage was not highlighted");
+      if (!(await page.locator("#request-list .request-card.review-link-active").count())) problems.push("the comment card was not highlighted");
+      const navigation = page.locator("#comment-navigation");
+      const overflow = await navigation.evaluate((element) => element.scrollWidth - element.clientWidth);
+      if (overflow > 1) problems.push(`navigation overflows by ${overflow} px`);
+      const before = await navigation.boundingBox();
+      await page.locator("#request-list").evaluate((element) => { element.scrollTop += 100; });
+      const after = await navigation.boundingBox();
+      if (Math.abs(before.y - after.y) > 1) problems.push("navigation moved with the comment list");
+      await page.locator("#request-list").evaluate((element) => { element.scrollTop = 0; });
+      await save(page, width <= 260 ? "navigation-narrow" : "navigation", { clip: await unionClip(page, [".comments-pane"], 0) });
+      await page.route("**/api/request/accept", (route) => {
+        const request = requests.find((item) => item.id === route.request().postDataJSON().id);
+        request.status = "resolved";
+        return route.fulfill({ json: request });
+      });
+      await page.locator(`.request-card[data-request-id="${requests[0].id}"]`).getByRole("button", { name: "Accept", exact: true }).click();
+      await checkPosition("– / 3");
+      await next.click();
+      await checkPosition("1 / 3");
+      const selected = await page.locator(".request-card.review-link-active").getAttribute("data-request-id");
+      if (selected !== overlap.id) problems.push("Next skipped the successor after Accept");
+      await page.route("**/api/request/delete", (route) => {
+        if (route.request().postDataJSON().id !== overlap.id) problems.push("deleted the wrong comment");
+        overlap.status = "deleted";
+        return route.fulfill({ json: overlap });
+      });
+      await page.locator(`.request-card[data-request-id="${overlap.id}"]`)
+        .getByRole("button", { name: "Delete comment and cancel its agent run", exact: true }).click();
+      await checkPosition("– / 2");
+      await next.click();
+      await checkPosition("1 / 2");
+      const successor = await page.locator(".request-card.review-link-active").getAttribute("data-request-id");
+      if (successor !== requests[1].id) problems.push("Next skipped the successor after Delete");
+      if (!(await position.isVisible())) problems.push("the navigation counter disappeared");
+      return problems;
+    },
+  };
+}
+
 const scenes = {
+  navigation: commentNavigationScene(384),
+  "navigation-narrow": commentNavigationScene(260),
   hero: {
     themes: ["light", "dark"],
     async run({ open, fixtures, save }) {

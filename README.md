@@ -206,6 +206,8 @@ No default model ids ship with Paper Pal, because they go stale; take one from y
 
 ## Features
 
+- **Comment navigation.** Previous comment and Next comment stay above the comment list. They follow the open file's text order, highlight the passage and card together, and wrap at either end. Resolve a comment and continue with the next one.
+
 - **Prose view of real LaTeX.** Multi-file projects (`\input`, `\include`, `\subfile`, `\import`), sections, lists, theorems, footnotes, KaTeX math with your own macros, natbib and biblatex citations with a `.bib` preview, `\ref` numbers from the `.aux` file. Figures, tables, code listings and TikZ are shown as read-only blocks.
 - **Exact source mapping.** Each block maps to a character range in a `.tex` file. An accepted edit replaces that range and nothing else; CRLF line endings and a byte-order mark are kept as they are. Files must be UTF-8; anything else opens read-only.
 - **Direct editing** with autosave and undo. If the file also changed on disk (your editor, git, a co-author's sync), the two edits are merged, and you are asked when they overlap.
