@@ -5127,7 +5127,7 @@ function createRequestCard(request, { compact = false } = {}) {
     : request.status === "proposed"
       ? "Awaiting approval"
       : request.status === "discussed"
-        ? "Discuss before editing"
+        ? request.responseMode === "link" ? "Linked locations found" : "Discuss before editing"
       : request.agentStatus === "running"
         ? request.responseMode === "discuss"
           ? `${providerDisplayNameStart(request.provider)} is thinking…`
@@ -5272,7 +5272,36 @@ function createRequestCard(request, { compact = false } = {}) {
     }
     card.append(thread);
   }
-  if (!compact && request.status === "discussed" && request.discussion) {
+  if (!compact && request.status === "discussed" && request.responseMode === "link" && request.linkSearch) {
+    const note = document.createElement("p");
+    note.className = "request-links-summary";
+    note.textContent = "When you have reviewed the linked locations, mark this search resolved. Linked comments keep their own status.";
+    const explanation = document.createElement("section");
+    explanation.className = "request-links";
+    explanation.append(note);
+    const actions = document.createElement("div");
+    actions.className = "request-actions";
+    const resolve = document.createElement("button");
+    resolve.type = "button";
+    resolve.className = "button button-dark";
+    resolve.textContent = "Mark resolved";
+    resolve.title = "Close this search and keep its history without changing the manuscript or linked comments";
+    resolve.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      resolve.disabled = true;
+      try {
+        await api("/api/request/resolve-link", { method: "POST", body: JSON.stringify({ id: request.id }) });
+        await refreshRequests();
+        showToast("Linked search marked resolved. Linked comments keep their own status.", 4600);
+      } catch (error) {
+        showToast(error.message, 5000);
+      } finally {
+        resolve.disabled = false;
+      }
+    });
+    actions.append(resolve);
+    card.append(explanation, actions);
+  } else if (!compact && request.status === "discussed" && request.discussion) {
     const discussion = document.createElement("section");
     discussion.className = "request-discussion";
     const answer = document.createElement("p");

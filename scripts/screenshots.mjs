@@ -62,7 +62,7 @@ function readArguments(argv) {
     else if (flag === "--no-optimize") options.optimize = false;
     else if (flag === "--keep") options.keep = true;
     else if (flag === "--help" || flag === "-h") {
-      console.log("Usage: npm run screenshots [-- --out <dir>] [--only hero,diff,comment,review,chat,backends,structure,social] [--theme light|dark|both] [--no-compile] [--no-optimize] [--keep]");
+      console.log("Usage: npm run screenshots [-- --out <dir>] [--only hero,linked,diff,comment,review,chat,backends,structure,social] [--theme light|dark|both] [--no-compile] [--no-optimize] [--keep]");
       process.exit(0);
     } else throw new Error(`Unknown option ${flag}`);
   }
@@ -571,6 +571,36 @@ const scenes = {
       // Heading, confirmed and draft text, the inline diff and its card in one frame.
       await scrollEditorTo(page, ".editor-block.kind-heading", 84);
       await save(page, "hero");
+      return problems;
+    },
+  },
+  linked: {
+    themes: ["light", "dark"],
+    async run({ open, fixtures, save }) {
+      const search = {
+        ...fixtures.hero[0],
+        status: "discussed",
+        responseMode: "link",
+        proposal: null,
+        comment: "Find other places affected by this clarification.",
+        linkSearch: { summary: "The related locations have been checked.", located: [] },
+        conversation: [],
+      };
+      const { page, problems } = await open({ requests: [search] }, { panes: WIDE_CARDS });
+      const button = page.getByRole("button", { name: "Mark resolved", exact: true });
+      await button.waitFor({ state: "visible" });
+      const label = await page.locator(".request-card .request-status").textContent();
+      if (label !== "Linked locations found") problems.push(`wrong linked-search label: ${label}`);
+      await save(page, "linked", { clip: await unionClip(page, [".request-card"], 12) });
+      // Exercise the button without changing even the temporary manuscript.
+      await page.route("**/api/request/resolve-link", (route) => {
+        if (route.request().postDataJSON().id !== search.id) problems.push("resolved the wrong search");
+        search.status = "resolved";
+        return route.fulfill({ json: search });
+      });
+      await button.click();
+      await page.waitForSelector(".request-card", { state: "detached" });
+      if (!(await page.locator("#toast").textContent()).includes("marked resolved")) problems.push("missing resolution feedback");
       return problems;
     },
   },
