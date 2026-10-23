@@ -293,6 +293,11 @@
           </section>
 
           <section id="comments-view" class="comments-view" role="tabpanel" aria-labelledby="show-comments-pane">
+            <nav id="comment-navigation" class="comment-navigation" aria-label="Comment navigation">
+              <button id="previous-comment" class="button button-ghost button-small" type="button" disabled>Previous comment ↑</button>
+              <span id="comment-position" class="comment-position" role="status" aria-live="polite" aria-atomic="true">0 / 0</span>
+              <button id="next-comment" class="button button-ghost button-small" type="button" disabled>Next comment ↓</button>
+            </nav>
             <div id="agent-notice" class="agent-notice" role="status" hidden>
               <strong id="agent-notice-title"></strong>
               <span id="agent-notice-detail"></span>

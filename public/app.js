@@ -40,6 +40,9 @@ const dom = {
   compiledSourceStatus: document.querySelector("#compiled-source-status"),
   requestList: document.querySelector("#request-list"),
   requestCount: document.querySelector("#request-count"),
+  previousComment: document.querySelector("#previous-comment"),
+  nextComment: document.querySelector("#next-comment"),
+  commentPosition: document.querySelector("#comment-position"),
   commentsTrack: document.querySelector("#comments-track"),
   commentsView: document.querySelector("#comments-view"),
   showCommentsPane: document.querySelector("#show-comments-pane"),
@@ -171,6 +174,8 @@ const state = {
   activeOutline: null,
   sectionReviewBusy: false,
   focusedReviewRequestId: null,
+  commentNavigation: null,
+  commentNavigationBusy: false,
   savePromise: null,
   renderPending: false,
   suppressRender: false,
@@ -1337,6 +1342,114 @@ function currentReviewNumberMap() {
   return new Map(currentReviewRequests().map((request, index) => [request.id, index + 1]));
 }
 
+function reviewNavigationBlockIndex(request) {
+  const anchor = linkedChangeForCurrentDocument(request);
+  return anchor?.resolvedBlockIndex ?? anchor?.blockIndex ?? resolvedRequestBlockIndex(request);
+}
+
+function commentNavigationRequests() {
+  return currentReviewRequests().filter((request) => {
+    const index = reviewNavigationBlockIndex(request);
+    return Number.isInteger(index) && index >= 0;
+  });
+}
+
+function rememberCommentNavigation(requestId) {
+  const requests = commentNavigationRequests();
+  if (!requests.some((request) => request.id === requestId)) return;
+  // Keep the order as well as the id: Accept can remove the current comment
+  // and change every later offset before the author clicks Next.
+  state.commentNavigation = { path: state.document.path, id: requestId, order: requests.map((request) => request.id) };
+}
+
+function updateCommentNavigation() {
+  if (!dom.previousComment || !dom.nextComment || !dom.commentPosition) return;
+  const requests = commentNavigationRequests();
+  const index = requests.findIndex((request) => request.id === state.focusedReviewRequestId);
+  const disabled = !requests.length || state.commentNavigationBusy;
+  dom.previousComment.disabled = disabled;
+  dom.nextComment.disabled = disabled;
+  const scope = requests.length ? "Unresolved comments in this file" : "No unresolved comments with a current passage in this file";
+  dom.previousComment.title = scope;
+  dom.nextComment.title = scope;
+  dom.commentPosition.textContent = `${index >= 0 ? index + 1 : requests.length ? "–" : 0} / ${requests.length}`;
+  dom.commentPosition.setAttribute("aria-label", index >= 0
+    ? `Comment ${index + 1} of ${requests.length}` : `${requests.length} navigable unresolved comments in this file`);
+}
+
+function commentReadingBlockIndex() {
+  const viewport = dom.editorPane.getBoundingClientRect();
+  const visible = [...dom.editor.querySelectorAll(".editor-block[data-block-index]")].find((block) => {
+    const rect = block.getBoundingClientRect();
+    return rect.bottom > viewport.top && rect.top < viewport.bottom;
+  });
+  return visible ? Number(visible.dataset.blockIndex) : 0;
+}
+
+function commentNavigationTarget(requests, direction, readingBlockIndex) {
+  if (!requests.length) return null;
+  const step = direction < 0 ? -1 : 1;
+  const current = requests.findIndex((request) => request.id === state.focusedReviewRequestId);
+  if (current >= 0) {
+    const next = current + step;
+    return { request: requests[(next + requests.length) % requests.length], wrapped: next < 0 || next >= requests.length };
+  }
+  const cursor = state.commentNavigation;
+  if (cursor?.path === state.document?.path) {
+    const previous = cursor.order.indexOf(cursor.id);
+    const remaining = new Map(requests.map((request) => [request.id, request]));
+    for (let distance = 1; previous >= 0 && distance < cursor.order.length; distance += 1) {
+      const next = previous + step * distance;
+      const request = remaining.get(cursor.order[(next + cursor.order.length) % cursor.order.length]);
+      if (request) return { request, wrapped: next < 0 || next >= cursor.order.length };
+    }
+  }
+  const candidates = step > 0 ? requests : [...requests].reverse();
+  const request = candidates.find((item) => step > 0
+    ? reviewNavigationBlockIndex(item) >= readingBlockIndex
+    : reviewNavigationBlockIndex(item) <= readingBlockIndex);
+  return { request: request || candidates[0], wrapped: !request };
+}
+
+async function navigateReviewComment(direction) {
+  if (state.commentNavigationBusy || !state.document?.path) return false;
+  const documentPath = state.document.path;
+  state.commentNavigationBusy = true;
+  updateCommentNavigation();
+  try {
+    if (!(await settlePendingEdits())) {
+      showToast("Save your edit before navigating comments.", 4200);
+      return false;
+    }
+    if (state.document?.path !== documentPath) return false;
+    await setWorkspaceMode("text");
+    if (state.document?.path !== documentPath) return false;
+    flushPendingRender();
+    const requests = commentNavigationRequests();
+    const target = commentNavigationTarget(requests, direction, commentReadingBlockIndex());
+    if (!target) return false;
+    closeCodexChat();
+    focusReviewLink(target.request.id, { scrollText: true, behavior: "auto" });
+    // Cards outside the manuscript viewport are hidden. Move the text first,
+    // then let their layout catch up before scrolling the chosen card.
+    positionCommentCards();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    if (state.document?.path !== documentPath || state.focusedReviewRequestId !== target.request.id) return false;
+    dom.requestList.querySelector(`.request-card[data-request-id="${CSS.escape(String(target.request.id))}"]`)
+      ?.scrollIntoView({ behavior: "auto", block: "start" });
+    if (target.wrapped && requests.length > 1) {
+      showToast(direction < 0 ? "Back to the last comment." : "Back to the first comment.", 3200);
+    }
+    return true;
+  } catch (error) {
+    showToast(error.message, 5000);
+    return false;
+  } finally {
+    state.commentNavigationBusy = false;
+    updateCommentNavigation();
+  }
+}
+
 function reviewElementsForRequest(requestId) {
   return [...document.querySelectorAll("[data-request-id], [data-review-request-id], [data-review-request-ids]")]
     .filter((element) =>
@@ -1357,18 +1470,24 @@ function restoreFocusedReviewLink() {
   paintReviewLinks(state.focusedReviewRequestId ? [state.focusedReviewRequestId] : []);
 }
 
-function focusReviewLink(requestId, { scrollCard = false, scrollText = false } = {}) {
+function focusReviewLink(requestId, { scrollCard = false, scrollText = false, behavior = "smooth" } = {}) {
   state.focusedReviewRequestId = requestId;
+  rememberCommentNavigation(requestId);
+  updateCommentNavigation();
   paintReviewLinks([requestId]);
   const selectorValue = CSS.escape(String(requestId));
   if (scrollCard) {
     dom.requestList.querySelector(`.request-card[data-request-id="${selectorValue}"]`)
-      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+      ?.scrollIntoView({ behavior, block: "center" });
   }
   if (scrollText) {
     const target = dom.editor.querySelector(`[data-review-request-id="${selectorValue}"]`)
       || dom.editor.querySelector(`[data-review-request-ids~="${selectorValue}"]`);
-    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (target) target.scrollIntoView({ behavior, block: "center" });
+    else {
+      const request = state.requests.find((item) => item.id === requestId);
+      if (request) scrollToBlock(reviewNavigationBlockIndex(request), { smooth: behavior === "smooth" });
+    }
   }
 }
 
@@ -1438,6 +1557,7 @@ function decorateReviewCards(numberMap) {
     state.focusedReviewRequestId = null;
   }
   restoreFocusedReviewLink();
+  updateCommentNavigation();
 }
 
 function resolvedRequestEndBlockIndex(request) {
@@ -3300,6 +3420,8 @@ async function loadDocument(relativePath, { quiet = false, discardEditing = fals
     if (state.activeOutline?.path !== relativePath) state.activeOutline = null;
     if (previousPath !== relativePath) {
       // A different file: findings and scroll position belong to the old one.
+      state.commentNavigation = null;
+      state.focusedReviewRequestId = null;
       dom.editorPane.scrollTop = 0;
       if (dom.reviewPanel) dom.reviewPanel.hidden = true;
       state.review = null;
@@ -7513,6 +7635,8 @@ dom.submitComment.addEventListener("click", () => submitComment());
 dom.findLinked.addEventListener("click", () => submitComment({ responseMode: "link" }));
 dom.openCodexChat.addEventListener("click", openCodexChat);
 dom.showCommentsPane.addEventListener("click", closeCodexChat);
+dom.previousComment.addEventListener("click", () => navigateReviewComment(-1));
+dom.nextComment.addEventListener("click", () => navigateReviewComment(1));
 dom.closeCodexChat.addEventListener("click", closeCodexChat);
 dom.reviewPaneResizer.addEventListener("pointerdown", beginSidePaneResize);
 window.addEventListener("pointermove", moveSidePaneResize);
