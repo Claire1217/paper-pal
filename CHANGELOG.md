@@ -14,6 +14,10 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
 
 ### Fixed
 
+- Chat renders Markdown tables and links with nested parentheses, including
+  clickable manuscript references. Source references are checked against the
+  current project's document list before opening and highlighting the passage;
+  wide tables scroll inside the chat pane. Existing chat text is preserved.
 - Clicking a paragraph with a proposal hid its red/green: the paragraph
   switched to source editing and showed the old text until it lost focus, so
   the proposal looked gone. The red/green now stays until Accept (the paragraph

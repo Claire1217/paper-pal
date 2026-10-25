@@ -3145,6 +3145,35 @@ async function semanticBlock(block, relativePath, macros, references) {
   return null;
 }
 
+async function resolveChatSourceReference(body) {
+  if (typeof body?.target !== "string" || body.target.length > 8192 || /[\u0000-\u001f\u007f]/.test(body.target)) {
+    throw new HttpError(400, "Use a manuscript file with an optional line number.");
+  }
+  const match = body.target.trim().match(/^(.*\.(?:tex|md))(?::([1-9]\d*)(?::[1-9]\d*)?(?:-\d+)?|#L([1-9]\d*)(?:-L?\d+)?)?$/i);
+  if (!match) throw new HttpError(400, "Use a manuscript file with an optional line number.");
+  let supplied;
+  try { supplied = decodeURIComponent(match[1]); }
+  catch { throw new HttpError(400, "This source reference has invalid path encoding."); }
+  if (/[\u0000-\u001f\u007f]/.test(supplied) || (/^[a-z][a-z\d+.-]*:/i.test(supplied) && !path.isAbsolute(supplied))) {
+    throw new HttpError(400, "Only project manuscript references can be opened here.");
+  }
+  const candidates = [...new Set([path.resolve(repoRoot, supplied), path.resolve(sourceRoot, supplied)])];
+  if (!candidates.some((candidate) => insideSourceRoot(candidate))) {
+    throw new HttpError(403, "This source reference is outside the current manuscript.");
+  }
+  const documents = await listDocuments();
+  const matches = documents.filter((document) => candidates.includes(path.resolve(repoRoot, document.path)));
+  if (matches.length > 1) throw new HttpError(409, "This source reference is ambiguous. Use the full project-relative path.");
+  if (!matches.length) throw new HttpError(404, "This source reference is not an available manuscript file.");
+  const document = matches[0];
+  const source = await fs.readFile(resolveDocument(document.path), "utf8");
+  const line = Number(match[2] || match[3] || 1);
+  if (!Number.isSafeInteger(line) || line > source.split("\n").length) {
+    throw new HttpError(422, "This source line no longer exists. Check the current document.");
+  }
+  return { path: document.path, line };
+}
+
 async function listDocuments() {
   const results = [];
   const hiddenDocuments = new Set(config.ui?.hiddenDocuments || []);
@@ -9302,6 +9331,10 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && url.pathname === "/api/chat") {
       // Reading a chat may normalise and rewrite it, so it takes the lock too.
       json(response, 200, await withProjectLock(() => readChatSession({ id: url.searchParams.get("id") || null })));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/chat/resolve-source") {
+      json(response, 200, await resolveChatSourceReference(await readJson(request)));
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/chats") {

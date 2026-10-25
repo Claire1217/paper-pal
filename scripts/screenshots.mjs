@@ -62,7 +62,7 @@ function readArguments(argv) {
     else if (flag === "--no-optimize") options.optimize = false;
     else if (flag === "--keep") options.keep = true;
     else if (flag === "--help" || flag === "-h") {
-      console.log("Usage: npm run screenshots [-- --out <dir>] [--only hero,diff,comment,review,chat,backends,structure,social] [--theme light|dark|both] [--no-compile] [--no-optimize] [--keep]");
+      console.log("Usage: npm run screenshots [-- --out <dir>] [--only hero,diff,comment,review,chat,chat-markdown,chat-markdown-narrow,backends,structure,social] [--theme light|dark|both] [--no-compile] [--no-optimize] [--keep]");
       process.exit(0);
     } else throw new Error(`Unknown option ${flag}`);
   }
@@ -562,7 +562,53 @@ async function frame(browser, png, { width, height }, theme) {
 const CLOSE_UP = { width: 1044, height: 1000 };
 const WIDE_CARDS = { comments: 384 }; // dragged wider than the default, so a card holds a whole diff
 
+function chatMarkdownScene(width) {
+  return {
+    themes: ["light", "dark"],
+    async run({ open, fixtures, save, sampleRoot }) {
+      const source = await fs.readFile(path.join(sampleRoot, INTRO), "utf8");
+      const line = source.slice(0, source.indexOf(TEXT.weaker)).split("\n").length;
+      const chat = structuredClone(fixtures.chat);
+      chat.messages[0].content = "请用表格整理示例论文引言，并给出正文定位链接。";
+      chat.messages[1].content = [
+        "## 示例论文引言",
+        "",
+        `[打开引言段落](<${path.join(sampleRoot, INTRO)}:${line}>)，或查看[示例网页](https://example.org/paper_(sample))。`,
+        "",
+        "| 项目 | 示例内容 | 引用 |",
+        "| :--- | :--- | ---: |",
+        `| 论证 | **${TEXT.weaker}** | [引言](${INTRO}#L${line}) |`,
+        "| 研究设计 | 光照与噪声的对照 | `light\\|noise` |",
+        "",
+        "表格中的引用也可以在论文内定位。",
+      ].join("\n");
+      const { page, problems } = await open({ chat, chats: fixtures.chats }, { panes: { comments: width, chat: width } });
+      await page.route("**/api/chat/resolve-source", (route) => route.continue());
+      await page.click("#open-codex-chat");
+      await page.waitForSelector(".chat-message-assistant table");
+      if (await page.locator(".chat-message-assistant th").count() !== 3) problems.push("table headers are missing");
+      if (await page.locator(".chat-message-assistant td").count() !== 6) problems.push("table cells are missing");
+      if (await page.locator(".chat-message-assistant a").getAttribute("href") !== "https://example.org/paper_(sample)") problems.push("parenthesised web link was damaged");
+      await page.getByRole("button", { name: "打开引言段落", exact: true }).click();
+      await page.waitForSelector(".editor-block.outline-target");
+      const target = await page.locator(".editor-block.outline-target").textContent();
+      if (!target.includes(TEXT.weaker)) problems.push("source link opened the wrong paragraph");
+      if (await page.inputValue("#document-select") !== INTRO) problems.push("source link did not use the canonical path");
+      await page.waitForFunction(() => !document.querySelector(".chat-source-link")?.disabled);
+      const sizing = await page.locator(".chat-table-scroll").evaluate((element) => ({
+        width: element.clientWidth, content: element.scrollWidth,
+        fits: element.getBoundingClientRect().right <= element.closest(".chat-message-content").getBoundingClientRect().right + 1,
+      }));
+      if (!sizing.fits || (width <= 280 && sizing.content <= sizing.width)) problems.push("wide table does not scroll within the narrow chat pane");
+      await save(page, width <= 280 ? "chat-markdown-narrow" : "chat-markdown", { clip: await unionClip(page, [".comments-pane"], 0) });
+      return problems;
+    },
+  };
+}
+
 const scenes = {
+  "chat-markdown": chatMarkdownScene(420),
+  "chat-markdown-narrow": chatMarkdownScene(260),
   hero: {
     themes: ["light", "dark"],
     async run({ open, fixtures, save }) {
@@ -840,7 +886,7 @@ async function main() {
             written.push(target);
           };
           try {
-            const problems = await scene.run({ open: (seeds, extra) => openApp(context, paperPal.base, theme, seeds, extra), fixtures, save });
+            const problems = await scene.run({ open: (seeds, extra) => openApp(context, paperPal.base, theme, seeds, extra), fixtures, save, sampleRoot: path.join(paperPal.workspace, "sample-paper") });
             for (const problem of problems || []) failures.push(`[${theme}] ${name}: ${problem}`);
           } catch (error) {
             failures.push(`[${theme}] ${name}: ${error.message}`);

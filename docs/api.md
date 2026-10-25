@@ -178,6 +178,7 @@ A "request" is one comment with its conversation, proposal and history.
 |---|---|---|---|
 | GET | `/api/chat?id=` | The current chat session, or the one with `id`. | |
 | GET | `/api/chats` | Session summaries. | |
+| POST | `/api/chat/resolve-source` | Resolve a `.tex`/`.md` reference to `{path, line}`. Read-only; accepts project-relative, source-relative or in-project absolute paths with `:line[:column]` or `#Lline`. Rejects outside, hidden, missing or ambiguous files and out-of-range lines. | `target` |
 | POST | `/api/chat/message` | Append a user message and queue a turn. `202`. | `message`, `sessionId`, `provider`, `activePath`, `selectionContext`, `structureContext`, `newSessionIfBusy`, `newSessionForNewSelection`, `autoProcess` |
 | POST | `/api/chat/new` | Archive the current chat and start a new one. `201`. | none |
 | POST | `/api/chat/select` | Make an archived chat current. | `id` |

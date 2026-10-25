@@ -6218,45 +6218,187 @@ async function refreshRequests() {
   if (state.chat && !dom.codexChat.hidden) renderChatSession({ scroll: false });
 }
 
-function appendInlineMarkdown(container, text) {
-  const source = String(text || "");
-  const pattern = /(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]\n]+\]\(https?:\/\/[^)\s]+\))/g;
-  let cursor = 0;
-  for (const match of source.matchAll(pattern)) {
-    if (match.index > cursor) container.append(document.createTextNode(source.slice(cursor, match.index)));
-    const token = match[0];
-    if (token.startsWith("**")) {
-      const strong = document.createElement("strong");
-      strong.textContent = token.slice(2, -2);
-      container.append(strong);
-    } else if (token.startsWith("`")) {
-      const code = document.createElement("code");
-      code.textContent = token.slice(1, -1);
-      container.append(code);
-    } else {
-      const link = token.match(/^\[([^\]]+)\]\((https?:\/\/[^)]+)\)$/);
-      const anchor = document.createElement("a");
-      anchor.textContent = link?.[1] || token;
-      const href = safeHttpUrl(link?.[2]);
-      if (!href) {
-        container.append(document.createTextNode(token));
-        cursor = match.index + token.length;
-        continue;
-      }
-      anchor.href = href;
-      anchor.target = "_blank";
-      anchor.rel = "noopener noreferrer";
-      container.append(anchor);
-    }
-    cursor = match.index + token.length;
+function chatMarkdownLink(source, start) {
+  let depth = 1;
+  let cursor = start + 1;
+  const limit = Math.min(source.length, start + 8192);
+  for (; cursor < limit; cursor += 1) {
+    if (source[cursor] === "\\") { cursor += 1; continue; }
+    if (source[cursor] === "[" && ++depth > 32) return null;
+    if (source[cursor] === "]" && --depth === 0) break;
   }
-  if (cursor < source.length) container.append(document.createTextNode(source.slice(cursor)));
+  if (depth) return null;
+  const label = source.slice(start + 1, cursor);
+  const gap = source.slice(cursor + 1).match(/^[ \t]*(?:\n[ \t]*)?\(/);
+  if (!gap) return null;
+  cursor += 1 + gap[0].length;
+  const targetStart = cursor;
+  depth = 0;
+  let angled = source[cursor] === "<";
+  let quote = null;
+  for (; cursor < limit; cursor += 1) {
+    const character = source[cursor];
+    if (character === "\\") { cursor += 1; continue; }
+    if (character === "\n") return null;
+    if (angled) { if (character === ">") angled = false; continue; }
+    if (quote) { if (character === quote) quote = null; continue; }
+    if ((character === "\"" || character === "'") && /\s/.test(source[cursor - 1])) { quote = character; continue; }
+    if (character === "(") depth += 1;
+    if (character === ")") {
+      if (!depth) {
+        let target = source.slice(targetStart, cursor).trim().replace(/\s+(?:"[^"]*"|'[^']*')\s*$/, "");
+        if (target.startsWith("<") && target.endsWith(">")) target = target.slice(1, -1);
+        target = target.replace(/\\([\\()[\]])/g, "$1");
+        return target ? { label, target, end: cursor + 1 } : null;
+      }
+      depth -= 1;
+    }
+  }
+  return null;
+}
+
+function isChatSourceReference(target) {
+  return !/[\u0000-\u001f\u007f]/.test(target)
+    && !(/^[a-z][a-z\d+.-]*:/i.test(target) && !/^[a-z]:[\\/]/i.test(target))
+    && /\.(?:tex|md)(?::[1-9]\d*(?::[1-9]\d*)?(?:-\d+)?|#L[1-9]\d*(?:-L?\d+)?)?$/i.test(target);
+}
+
+function chatSourceBlockIndex(payload, line) {
+  let offset = 0;
+  for (let current = 1; current < line; current += 1) {
+    const end = payload.source.indexOf("\n", offset);
+    if (end < 0) return null;
+    offset = end + 1;
+  }
+  const blocks = payload.blocks.filter((block) => !block.hidden && block.display?.trim());
+  return (blocks.find((block) => block.start <= offset && block.end > offset)
+    || blocks.find((block) => block.start >= offset) || blocks.at(-1))?.index ?? null;
+}
+
+async function openChatSourceReference(target, button) {
+  button.disabled = true;
+  try {
+    if (!(await settlePendingEdits())) {
+      showToast("Save your edit before opening the source reference.", 4200);
+      return false;
+    }
+    const reference = await api("/api/chat/resolve-source", { method: "POST", body: JSON.stringify({ target }) });
+    await setWorkspaceMode("text");
+    if (!(await loadDocument(reference.path)) || state.document?.path !== reference.path) return false;
+    const blockIndex = chatSourceBlockIndex(state.document, reference.line);
+    if (blockIndex === null) throw new Error("This source line changed. Check the current document.");
+    scrollToBlock(blockIndex);
+    showToast(`${sourceRelativePath(reference.path)} · line ${reference.line}`, 3200);
+    return true;
+  } catch (error) {
+    showToast(error.message, 5000);
+    return false;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function appendChatLink(container, label, target, depth) {
+  const href = safeHttpUrl(target);
+  if (!href && !isChatSourceReference(target)) return false;
+  const link = document.createElement(href ? "a" : "button");
+  appendInlineMarkdown(link, label, depth + 1, false);
+  if (href) {
+    link.href = href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+  } else {
+    link.type = "button";
+    link.className = "chat-source-link";
+    link.title = "Open this reference in the manuscript";
+    link.addEventListener("click", () => openChatSourceReference(target, link));
+  }
+  container.append(link);
+  return true;
+}
+
+function appendInlineMarkdown(container, text, depth = 0, allowLinks = true) {
+  const source = String(text || "");
+  if (depth > 8) { container.append(document.createTextNode(source)); return; }
+  const linksPossible = allowLinks && /\][ \t]*(?:\n[ \t]*)?\(/.test(source);
+  let plain = "";
+  const flush = () => { if (plain) container.append(document.createTextNode(plain)); plain = ""; };
+  for (let index = 0; index < source.length;) {
+    const rest = source.slice(index);
+    if (rest[0] === "\\" && /[\\`*{}\[\]()#+\-.!_|>]/.test(rest[1] || "")) {
+      plain += rest[1]; index += 2; continue;
+    }
+    if (rest.startsWith("\\\n") || (rest[0] === "\n" && plain.endsWith("  "))) {
+      if (rest[0] === "\n") plain = plain.slice(0, -2);
+      flush(); container.append(document.createElement("br")); index += rest[0] === "\\" ? 2 : 1; continue;
+    }
+    const ticks = rest.match(/^`+/)?.[0];
+    if (ticks) {
+      const end = source.indexOf(ticks, index + ticks.length);
+      if (end >= 0) {
+        flush();
+        const code = document.createElement("code");
+        code.textContent = source.slice(index + ticks.length, end).replace(/\n/g, " ");
+        container.append(code); index = end + ticks.length; continue;
+      }
+    }
+    const image = linksPossible && rest.startsWith("![") ? chatMarkdownLink(source, index + 1) : null;
+    if (image) { plain += source.slice(index, image.end); index = image.end; continue; }
+    const link = linksPossible && rest[0] === "[" ? chatMarkdownLink(source, index) : null;
+    if (link) {
+      flush();
+      if (!appendChatLink(container, link.label, link.target, depth)) plain += source.slice(index, link.end);
+      index = link.end; continue;
+    }
+    const automatic = allowLinks ? rest.match(/^<(https?:\/\/[^<>\s]+)>/) : null;
+    if (automatic) {
+      flush(); appendChatLink(container, automatic[1], automatic[1], depth); index += automatic[0].length; continue;
+    }
+    const marker = rest.startsWith("**") ? "**" : rest.startsWith("__") ? "__" : rest.startsWith("~~") ? "~~" : rest[0] === "*" ? "*" : null;
+    if (marker) {
+      let end = source.indexOf(marker, index + marker.length);
+      while (end >= 0 && source[end - 1] === "\\") end = source.indexOf(marker, end + marker.length);
+      if (end > index + marker.length && !/\n\s*\n/.test(source.slice(index, end))) {
+        flush();
+        const element = document.createElement(marker === "~~" ? "del" : marker.length === 2 ? "strong" : "em");
+        appendInlineMarkdown(element, source.slice(index + marker.length, end), depth + 1, allowLinks);
+        container.append(element); index = end + marker.length; continue;
+      }
+    }
+    plain += source[index++];
+  }
+  flush();
+}
+
+function chatTableCells(line) {
+  const text = line.trim();
+  const cells = [""];
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === "\\" && index + 1 < text.length) {
+      const next = text[++index];
+      cells[cells.length - 1] += next === "|" ? next : character + next;
+    } else if (character === "|") cells.push("");
+    else cells[cells.length - 1] += character;
+  }
+  if (text.startsWith("|")) cells.shift();
+  if (text.endsWith("|") && cells.at(-1) === "") cells.pop();
+  return cells.map((cell) => cell.trim());
+}
+
+function chatTableHeader(lines, index) {
+  if (!lines[index]?.includes("|") || !lines[index + 1]?.trim()) return null;
+  const headers = chatTableCells(lines[index]);
+  const separators = chatTableCells(lines[index + 1]);
+  if (!headers.length || headers.length > 64 || headers.length !== separators.length
+    || !separators.every((cell) => /^:?-+:?$/.test(cell))) return null;
+  return { headers, alignments: separators.map((cell) => cell.startsWith(":") ? cell.endsWith(":") ? "center" : "left" : cell.endsWith(":") ? "right" : null) };
 }
 
 function appendChatText(container, text) {
   const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
   let index = 0;
-  const isSpecial = (line) => !line.trim() || /^```/.test(line) || /^#{1,4}\s+/.test(line) || /^>\s?/.test(line) || /^\s*[-*]\s+/.test(line) || /^\s*\d+[.]\s+/.test(line);
+  const isSpecial = (at) => !lines[at].trim() || /^```/.test(lines[at]) || /^#{1,4}\s+/.test(lines[at]) || /^>\s?/.test(lines[at]) || /^\s*[-*]\s+/.test(lines[at]) || /^\s*\d+[.]\s+/.test(lines[at]) || chatTableHeader(lines, at);
   while (index < lines.length) {
     const line = lines[index];
     if (!line.trim()) {
@@ -6271,8 +6413,43 @@ function appendChatText(container, text) {
       if (index < lines.length) index += 1;
       const pre = document.createElement("pre");
       if (language) pre.dataset.language = language;
-      pre.textContent = codeLines.join("\n").trim();
+      pre.textContent = codeLines.join("\n");
       container.append(pre);
+      continue;
+    }
+    const header = chatTableHeader(lines, index);
+    if (header) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "chat-table-scroll";
+      wrapper.tabIndex = 0;
+      wrapper.setAttribute("role", "region");
+      wrapper.setAttribute("aria-label", "Chat table; scroll horizontally for more columns");
+      const table = document.createElement("table");
+      const head = document.createElement("thead");
+      const body = document.createElement("tbody");
+      const appendRow = (parent, cells, heading = false) => {
+        const row = document.createElement("tr");
+        for (const [column, value] of header.headers.entries()) {
+          const cell = document.createElement(heading ? "th" : "td");
+          if (heading) cell.scope = "col";
+          if (header.alignments[column]) cell.style.textAlign = header.alignments[column];
+          appendInlineMarkdown(cell, heading ? value : cells[column] || "");
+          row.append(cell);
+        }
+        parent.append(row);
+      };
+      appendRow(head, header.headers, true);
+      index += 2;
+      while (index < lines.length && lines[index].trim() && lines[index].includes("|") && !chatTableHeader(lines, index)) {
+        const cells = chatTableCells(lines[index]);
+        // Keep a malformed row visible as text rather than dropping extra cells.
+        if (cells.length > header.headers.length) break;
+        appendRow(body, cells);
+        index += 1;
+      }
+      table.append(head, body);
+      wrapper.append(table);
+      container.append(wrapper);
       continue;
     }
     const heading = line.match(/^(#{1,4})\s+(.+)$/);
@@ -6306,7 +6483,7 @@ function appendChatText(container, text) {
     }
     const paragraphLines = [line];
     index += 1;
-    while (index < lines.length && !isSpecial(lines[index])) paragraphLines.push(lines[index++]);
+    while (index < lines.length && !isSpecial(index)) paragraphLines.push(lines[index++]);
     const paragraph = document.createElement("p");
     appendInlineMarkdown(paragraph, paragraphLines.join("\n"));
     container.append(paragraph);

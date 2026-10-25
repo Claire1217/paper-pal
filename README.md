@@ -95,7 +95,7 @@ Paper Pal opens your LaTeX project in the browser and shows the source as readab
 </picture>
 </td>
 <td width="50%" valign="top">
-<p><b>4. Ask about the paper.</b> Chat answers questions about the project. A reply can become a proposal; chat itself never edits.</p>
+<p><b>4. Ask about the paper.</b> Chat answers questions about the project. Tables scroll horizontally, web links open in a new tab, and manuscript references jump to the cited passage. A reply can become a proposal; chat itself never edits.</p>
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/chat-dark.png">
   <img src="docs/images/chat-light.png" width="380" alt="Project chat answering a question about the paper.">

@@ -95,7 +95,7 @@ Paper Pal 在浏览器里打开你的 LaTeX 项目，把源码渲染成可读的
 </picture>
 </td>
 <td width="50%" valign="top">
-<p><b>4. 就论文提问。</b>聊天可以回答关于整个项目的问题。某条回复可以转成修改提议，但聊天本身从不改动文件。</p>
+<p><b>4. 就论文提问。</b>聊天可以回答关于整个项目的问题。表格可以左右滚动，网页链接会在新标签页打开，论文内的文件引用可以跳转到对应段落。某条回复可以转成修改提议，但聊天本身从不改动文件。</p>
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/chat-dark.png">
   <img src="docs/images/chat-light.png" width="380" alt="项目聊天正在回答一个关于论文的问题。">
